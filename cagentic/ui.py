@@ -1,4 +1,4 @@
-"""Terminal UI helpers — teal palette, blocky panels, no external deps."""
+"""Terminal UI helpers — copper dusk palette, clean panels, no external deps."""
 from __future__ import annotations
 
 import os
@@ -54,17 +54,34 @@ MAGENTA = "\033[35m"
 CYAN = "\033[36m"
 GRAY = "\033[90m"
 
-# Palette — calm, cohesive 256-color set (degrades gracefully if unsupported).
+# Palette — copper dusk set (degrades gracefully if unsupported).
 # Names are kept stable so the rest of the codebase doesn't need to change.
-TEAL        = "\033[38;5;73m"    # muted teal — primary accent
-TEAL_BRIGHT = "\033[38;5;80m"    # bright cyan — highlights, prompt, logo
-TEAL_DIM    = "\033[38;5;23m"    # dark teal — borders, rules
-SURFACE     = "\033[38;5;253m"   # near-white — body text
-MUTED       = "\033[38;5;246m"   # grey — secondary text
-SOFT        = "\033[38;5;240m"   # faint grey — timers, hints, rules
-WARN        = "\033[38;5;180m"   # warm sand — warnings
-ERR         = "\033[38;5;174m"   # dusty rose — errors
-OK          = "\033[38;5;108m"   # sage green — success marks
+COPPER       = "\033[38;5;172m"   # burnished copper — primary accent
+GOLD         = "\033[38;5;220m"   # warm gold — logo and prompt
+RUST         = "\033[38;5;94m"    # dark copper — borders and rules
+CYAN_GLOW    = "\033[38;5;87m"    # electric cyan — live/active accents
+PLUM         = "\033[38;5;139m"   # muted violet — inline code
+SURFACE      = "\033[38;5;254m"   # warm white — body text
+MUTED        = "\033[38;5;246m"   # grey — secondary text
+SOFT         = "\033[38;5;241m"   # faint grey — timers, hints, rules
+WARN         = "\033[38;5;214m"   # amber — warnings
+ERR          = "\033[38;5;203m"   # coral red — errors
+OK           = "\033[38;5;42m"    # mint green — success marks
+
+# Legacy amber names from the previous pass.
+AMBER        = COPPER
+AMBER_BRIGHT = GOLD
+AMBER_DIM    = RUST
+
+# Backward-compatible aliases (names kept stable)
+TEAL        = COPPER
+TEAL_BRIGHT = GOLD
+TEAL_DIM    = RUST
+
+PROMPT_MARK = "◆ "
+ASSISTANT_MARK = "✦ "
+THINK_MARK = "· "
+TOOL_MARK = "◇ "
 
 
 def _supports_color() -> bool:
@@ -148,9 +165,14 @@ def render_markdown(text: str) -> str:
 
     def _stash_block(m: re.Match) -> str:
         body = m.group(2)
+        lang = m.group(1)
         rendered_lines = []
+        label = " code" + (f" · {lang}" if lang else "") + " "
+        rule = "─" * max(0, 46 - len(label))
+        rendered_lines.append(color("  ╭─", RUST) + color(label, GOLD + BOLD) + color(rule, SOFT))
         for line in body.splitlines():
-            rendered_lines.append(color("  │ ", TEAL_DIM) + color(line, TEAL_BRIGHT))
+            rendered_lines.append(color("  │ ", RUST) + color(line, SURFACE))
+        rendered_lines.append(color("  ╰" + "─" * max(0, 48), RUST))
         rendered = "\n".join(rendered_lines)
         placeholders.append(rendered)
         return f"\x00BLOCK{len(placeholders) - 1}\x00"
@@ -158,7 +180,7 @@ def render_markdown(text: str) -> str:
     out = _MD_FENCE_RX.sub(_stash_block, text)
 
     def _stash_inline(m: re.Match) -> str:
-        rendered = color(m.group(1), TEAL_BRIGHT + BOLD)
+        rendered = color("`" + m.group(1) + "`", PLUM + BOLD)
         placeholders.append(rendered)
         return f"\x00INL{len(placeholders) - 1}\x00"
 
@@ -169,23 +191,26 @@ def render_markdown(text: str) -> str:
         level = len(m.group(1))
         body = m.group(2)
         if level == 1:
-            return color("━━ " + body + " ━━", TEAL_BRIGHT + BOLD)
+            return color("✦ " + body, GOLD + BOLD)
         if level == 2:
-            return color("●  " + body, TEAL + BOLD)
-        return color("·  " + body, TEAL_DIM + BOLD)
+            return color("◆ " + body, COPPER + BOLD)
+        return color("◇ " + body, RUST + BOLD)
 
     out = _MD_HEADER_RX.sub(_header, out)
 
     # Bullets.
-    out = _MD_BULLET_RX.sub(lambda m: m.group(1) + color("• ", TEAL), out)
+    out = _MD_BULLET_RX.sub(lambda m: m.group(1) + color("· ", COPPER), out)
 
-    # Step markers: '<step 2>' becomes a styled '▸ step 2', '<step 2/4>'
-    # becomes '▸ step 2 of 4'. Wrapped in newlines so they always read as
+    # Step markers: '<step 2>' becomes a styled step line, '<step 2/4>'
+    # becomes 'step 2/4'. Wrapped in newlines so they always read as
     # their own visible line even if the model puts them inline.
     def _step(m: "re.Match[str]") -> str:
         n, total = m.group(1), m.group(2)
-        label = f"▸ step {n} of {total}" if total else f"▸ step {n}"
-        return "\n" + color(label, TEAL_BRIGHT + BOLD) + "\n"
+        if total:
+            label = f"step {n}/{total}"
+        else:
+            label = f"step {n}"
+        return "\n" + color("  ◆ " + label, CYAN_GLOW + BOLD) + color(" ─" * 8, SOFT) + "\n"
     out = _MD_STEP_RX.sub(_step, out)
 
     # Bold and italic. (Order matters — bold first.)
@@ -195,7 +220,7 @@ def render_markdown(text: str) -> str:
 
     # Inline links: [text](url) → text (url, dimmed).
     out = _MD_LINK_RX.sub(
-        lambda m: color(m.group(1), TEAL_BRIGHT) + color(f" ({m.group(2)})", SOFT),
+        lambda m: color(m.group(1), CYAN_GLOW) + color(f" ({m.group(2)})", SOFT),
         out,
     )
 
@@ -215,9 +240,8 @@ class StreamMarkdown:
       • mode='elide' (e.g. <plan>): drop the contents — the engine
         renders the block as a panel later, showing both would duplicate.
       • mode='dim' (e.g. <think>): keep the contents but render dim
-        italic with a '◦' prefix so the model's internal reasoning is
-        visible LIVE, clearly distinguished from the final answer
-        (which uses '●'). Each thinking line gets its own visual line.
+        italic with a subtle prefix so the model's internal reasoning is
+        visible live, clearly distinguished from the final answer.
     """
 
     SUPPRESS_PAIRS = [
@@ -250,7 +274,7 @@ class StreamMarkdown:
         if not self.in_dim and line.strip():
             self.visible_emitted = True
         if self.in_dim:
-            # Dim block — italic gray, '◦' prefix for the first line of the
+            # Dim block — italic gray, with a prefix for the first line of the
             # block, indented continuation after.
             if self.mid_line:
                 prefix = ""
@@ -444,17 +468,17 @@ def _wrap_visible(text: str, width: int) -> list[str]:
 
 # ---------- panels / boxes ----------
 
-# Box characters
+# Box characters — calm rounded default, sturdier options for emphasis.
 _BX = {
-    "single":  ("┌", "┐", "└", "┘", "─", "│"),
+    "single":  ("╭", "╮", "╰", "╯", "─", "│"),
     "double":  ("╔", "╗", "╚", "╝", "═", "║"),
     "round":   ("╭", "╮", "╰", "╯", "─", "│"),
     "thick":   ("┏", "┓", "┗", "┛", "━", "┃"),
 }
 
 
-def panel(body: str | list[str], title: str = "", style: str = "round",
-          color_c: str = TEAL_DIM, title_c: str = TEAL_BRIGHT,
+def panel(body: str | list[str], title: str = "", style: str = "single",
+          color_c: str = RUST, title_c: str = GOLD,
           inner_pad: int = 1, markdown: bool = False) -> None:
     """Print a bordered panel containing wrapped body text.
 
@@ -499,39 +523,31 @@ def panel(body: str | list[str], title: str = "", style: str = "round",
     print(bottom)
 
 
-def hr(char: str = "─", c: str = TEAL_DIM) -> None:
+def hr(char: str = "─", c: str = RUST) -> None:
     print(color(char * width(), c))
 
 
 # ---------- spinner ----------
 
-# Default: a little axolotl swimming back and forth — appears on the line the
-# agent is currently working on (thinking / running a shell command / etc.).
-# The braille frames are kept as a fallback for terminals without good unicode
-# support (NO_COLOR or CAGENTIC_SPINNER=braille).
-_AXOLOTL_FRAMES = (
-    "~(◕‿◕)~",
-    "~(◕‿◕)~~",
-    "~~(◕‿◕)~~",
-    "~~~(◕‿◕)~",
-    "~~(◕‿◕)~~",
-    "~(◕‿◕)~",
-    "(◕‿◕)~",
-    "~(◕‿◕)~",
-    "~~(◕‿◕)~~",
-    "~~~(◕‿◕)~~~",
-    "~~(◕‿◕)~~",
-    "~(◕‿◕)~",
+# Default: an orbital status mark that feels quieter than a novelty spinner.
+# Braille frames remain available with CAGENTIC_SPINNER=braille.
+_ORBIT_FRAMES = (
+    "◐",
+    "◓",
+    "◑",
+    "◒",
+    "◉",
+    "◌",
 )
 
 _BRAILLE_FRAMES = ("⠋", "⠙", "⠹", "⠸", "⠼", "⠴", "⠦", "⠧", "⠇", "⠏")
 
 
 def _default_frames() -> tuple[str, ...]:
-    style = os.environ.get("CAGENTIC_SPINNER", "axolotl").lower()
+    style = os.environ.get("CAGENTIC_SPINNER", "orbit").lower()
     if style == "braille":
         return _BRAILLE_FRAMES
-    return _AXOLOTL_FRAMES
+    return _ORBIT_FRAMES
 
 
 _SPIN_FRAMES = _default_frames()
@@ -566,7 +582,7 @@ class Spinner:
     def __init__(
         self,
         label: str = "thinking",
-        color_c: str = TEAL_BRIGHT,
+        color_c: str = CYAN_GLOW,
         escalations: list[tuple[float, str]] | None = None,
     ) -> None:
         """`escalations` is an optional list of (after_seconds, label) pairs
@@ -717,7 +733,7 @@ class SilenceWatchdog:
             # fresh row even if stdout was mid-line.
             sys.stderr.write(
                 "\n"
-                + color(f"  ◦ {self.label} — {silent:0.0f}s since last token…", MUTED + ITALIC)
+                + color(f"  {THINK_MARK}{self.label} — {silent:0.0f}s since last token…", MUTED + ITALIC)
                 + "\n"
             )
             sys.stderr.flush()
@@ -726,9 +742,8 @@ class SilenceWatchdog:
 
 
 # ---------- log helpers ----------
-
 def info(msg: str) -> None:
-    print(color("  ℹ ", TEAL) + color(msg, SURFACE))
+    print(color("  ◆ ", COPPER) + color(msg, SURFACE))
 
 
 def warn(msg: str) -> None:
@@ -746,7 +761,7 @@ def assistant(msg: str) -> None:
     rendered = render_markdown(msg)
     lines = _wrap_visible(rendered, max(20, width() - 4))
     for i, line in enumerate(lines or [""]):
-        prefix = color("  ● ", TEAL_BRIGHT) if i == 0 else "    "
+        prefix = color("  " + ASSISTANT_MARK, GOLD) if i == 0 else "    "
         print(prefix + line)
 
 
@@ -754,7 +769,7 @@ def thinking(msg: str) -> None:
     """Print <think>…</think> content as faint italic indented text — no box."""
     lines = _wrap_visible(msg, max(20, width() - 4))
     for i, line in enumerate(lines or [""]):
-        prefix = color("  ◦ ", SOFT) if i == 0 else "    "
+        prefix = color("  " + THINK_MARK, SOFT) if i == 0 else "    "
         print(prefix + color(line, SOFT + ITALIC))
 
 
@@ -764,12 +779,12 @@ def plan(items: list[str]) -> None:
         return
     body = []
     for i, step in enumerate(items, 1):
-        body.append(color(f"  {i:>2}.", TEAL) + " " + color(step, SURFACE))
-    panel(body, title="plan", style="thick", color_c=TEAL, title_c=TEAL_BRIGHT)
+        body.append(color(f"  {i:>2}.", CYAN_GLOW) + " " + color(step, SURFACE))
+    panel(body, title="plan", style="single", color_c=RUST, title_c=GOLD)
 
 
 def tool_call(name: str, summary: str) -> None:
-    head = color("  ▸ ", TEAL_BRIGHT) + color(name, TEAL_BRIGHT)
+    head = color("  " + TOOL_MARK, CYAN_GLOW) + color(name, CYAN_GLOW)
     if summary:
         head += color(f"  {summary}", MUTED)
     print(head)
@@ -782,112 +797,58 @@ def tool_result(summary: str, ok: bool = True) -> None:
 
 # ---------- banner ----------
 
-# Block-letter rendering of "CAGENTIC". 5 rows, ~8 cols per glyph.
-_GLYPHS = {
-    "C": [
-        " ████ ",
-        "██  ██",
-        "██    ",
-        "██  ██",
-        " ████ ",
-    ],
-    "A": [
-        " ████ ",
-        "██  ██",
-        "██████",
-        "██  ██",
-        "██  ██",
-    ],
-    "G": [
-        " ████ ",
-        "██    ",
-        "██ ███",
-        "██  ██",
-        " ████ ",
-    ],
-    "E": [
-        "██████",
-        "██    ",
-        "█████ ",
-        "██    ",
-        "██████",
-    ],
-    "N": [
-        "██   ██",
-        "███  ██",
-        "██ █ ██",
-        "██  ███",
-        "██   ██",
-    ],
-    "T": [
-        "██████",
-        "  ██  ",
-        "  ██  ",
-        "  ██  ",
-        "  ██  ",
-    ],
-    "I": [
-        "██████",
-        "  ██  ",
-        "  ██  ",
-        "  ██  ",
-        "██████",
-    ],
-    " ": [
-        "  ",
-        "  ",
-        "  ",
-        "  ",
-        "  ",
-    ],
-}
+_WORDMARK = [
+    "╔═╗ ╔═╗ ╔═╗ ╔═╗ ╔╗╔ ╔╦╗ ╦ ╔═╗",
+    "║   ╠═╣ ║ ╦ ║╣  ║║║  ║  ║ ║  ",
+    "╚═╝ ╩ ╩ ╚═╝ ╚═╝ ╝╚╝  ╩  ╩ ╚═╝",
+]
 
 
-def _render_logo(text: str = "CAGENTIC") -> list[str]:
-    rows = ["", "", "", "", ""]
-    for ch in text.upper():
-        glyph = _GLYPHS.get(ch, _GLYPHS[" "])
-        for i, line in enumerate(glyph):
-            rows[i] += line + "  "
-    return [r.rstrip() for r in rows]
+def _render_logo(max_width: int) -> list[str]:
+    """Return a wordmark that fits within max_width visible columns."""
+    if max_width >= max(len(r) for r in _WORDMARK):
+        return _WORDMARK
+    if max_width >= 18:
+        return ["C A G E N T I C"]
+    return ["CAGENTIC"]
 
 
 def banner(model: str, cwd: str, tools_enabled: bool = True) -> None:
     clear_screen()
     w = width()
-    tl, tr, bl, br, h, v = _BX["double"]
+    tl, tr, bl, br, h, v = _BX["single"]
 
-    # Top double border
-    print(color(tl + h * (w - 2) + tr, TEAL))
+    # Top border
+    print(color(tl + h * (w - 2) + tr, RUST))
 
     # Empty padding row
-    print(color(v, TEAL) + " " * (w - 2) + color(v, TEAL))
+    print(color(v, RUST) + " " * (w - 2) + color(v, RUST))
 
-    # Logo, centered, in bright teal
-    for row in _render_logo("CAGENTIC"):
+    # Logo, centered, in warm gold
+    for row in _render_logo(w - 2):
         pad = max(0, (w - 2 - len(row)) // 2)
         line = " " * pad + row
         line = _pad(line, w - 2)
-        print(color(v, TEAL) + color(line, TEAL_BRIGHT) + color(v, TEAL))
+        print(color(v, RUST) + color(line, GOLD + BOLD) + color(v, RUST))
 
     # Tagline row
-    tagline = "your local personal assistant · powered by ollama"
+    tagline = "local-first assistant · private workspace · ollama-powered"
     pad = max(0, (w - 2 - len(tagline)) // 2)
-    print(color(v, TEAL) + color(_pad(" " * pad + tagline, w - 2), MUTED) + color(v, TEAL))
+    print(color(v, RUST) + color(_pad(" " * pad + tagline, w - 2), MUTED) + color(v, RUST))
 
     # Empty padding row
-    print(color(v, TEAL) + " " * (w - 2) + color(v, TEAL))
+    print(color(v, RUST) + " " * (w - 2) + color(v, RUST))
 
-    # Bottom double border
-    print(color(bl + h * (w - 2) + br, TEAL))
+    # Bottom border
+    print(color(bl + h * (w - 2) + br, RUST))
 
     # Status panel under the banner
     badge = "tools: native" if tools_enabled else "tools: text-protocol fallback"
     badge_c = OK if tools_enabled else WARN
     rows = [
-        color("model    ", MUTED) + color(model, TEAL_BRIGHT),
+        color("model    ", MUTED) + color(model, GOLD),
         color("cwd      ", MUTED) + color(cwd, SURFACE),
         color("status   ", MUTED) + color(badge, badge_c),
-        color("hint     ", MUTED) + color("type / for commands · /exit to quit", TEAL_DIM),
+        color("hint     ", MUTED) + color("type / for commands · /exit to quit", RUST),
     ]
-    panel(rows, title="session", style="thick", color_c=TEAL_DIM, title_c=TEAL_BRIGHT)
+    panel(rows, title="session", style="single", color_c=RUST, title_c=GOLD)

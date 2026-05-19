@@ -208,13 +208,13 @@ def _replay_conversation(messages: list[dict], max_turns: int = 12) -> None:
                 "STOP. You have called", "STOP. Tool outputs",
             )):
                 continue
-            print(ui.color("❯ ", ui.TEAL_BRIGHT) + ui.color(content, ui.SURFACE))
+            print(ui.color(ui.PROMPT_MARK, ui.GOLD) + ui.color(content, ui.SURFACE))
         elif role == "assistant":
             if content:
                 ui.assistant(content)
             for tc in m.get("tool_calls") or []:
                 fn = tc.get("function", {}) or {}
-                print(ui.color("  ▸ ", ui.TEAL_BRIGHT) + ui.color(fn.get("name", "?"), ui.TEAL_BRIGHT))
+                print(ui.color("  " + ui.TOOL_MARK, ui.CYAN_GLOW) + ui.color(fn.get("name", "?"), ui.CYAN_GLOW))
         elif role == "tool":
             first = content.splitlines()[0][:120] if content else ""
             ui.tool_result(first, ok=not first.startswith("ERROR"))
@@ -262,7 +262,7 @@ def repl(agent: Agent, cfg: dict) -> int:
         ui.prepare_for_input()
         print()
         try:
-            line = prompt.ask(ui.color("❯ ", ui.TEAL_BRIGHT)).strip()
+            line = prompt.ask(ui.color(ui.PROMPT_MARK, ui.GOLD)).strip()
         except (EOFError, KeyboardInterrupt):
             print()
             return 0
@@ -348,7 +348,7 @@ def repl(agent: Agent, cfg: dict) -> int:
                     ui.warn(f"no note named '{arg1}'")
                 else:
                     print()
-                    print(ui.color(f"  ─── {n.name} ───", ui.TEAL_DIM))
+                    print(ui.color(f"  ─── {n.name} ───", ui.RUST))
                     print(n.body)
                 continue
 
@@ -615,7 +615,7 @@ def repl(agent: Agent, cfg: dict) -> int:
                     before = entry.get("before", "")
                     after = entry.get("after", "")
                     adds, dels = _diff.stats(before, after)
-                    print(ui.color(f"  {op}  {path}  ", ui.TEAL_BRIGHT) +
+                    print(ui.color(f"  {op}  {path}  ", ui.CYAN_GLOW) +
                           ui.color(f"(+{adds} -{dels})", ui.MUTED))
                     rendered = _diff.render(before, after, path, max_lines=20)
                     if rendered:

@@ -78,13 +78,13 @@ def _build_pt_session():
     history_path.parent.mkdir(parents=True, exist_ok=True)
 
     style = Style.from_dict({
-        "completion-menu":               "bg:#0b3b3a #b8e6e1",
-        "completion-menu.completion":    "bg:#0b3b3a #b8e6e1",
-        "completion-menu.completion.current": "bg:#1abc9c #002b2b bold",
-        "completion-menu.meta":          "bg:#0b3b3a #5fbfb5",
-        "completion-menu.meta.current":  "bg:#1abc9c #002b2b",
-        "scrollbar.background":          "bg:#0b3b3a",
-        "scrollbar.button":              "bg:#1abc9c",
+        "completion-menu":                    "bg:#1f1712 #f2dfc5",
+        "completion-menu.completion":         "bg:#1f1712 #f2dfc5",
+        "completion-menu.completion.current": "bg:#d08a2e #140f0c bold",
+        "completion-menu.meta":               "bg:#1f1712 #8fd7d8",
+        "completion-menu.meta.current":       "bg:#d08a2e #140f0c",
+        "scrollbar.background":               "bg:#1f1712",
+        "scrollbar.button":                   "bg:#8fd7d8",
     })
 
     try:
