@@ -1,8 +1,10 @@
 # Cagentic
 
-Your local personal AI assistant — a terminal agent like Claude or ChatGPT, but powered by [Ollama](https://ollama.com) running on your own machine. Everything stays local.
+Your local personal AI assistant — a terminal companion like Claude or ChatGPT, but powered by [Ollama](https://ollama.com) running on your own machine. Everything stays local.
 
-Cagentic is a fork of [Collama](https://github.com/Darthness2/Collama) (a coding agent) reshaped into a **personal assistant**: it remembers facts about you across sessions, keeps a persistent reminder list, can search the web, edit files, run shell commands, and bridge out to external services like Notion, Google Drive, and Slack through MCP (Model Context Protocol) servers.
+Cagentic **remembers things about you** across sessions, keeps a persistent reminder list, searches the web, edits files, runs shell commands, and bridges out to external services like Notion, Google Drive, and Slack through MCP (Model Context Protocol) servers. It's the friend who keeps your calendar straight and remembers the small things — and it never sends your life to someone else's cloud.
+
+<sub>Cagentic began as a fork of [Collama](https://github.com/Darthness2/Collama), a local coding agent, and grew its own shape, palette, and personality from there.</sub>
 
 ## What it can do
 
@@ -205,9 +207,26 @@ Supports `@path`, `@path:N`, and `@path:N-M`.
 └── skills/              # *.md skills the model can attach
 ```
 
-## Tone
+## Look & feel
 
-Cagentic ships with a personal-assistant system prompt — friendly, calm, takes action instead of narrating. You can amend it for your workspace by dropping a `CAGENTIC.md` or `AGENTS.md` in any parent directory, or attach a skill from `~/.config/cagentic/skills/`.
+Cagentic has its own visual identity — a warm "dusk" palette (mauve, peach, gold, plum) instead of a cold tech teal. The welcome screen is a small cozy card rather than a giant logo, it greets you by time of day, and the markers are consistent throughout:
+
+| | |
+|---|---|
+| `✦` | Cagentic speaking |
+| `◦` | quiet thinking |
+| `·` | a small note |
+| `↳` | a tool it reached for |
+| `✓` / `✗` | how that turned out |
+| `❀` | a plan |
+
+The working spinner is a soft sparkle that breathes in and out. Set `CAGENTIC_SPINNER=braille` for a plainer one, or `NO_COLOR=1` to drop colors entirely.
+
+## Personality
+
+Cagentic ships with its own character: warm, attentive, unflappable — the friend who keeps your calendar straight and remembers the small things, with a light dry humor and no lecturing. It takes action instead of narrating.
+
+You can amend it for a given workspace by dropping a `CAGENTIC.md` or `AGENTS.md` in any parent directory, or attach a skill from `~/.config/cagentic/skills/`. Tell it your name with `/name` (or `cagentic --name Alex`) and it'll use it naturally.
 
 ## License
 

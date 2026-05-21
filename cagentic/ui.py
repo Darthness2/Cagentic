@@ -54,17 +54,28 @@ MAGENTA = "\033[35m"
 CYAN = "\033[36m"
 GRAY = "\033[90m"
 
-# Palette — calm, cohesive 256-color set (degrades gracefully if unsupported).
-# Names are kept stable so the rest of the codebase doesn't need to change.
-TEAL        = "\033[38;5;73m"    # muted teal — primary accent
-TEAL_BRIGHT = "\033[38;5;80m"    # bright cyan — highlights, prompt, logo
-TEAL_DIM    = "\033[38;5;23m"    # dark teal — borders, rules
-SURFACE     = "\033[38;5;253m"   # near-white — body text
-MUTED       = "\033[38;5;246m"   # grey — secondary text
-SOFT        = "\033[38;5;240m"   # faint grey — timers, hints, rules
-WARN        = "\033[38;5;180m"   # warm sand — warnings
-ERR         = "\033[38;5;174m"   # dusty rose — errors
-OK          = "\033[38;5;108m"   # sage green — success marks
+# Palette — "warm dusk": a cohesive 256-color set built for a personal
+# assistant. Mauve + peach + gold instead of a cold tech teal. Degrades
+# gracefully when 256-color isn't available.
+#
+# DUSK / GLOW / PLUM are the three core accent tones; GOLD is a fourth used
+# sparingly for highlights worth noticing (success, the wordmark spark).
+DUSK   = "\033[38;5;139m"   # muted orchid — primary accent
+GLOW   = "\033[38;5;216m"   # warm peach — highlights, prompt, the wordmark
+PLUM   = "\033[38;5;96m"    # dusk plum — borders, rules, quiet structure
+GOLD   = "\033[38;5;179m"   # soft gold — sparks, accents worth a glance
+SURFACE = "\033[38;5;253m"  # near-white — body text
+MUTED   = "\033[38;5;247m"  # warm grey — secondary text
+SOFT    = "\033[38;5;240m"  # faint grey — timers, hints, rules
+WARN    = "\033[38;5;215m"  # warm amber — warnings
+ERR     = "\033[38;5;174m"  # dusty rose — errors
+OK      = "\033[38;5;108m"  # sage — success marks
+
+# Back-compat aliases so any stray TEAL* reference still resolves. New code
+# should use DUSK / GLOW / PLUM / GOLD directly.
+TEAL = DUSK
+TEAL_BRIGHT = GLOW
+TEAL_DIM = PLUM
 
 
 def _supports_color() -> bool:
@@ -150,7 +161,7 @@ def render_markdown(text: str) -> str:
         body = m.group(2)
         rendered_lines = []
         for line in body.splitlines():
-            rendered_lines.append(color("  │ ", TEAL_DIM) + color(line, TEAL_BRIGHT))
+            rendered_lines.append(color("  ┊ ", PLUM) + color(line, GOLD))
         rendered = "\n".join(rendered_lines)
         placeholders.append(rendered)
         return f"\x00BLOCK{len(placeholders) - 1}\x00"
@@ -158,7 +169,7 @@ def render_markdown(text: str) -> str:
     out = _MD_FENCE_RX.sub(_stash_block, text)
 
     def _stash_inline(m: re.Match) -> str:
-        rendered = color(m.group(1), TEAL_BRIGHT + BOLD)
+        rendered = color(m.group(1), GOLD + BOLD)
         placeholders.append(rendered)
         return f"\x00INL{len(placeholders) - 1}\x00"
 
@@ -169,23 +180,23 @@ def render_markdown(text: str) -> str:
         level = len(m.group(1))
         body = m.group(2)
         if level == 1:
-            return color("━━ " + body + " ━━", TEAL_BRIGHT + BOLD)
+            return color("✦  " + body, GLOW + BOLD)
         if level == 2:
-            return color("●  " + body, TEAL + BOLD)
-        return color("·  " + body, TEAL_DIM + BOLD)
+            return color("❀  " + body, DUSK + BOLD)
+        return color("·  " + body, PLUM + BOLD)
 
     out = _MD_HEADER_RX.sub(_header, out)
 
     # Bullets.
-    out = _MD_BULLET_RX.sub(lambda m: m.group(1) + color("• ", TEAL), out)
+    out = _MD_BULLET_RX.sub(lambda m: m.group(1) + color("– ", DUSK), out)
 
-    # Step markers: '<step 2>' becomes a styled '▸ step 2', '<step 2/4>'
-    # becomes '▸ step 2 of 4'. Wrapped in newlines so they always read as
+    # Step markers: '<step 2>' becomes a styled '→ step 2', '<step 2/4>'
+    # becomes '→ step 2 of 4'. Wrapped in newlines so they always read as
     # their own visible line even if the model puts them inline.
     def _step(m: "re.Match[str]") -> str:
         n, total = m.group(1), m.group(2)
-        label = f"▸ step {n} of {total}" if total else f"▸ step {n}"
-        return "\n" + color(label, TEAL_BRIGHT + BOLD) + "\n"
+        label = f"→ step {n} of {total}" if total else f"→ step {n}"
+        return "\n" + color(label, GOLD + BOLD) + "\n"
     out = _MD_STEP_RX.sub(_step, out)
 
     # Bold and italic. (Order matters — bold first.)
@@ -195,7 +206,7 @@ def render_markdown(text: str) -> str:
 
     # Inline links: [text](url) → text (url, dimmed).
     out = _MD_LINK_RX.sub(
-        lambda m: color(m.group(1), TEAL_BRIGHT) + color(f" ({m.group(2)})", SOFT),
+        lambda m: color(m.group(1), GLOW) + color(f" ({m.group(2)})", SOFT),
         out,
     )
 
@@ -454,7 +465,7 @@ _BX = {
 
 
 def panel(body: str | list[str], title: str = "", style: str = "round",
-          color_c: str = TEAL_DIM, title_c: str = TEAL_BRIGHT,
+          color_c: str = PLUM, title_c: str = GLOW,
           inner_pad: int = 1, markdown: bool = False) -> None:
     """Print a bordered panel containing wrapped body text.
 
@@ -499,39 +510,37 @@ def panel(body: str | list[str], title: str = "", style: str = "round",
     print(bottom)
 
 
-def hr(char: str = "─", c: str = TEAL_DIM) -> None:
+def hr(char: str = "─", c: str = PLUM) -> None:
     print(color(char * width(), c))
 
 
 # ---------- spinner ----------
 
-# Default: a little axolotl swimming back and forth — appears on the line the
-# agent is currently working on (thinking / running a shell command / etc.).
-# The braille frames are kept as a fallback for terminals without good unicode
-# support (NO_COLOR or CAGENTIC_SPINNER=braille).
-_AXOLOTL_FRAMES = (
-    "~(◕‿◕)~",
-    "~(◕‿◕)~~",
-    "~~(◕‿◕)~~",
-    "~~~(◕‿◕)~",
-    "~~(◕‿◕)~~",
-    "~(◕‿◕)~",
-    "(◕‿◕)~",
-    "~(◕‿◕)~",
-    "~~(◕‿◕)~~",
-    "~~~(◕‿◕)~~~",
-    "~~(◕‿◕)~~",
-    "~(◕‿◕)~",
+# Default: a soft sparkle that breathes in and out — a calm "I'm with you"
+# pulse rather than a busy techy spinner. Appears on the line Cagentic is
+# currently working on. The braille frames stay as a fallback for terminals
+# without good unicode support (NO_COLOR or CAGENTIC_SPINNER=braille).
+_SPARK_FRAMES = (
+    "·  ",
+    "✦  ",
+    "✦· ",
+    "✦✶ ",
+    "✦✶✦",
+    " ✶✦",
+    "  ✦",
+    "  ·",
+    "   ",
+    "·  ",
 )
 
 _BRAILLE_FRAMES = ("⠋", "⠙", "⠹", "⠸", "⠼", "⠴", "⠦", "⠧", "⠇", "⠏")
 
 
 def _default_frames() -> tuple[str, ...]:
-    style = os.environ.get("CAGENTIC_SPINNER", "axolotl").lower()
+    style = os.environ.get("CAGENTIC_SPINNER", "spark").lower()
     if style == "braille":
         return _BRAILLE_FRAMES
-    return _AXOLOTL_FRAMES
+    return _SPARK_FRAMES
 
 
 _SPIN_FRAMES = _default_frames()
@@ -566,7 +575,7 @@ class Spinner:
     def __init__(
         self,
         label: str = "thinking",
-        color_c: str = TEAL_BRIGHT,
+        color_c: str = GOLD,
         escalations: list[tuple[float, str]] | None = None,
     ) -> None:
         """`escalations` is an optional list of (after_seconds, label) pairs
@@ -726,17 +735,25 @@ class SilenceWatchdog:
 
 
 # ---------- log helpers ----------
+#
+# Marker vocabulary, kept consistent so the transcript reads at a glance:
+#   ✦  Cagentic speaking (the assistant's own voice)
+#   ◦  quiet thinking
+#   ·  a small note / info
+#   ↳  a tool Cagentic reached for
+#   ✓ / ✗  how that tool turned out
+#   ❀  a plan / something organized
 
 def info(msg: str) -> None:
-    print(color("  ℹ ", TEAL) + color(msg, SURFACE))
+    print(color("  · ", DUSK) + color(msg, SURFACE))
 
 
 def warn(msg: str) -> None:
-    print(color("  ⚠ ", WARN) + color(msg, WARN))
+    print(color("  ▲ ", WARN) + color(msg, WARN))
 
 
 def error(msg: str) -> None:
-    print(color("  ✖ ", ERR) + color(msg, ERR), file=sys.stderr)
+    print(color("  ✗ ", ERR) + color(msg, ERR), file=sys.stderr)
 
 
 def assistant(msg: str) -> None:
@@ -746,7 +763,7 @@ def assistant(msg: str) -> None:
     rendered = render_markdown(msg)
     lines = _wrap_visible(rendered, max(20, width() - 4))
     for i, line in enumerate(lines or [""]):
-        prefix = color("  ● ", TEAL_BRIGHT) if i == 0 else "    "
+        prefix = color("  ✦ ", GLOW) if i == 0 else "    "
         print(prefix + line)
 
 
@@ -764,12 +781,12 @@ def plan(items: list[str]) -> None:
         return
     body = []
     for i, step in enumerate(items, 1):
-        body.append(color(f"  {i:>2}.", TEAL) + " " + color(step, SURFACE))
-    panel(body, title="plan", style="thick", color_c=TEAL, title_c=TEAL_BRIGHT)
+        body.append(color(f"  {i:>2}.", GOLD) + " " + color(step, SURFACE))
+    panel(body, title="❀ here's my plan", style="round", color_c=PLUM, title_c=DUSK)
 
 
 def tool_call(name: str, summary: str) -> None:
-    head = color("  ▸ ", TEAL_BRIGHT) + color(name, TEAL_BRIGHT)
+    head = color("  ↳ ", DUSK) + color(name, DUSK)
     if summary:
         head += color(f"  {summary}", MUTED)
     print(head)
@@ -782,112 +799,84 @@ def tool_result(summary: str, ok: bool = True) -> None:
 
 # ---------- banner ----------
 
-# Block-letter rendering of "CAGENTIC". 5 rows, ~8 cols per glyph.
-_GLYPHS = {
-    "C": [
-        " ████ ",
-        "██  ██",
-        "██    ",
-        "██  ██",
-        " ████ ",
-    ],
-    "A": [
-        " ████ ",
-        "██  ██",
-        "██████",
-        "██  ██",
-        "██  ██",
-    ],
-    "G": [
-        " ████ ",
-        "██    ",
-        "██ ███",
-        "██  ██",
-        " ████ ",
-    ],
-    "E": [
-        "██████",
-        "██    ",
-        "█████ ",
-        "██    ",
-        "██████",
-    ],
-    "N": [
-        "██   ██",
-        "███  ██",
-        "██ █ ██",
-        "██  ███",
-        "██   ██",
-    ],
-    "T": [
-        "██████",
-        "  ██  ",
-        "  ██  ",
-        "  ██  ",
-        "  ██  ",
-    ],
-    "I": [
-        "██████",
-        "  ██  ",
-        "  ██  ",
-        "  ██  ",
-        "██████",
-    ],
-    " ": [
-        "  ",
-        "  ",
-        "  ",
-        "  ",
-        "  ",
-    ],
-}
+def greeting_word(hour: int | None = None) -> str:
+    """Time-of-day greeting. Cagentic opens warm, not with a status dump."""
+    import time as _t
+    if hour is None:
+        hour = _t.localtime().tm_hour
+    if hour < 5:
+        return "you're up late"
+    if hour < 12:
+        return "good morning"
+    if hour < 18:
+        return "good afternoon"
+    if hour < 22:
+        return "good evening"
+    return "winding down"
 
 
-def _render_logo(text: str = "CAGENTIC") -> list[str]:
-    rows = ["", "", "", "", ""]
-    for ch in text.upper():
-        glyph = _GLYPHS.get(ch, _GLYPHS[" "])
-        for i, line in enumerate(glyph):
-            rows[i] += line + "  "
-    return [r.rstrip() for r in rows]
+def banner(model: str, cwd: str, tools_enabled: bool = True,
+           user_name: str | None = None) -> None:
+    """Cozy, compact welcome card — a lit window at dusk, not a tech splash.
 
-
-def banner(model: str, cwd: str, tools_enabled: bool = True) -> None:
+    No giant block-letter logo: a personal assistant should feel like a
+    note left on the counter, so the banner is a small rounded card with
+    a spark, the wordmark, a one-line greeting, and a quiet status row.
+    """
     clear_screen()
     w = width()
-    tl, tr, bl, br, h, v = _BX["double"]
+    card_w = min(w, 62)
+    tl, tr, bl, br, h, v = _BX["round"]
 
-    # Top double border
-    print(color(tl + h * (w - 2) + tr, TEAL))
+    inner = card_w - 4  # 2 border + 2 pad
 
-    # Empty padding row
-    print(color(v, TEAL) + " " * (w - 2) + color(v, TEAL))
+    def _row(content: str) -> None:
+        # `content` may carry ANSI; pad on visible width.
+        print(color(v, PLUM) + " " + _pad(content, inner) + " " + color(v, PLUM))
 
-    # Logo, centered, in bright teal
-    for row in _render_logo("CAGENTIC"):
-        pad = max(0, (w - 2 - len(row)) // 2)
-        line = " " * pad + row
-        line = _pad(line, w - 2)
-        print(color(v, TEAL) + color(line, TEAL_BRIGHT) + color(v, TEAL))
+    who = user_name or ""
+    hello = greeting_word()
+    if who:
+        hello = f"{hello}, {who}"
 
-    # Tagline row
-    tagline = "your local personal assistant · powered by ollama"
-    pad = max(0, (w - 2 - len(tagline)) // 2)
-    print(color(v, TEAL) + color(_pad(" " * pad + tagline, w - 2), MUTED) + color(v, TEAL))
+    print()
+    print(color(tl + h * (card_w - 2) + tr, PLUM))
+    _row("")
+    # Wordmark: a spark + spaced lowercase letters. Lowercase + letterspacing
+    # reads softer and more personal than an all-caps block.
+    wordmark = color("✦  ", GOLD) + color("c a g e n t i c", GLOW + BOLD)
+    _row(wordmark)
+    _row(color("your local personal assistant", MUTED))
+    _row("")
+    _row(color(hello + ".", DUSK))
+    _row("")
+    print(color(bl + h * (card_w - 2) + br, PLUM))
 
-    # Empty padding row
-    print(color(v, TEAL) + " " * (w - 2) + color(v, TEAL))
-
-    # Bottom double border
-    print(color(bl + h * (w - 2) + br, TEAL))
-
-    # Status panel under the banner
-    badge = "tools: native" if tools_enabled else "tools: text-protocol fallback"
-    badge_c = OK if tools_enabled else WARN
-    rows = [
-        color("model    ", MUTED) + color(model, TEAL_BRIGHT),
-        color("cwd      ", MUTED) + color(cwd, SURFACE),
-        color("status   ", MUTED) + color(badge, badge_c),
-        color("hint     ", MUTED) + color("type / for commands · /exit to quit", TEAL_DIM),
+    # Quiet status line — a single dim row, no boxed panel. Dot-separated.
+    badge = "ready" if tools_enabled else "text-protocol mode"
+    bits = [
+        color(model, GLOW),
+        color(_short_path(cwd), MUTED),
+        color(badge, OK if tools_enabled else WARN),
+        color("/ for commands", PLUM),
     ]
-    panel(rows, title="session", style="thick", color_c=TEAL_DIM, title_c=TEAL_BRIGHT)
+    print("  " + color("  ·  ", PLUM).join(bits))
+    print()
+
+
+def _short_path(p: str) -> str:
+    """Render a path with ~ for home — shorter, friendlier in the status row."""
+    try:
+        home = str(_os_home())
+        if p == home:
+            return "~"
+        if p.startswith(home + os.sep):
+            return "~" + p[len(home):]
+    except Exception:
+        pass
+    return p
+
+
+def _os_home() -> str:
+    from pathlib import Path
+    return str(Path.home())

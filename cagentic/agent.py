@@ -161,12 +161,12 @@ def render_event(event: Message, rs: _RenderState) -> None:
     elif k == "plan":
         ui.plan(d["steps"])
     elif k == "narration":
-        print(ui.color("  ▪ ", ui.TEAL_DIM) + ui.color(d["text"], ui.MUTED))
+        print(ui.color("  · ", ui.PLUM) + ui.color(d["text"], ui.MUTED))
     elif k == "delta":
         if not rs.streaming:
             rs.md = ui.StreamMarkdown(
                 emit=_stream_emit,
-                first_prefix=ui.color("  ● ", ui.TEAL_BRIGHT),
+                first_prefix=ui.color("  ✦ ", ui.GLOW),
                 cont_prefix="    ",
                 dim_first_prefix=ui.color("  ◦ ", ui.SOFT),
                 dim_cont_prefix=ui.color("    ", ui.SOFT),
@@ -204,7 +204,7 @@ def render_event(event: Message, rs: _RenderState) -> None:
                 op, path, adds, dels = m.group(1), m.group(2), m.group(3), m.group(4)
                 mark = ui.color("    ✓", ui.OK)
                 print(
-                    mark + " " + ui.color(op, ui.TEAL_BRIGHT)
+                    mark + " " + ui.color(op, ui.DUSK)
                     + " " + ui.color(path, ui.SURFACE)
                     + "  " + ui.color(f"+{adds}", ui.OK)
                     + " " + ui.color(f"-{dels}", ui.ERR)

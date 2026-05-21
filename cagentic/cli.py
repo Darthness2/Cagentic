@@ -168,7 +168,7 @@ def _print_sessions(active_id: str | None = None) -> list[dict]:
     print()
     print(ui.color(f"  {'#':<3} {'id':<14} {'updated':<10} {'turns':<6} {'model':<20} title", ui.GRAY))
     for i, s in enumerate(listed, 1):
-        marker = ui.color(" *", ui.GREEN) if s["id"] == active_id else "  "
+        marker = ui.color(" ✦", ui.GLOW) if s["id"] == active_id else "  "
         print(f"{marker}{i:<3} {s['id']:<14} {sessions.fmt_time(s['updated_at']):<10} "
               f"{s['turns']:<6} {s['model'][:19]:<20} {s['title'][:60]}")
     return listed
@@ -208,37 +208,57 @@ def _replay_conversation(messages: list[dict], max_turns: int = 12) -> None:
                 "STOP. You have called", "STOP. Tool outputs",
             )):
                 continue
-            print(ui.color("❯ ", ui.TEAL_BRIGHT) + ui.color(content, ui.SURFACE))
+            print(ui.color("✦ ", ui.GLOW) + ui.color(content, ui.SURFACE))
         elif role == "assistant":
             if content:
                 ui.assistant(content)
             for tc in m.get("tool_calls") or []:
                 fn = tc.get("function", {}) or {}
-                print(ui.color("  ▸ ", ui.TEAL_BRIGHT) + ui.color(fn.get("name", "?"), ui.TEAL_BRIGHT))
+                print(ui.color("  ↳ ", ui.DUSK) + ui.color(fn.get("name", "?"), ui.DUSK))
         elif role == "tool":
             first = content.splitlines()[0][:120] if content else ""
             ui.tool_result(first, ok=not first.startswith("ERROR"))
     ui.hr()
 
 
-def _greet_with_overdue(agent: Agent) -> None:
-    """Surface any overdue reminders at startup so they don't get forgotten."""
+def _settle_in(agent: Agent) -> None:
+    """First thing Cagentic says — a short, warm orientation rather than a
+    log dump. Mentions overdue reminders and how much it remembers, so the
+    user knows it's picked up where they left off."""
+    name = agent.state.user_name
     try:
         rems = _reminders.list_all()
+        notes_n = len(_notes.list_all())
     except Exception:
-        return
+        rems, notes_n = [], 0
     import time as _t
     overdue = [r for r in rems if r.due_at and r.due_at < _t.time() and r.status == "pending"]
+
+    bits = []
+    if rems:
+        bits.append(f"{len(rems)} reminder{'s' if len(rems) != 1 else ''} on your list")
+    if notes_n:
+        bits.append(f"{notes_n} note{'s' if notes_n != 1 else ''} I remember")
+    if bits:
+        ui.info("I've got " + " and ".join(bits) + ".")
+    else:
+        opener = f"I'm here, {name}." if name else "I'm here."
+        ui.info(opener + " Tell me what you need — or ask me to remember something.")
+
     if overdue:
-        ui.warn(f"you have {len(overdue)} overdue reminder(s):")
+        print()
+        ui.warn(f"a heads-up — {len(overdue)} reminder"
+                f"{'s are' if len(overdue) != 1 else ' is'} overdue:")
         for r in overdue[:5]:
-            print("  " + r.short().lstrip())
+            print("    " + r.short().strip())
         if len(overdue) > 5:
-            print(f"  …and {len(overdue) - 5} more — run /remind to see all")
+            print(f"    …and {len(overdue) - 5} more — type /remind to see them all")
 
 
 def repl(agent: Agent, cfg: dict) -> int:
-    ui.banner(agent.model, str(agent.state.workspace), tools_enabled=agent.tools_enabled)
+    ui.banner(agent.model, str(agent.state.workspace),
+              tools_enabled=agent.tools_enabled,
+              user_name=agent.state.user_name)
 
     session = sessions.make(agent.model)
 
@@ -247,9 +267,8 @@ def repl(agent: Agent, cfg: dict) -> int:
 
     agent.on_turn_complete = _on_turn
     agent.engine.session_id = session["id"]
-    ui.info(f"new session: {session['id']}")
 
-    _greet_with_overdue(agent)
+    _settle_in(agent)
 
     prompt = Prompt()
     if prompt.status_note:
@@ -262,7 +281,7 @@ def repl(agent: Agent, cfg: dict) -> int:
         ui.prepare_for_input()
         print()
         try:
-            line = prompt.ask(ui.color("❯ ", ui.TEAL_BRIGHT)).strip()
+            line = prompt.ask(ui.color("✦ ", ui.GLOW)).strip()
         except (EOFError, KeyboardInterrupt):
             print()
             return 0
@@ -348,7 +367,8 @@ def repl(agent: Agent, cfg: dict) -> int:
                     ui.warn(f"no note named '{arg1}'")
                 else:
                     print()
-                    print(ui.color(f"  ─── {n.name} ───", ui.TEAL_DIM))
+                    print(ui.color(f"  ❀ {n.name}", ui.DUSK + ui.BOLD))
+                    print(ui.color("  " + "─" * (len(n.name) + 4), ui.PLUM))
                     print(n.body)
                 continue
 
@@ -448,7 +468,7 @@ def repl(agent: Agent, cfg: dict) -> int:
                     if not todos:
                         ui.info("(no todos)")
                     for i, t in enumerate(todos, 1):
-                        mark = {"done": "✓", "pending": " ", "active": "▸", "blocked": "✗"}.get(t.get("status", "pending"), "?")
+                        mark = {"done": "✓", "pending": " ", "active": "→", "blocked": "✗"}.get(t.get("status", "pending"), "?")
                         print(f"  [{mark}] {i}. {t.get('text', '')}")
                     continue
                 if arg1 == "add":
@@ -615,7 +635,7 @@ def repl(agent: Agent, cfg: dict) -> int:
                     before = entry.get("before", "")
                     after = entry.get("after", "")
                     adds, dels = _diff.stats(before, after)
-                    print(ui.color(f"  {op}  {path}  ", ui.TEAL_BRIGHT) +
+                    print(ui.color(f"  {op}  {path}  ", ui.DUSK) +
                           ui.color(f"(+{adds} -{dels})", ui.MUTED))
                     rendered = _diff.render(before, after, path, max_lines=20)
                     if rendered:
@@ -648,7 +668,7 @@ def repl(agent: Agent, cfg: dict) -> int:
                 agent.reset()
                 agent.on_turn_complete = _on_turn
                 agent.engine.session_id = session["id"]
-                ui.info(f"new session: {session['id']}")
+                ui.info("fresh start — clean slate. (Notes and reminders are still with me.)")
                 continue
             if cmd == "resume":
                 listed = _print_sessions(active_id=session.get("id"))
