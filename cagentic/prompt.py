@@ -79,14 +79,17 @@ def _build_pt_session():
     history_path = config_dir() / "history"
     history_path.parent.mkdir(parents=True, exist_ok=True)
 
+    # Slash-command popup styled in Cagentic's warm-dusk palette — dark
+    # plum menu, soft mauve text, a copper-peach highlight on the selected
+    # row (no leftover teal/blue from the Collama days).
     style = Style.from_dict({
-        "completion-menu":               "bg:#0b3b3a #b8e6e1",
-        "completion-menu.completion":    "bg:#0b3b3a #b8e6e1",
-        "completion-menu.completion.current": "bg:#1abc9c #002b2b bold",
-        "completion-menu.meta":          "bg:#0b3b3a #5fbfb5",
-        "completion-menu.meta.current":  "bg:#1abc9c #002b2b",
-        "scrollbar.background":          "bg:#0b3b3a",
-        "scrollbar.button":              "bg:#1abc9c",
+        "completion-menu":                    "bg:#241c2e #cdbbd8",
+        "completion-menu.completion":         "bg:#241c2e #cdbbd8",
+        "completion-menu.completion.current": "bg:#e3a978 #2a1e10 bold",
+        "completion-menu.meta":               "bg:#241c2e #8f7f9e",
+        "completion-menu.meta.current":       "bg:#d39a6a #2a1e10",
+        "scrollbar.background":               "bg:#241c2e",
+        "scrollbar.button":                   "bg:#8a6f86",
     })
 
     try:
