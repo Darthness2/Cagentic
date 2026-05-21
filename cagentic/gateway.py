@@ -405,7 +405,7 @@ _HTML = """<!doctype html>
 <html lang="en">
 <head>
 <meta charset="utf-8" />
-<meta name="viewport" content="width=device-width, initial-scale=1" />
+<meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover" />
 <title>Cagentic</title>
 <link rel="stylesheet" href="/app.css" />
 </head>
@@ -427,6 +427,11 @@ _HTML = """<!doctype html>
   </aside>
   <main id="main">
     <header id="topbar">
+      <button id="menuBtn" class="menu-btn" aria-label="Open chats">
+        <svg viewBox="0 0 24 24" width="20" height="20"><path
+          d="M3 6h18M3 12h18M3 18h18" fill="none" stroke="currentColor"
+          stroke-width="2" stroke-linecap="round"/></svg>
+      </button>
       <div id="chatTitle">New chat</div>
       <div id="modelChip" class="chip"></div>
     </header>
@@ -447,6 +452,7 @@ _HTML = """<!doctype html>
     </div>
   </main>
 </div>
+<div id="backdrop" class="backdrop hidden"></div>
 
 <div id="settingsModal" class="modal hidden">
   <div class="modal-card">
@@ -516,7 +522,12 @@ body {
   font: 15px/1.62 -apple-system, "Inter", "Segoe UI", system-ui, sans-serif;
   -webkit-font-smoothing: antialiased;
 }
-#app { display: grid; grid-template-columns: 268px 1fr; height: 100vh; }
+/* 100dvh tracks the *visible* viewport — so the composer stays put when
+   a mobile keyboard opens, unlike 100vh which mobile browsers lie about. */
+#app {
+  display: grid; grid-template-columns: 268px 1fr;
+  height: 100vh; height: 100dvh;
+}
 
 /* ---- sidebar ---- */
 #sidebar {
@@ -584,9 +595,20 @@ body {
   padding: 14px 28px; border-bottom: 1px solid var(--border);
 }
 #chatTitle {
+  flex: 1; min-width: 0;
   font-size: 14.5px; font-weight: 600;
   white-space: nowrap; overflow: hidden; text-overflow: ellipsis;
 }
+/* hamburger — hidden on desktop, shown when the sidebar becomes a drawer */
+.menu-btn {
+  display: none; align-items: center; justify-content: center;
+  width: 38px; height: 38px; margin-left: -8px; flex-shrink: 0;
+  background: transparent; border: 0; border-radius: 9px;
+  color: var(--dim); cursor: pointer;
+}
+.menu-btn:hover { background: var(--surface); color: var(--text); }
+/* drawer backdrop — only ever visible on small screens */
+.backdrop { display: none; }
 .chip {
   font-size: 12px; color: var(--dim);
   background: var(--surface); border: 1px solid var(--border);
@@ -779,6 +801,51 @@ body {
   content: "▌"; color: var(--accent); animation: blink 1s steps(2) infinite;
 }
 @keyframes blink { 50% { opacity: 0; } }
+
+/* ---- phones & small tablets ---- */
+@media (max-width: 760px) {
+  /* single column — the sidebar lifts out into a slide-over drawer */
+  #app { grid-template-columns: 1fr; }
+  #sidebar {
+    position: fixed; top: 0; bottom: 0; left: 0; width: 286px; max-width: 86vw;
+    z-index: 30; transform: translateX(-100%);
+    transition: transform .22s ease;
+    padding-top: max(16px, env(safe-area-inset-top));
+  }
+  #sidebar.open { transform: translateX(0); box-shadow: 0 0 40px rgba(0,0,0,.6); }
+  .backdrop {
+    display: block; position: fixed; inset: 0;
+    background: rgba(0,0,0,.55); z-index: 25;
+  }
+  .backdrop.hidden { display: none; }
+  .menu-btn { display: flex; }
+
+  #topbar { padding: 12px 14px; gap: 6px; }
+  .chip { max-width: 42vw; overflow: hidden; text-overflow: ellipsis; }
+  .log { padding: 18px 14px 6px; }
+  .composer {
+    padding: 8px 14px max(14px, env(safe-area-inset-bottom));
+  }
+  .composer-hint { display: none; }
+  .bubble { max-width: 88%; }
+
+  /* always-visible delete (no hover on touch) + bigger tap targets */
+  .chat-item .ci-del { opacity: 1; padding: 4px 6px; }
+  .chat-item { padding: 11px 10px; }
+  .suggestion { padding: 12px 14px; }
+
+  /* 16px form text stops iOS from auto-zooming when a field is focused */
+  .composer-box textarea,
+  .field select,
+  .field input[type=text] { font-size: 16px; }
+
+  .modal { align-items: flex-end; }
+  .modal-card {
+    width: 100%; max-width: 100%;
+    border-radius: 16px 16px 0 0;
+    padding-bottom: env(safe-area-inset-bottom);
+  }
+}
 """
 
 _JS = r"""
@@ -1010,11 +1077,13 @@ async function boot() {
 async function newChat() {
   const r = await api('/api/chats/new', {});
   state.chats = r.chats; renderChats(); setCurrent(r.current);
+  closeDrawer();
   input.focus();
 }
 async function loadChat(id) {
   const r = await api('/api/chats/load', { id });
   state.chats = r.chats; renderChats(); setCurrent(r.current);
+  closeDrawer();
 }
 async function deleteChat(id) {
   const r = await api('/api/chats/delete', { id });
@@ -1069,7 +1138,18 @@ async function send(text) {
 }
 
 // ---- settings -------------------------------------------------------------
+// ---- drawer (mobile) ------------------------------------------------------
+function openDrawer() {
+  $('#sidebar').classList.add('open');
+  $('#backdrop').classList.remove('hidden');
+}
+function closeDrawer() {
+  $('#sidebar').classList.remove('open');
+  $('#backdrop').classList.add('hidden');
+}
+
 function openSettings() {
+  closeDrawer();
   const s = state.settings;
   const sel = $('#setModel');
   sel.innerHTML = '';
@@ -1121,10 +1201,18 @@ $('#newChat').onclick = newChat;
 $('#openSettings').onclick = openSettings;
 $('#closeSettings').onclick = () => $('#settingsModal').classList.add('hidden');
 $('#saveSettings').onclick = saveSettings;
+$('#menuBtn').onclick = openDrawer;
+$('#backdrop').onclick = closeDrawer;
 $('#setTemp').addEventListener('input', (e) =>
   $('#tempVal').textContent = (+e.target.value).toFixed(2));
 $('#settingsModal').addEventListener('click', (e) => {
   if (e.target.id === 'settingsModal') e.target.classList.add('hidden');
+});
+document.addEventListener('keydown', (e) => {
+  if (e.key !== 'Escape') return;
+  if (!$('#settingsModal').classList.contains('hidden'))
+    $('#settingsModal').classList.add('hidden');
+  else closeDrawer();
 });
 
 boot();
