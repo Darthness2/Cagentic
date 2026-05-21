@@ -13,6 +13,7 @@ from pathlib import Path
 from typing import Any, Callable
 
 from . import diff as _diff
+from . import documents as _documents
 from . import notes as _notes
 from . import reminders as _reminders
 from . import ui
@@ -88,16 +89,30 @@ def t_read_file(args: dict, ctx: ToolContext) -> str:
             f"Scroll back instead of re-reading.]"
         )
 
-    try:
-        text = p.read_text(errors="replace")
-    except Exception as e:
-        return f"ERROR: {e}"
+    # PDF / DOCX get their text extracted; everything else is read as text.
+    if _documents.is_document(p):
+        try:
+            text = _documents.extract_text(p)
+        except _documents.DocumentError as e:
+            return f"ERROR: {e}"
+        except Exception as e:
+            return f"ERROR: could not read {path}: {type(e).__name__}: {e}"
+        kind = p.suffix.lower().lstrip(".")
+    else:
+        try:
+            text = p.read_text(errors="replace")
+        except Exception as e:
+            return f"ERROR: {e}"
+        kind = None
     lines = text.splitlines()
     s = max(1, start) - 1
     e = len(lines) if end is None else min(len(lines), int(end))
     selected = lines[s:e]
     numbered = "\n".join(f"{i + s + 1:>5}  {ln}" for i, ln in enumerate(selected))
-    header = f"{path}  ({len(lines)} lines)"
+    if kind:
+        header = f"{path}  ({len(lines)} lines of text extracted from {kind})"
+    else:
+        header = f"{path}  ({len(lines)} lines)"
     out = _truncate(f"{header}\n{numbered}")
     if cache is not None:
         cache[abs_path] = out
@@ -1125,7 +1140,7 @@ TOOL_SCHEMAS: list[dict[str, Any]] = [
     # ---------- files ----------
     {"type": "function", "function": {
         "name": "read_file",
-        "description": "Read a UTF-8 text file. Returns line-numbered content.",
+        "description": "Read a text file, or extract the text from a PDF or Word (.docx) document. Returns line-numbered content.",
         "parameters": {"type": "object", "properties": {
             "path": {"type": "string"},
             "start_line": {"type": "integer"},

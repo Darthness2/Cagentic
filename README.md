@@ -12,6 +12,7 @@ Cagentic **remembers things about you** across sessions, keeps a persistent remi
 - **Reminders that survive** — `reminder_add "call mom" when="tomorrow"` — persistent, separate from per-session todos.
 - **Web search & fetch** — DuckDuckGo search, full-page fetch with optional HTML-strip for readability.
 - **Files & shell** — read/edit/create files, run shell commands (each one asks for approval unless you `/yolo`).
+- **Reads PDFs & Word docs** — `read_file` extracts text from `.pdf` and `.docx` files, so you can ask Cagentic to summarize a contract, pull dates out of an invoice, or review a résumé without converting anything first.
 - **MCP bridges** — point Cagentic at any MCP server (Notion, Google Drive, Slack, your own custom ones) via stdio JSON-RPC and it can call their tools and read their resources.
 - **Conversations persist** — sessions auto-save to `~/.config/cagentic/sessions/`. `/resume` to come back to one.
 - **Background jobs** — slow shell commands run in the background; their output gets injected back into the conversation when they finish.
@@ -191,7 +192,16 @@ help me plan a trip — see @~/trip-ideas.md
 fix the typo in @~/Documents/letter.txt:42
 ```
 
-Supports `@path`, `@path:N`, and `@path:N-M`.
+Supports `@path`, `@path:N`, and `@path:N-M`. Works for PDFs and Word docs too — `@~/Documents/contract.pdf` inlines the extracted text.
+
+## Reading PDFs & Word documents
+
+`read_file` (and `@path` mentions) transparently extract text from:
+
+- **`.docx`** — Word documents. Handled with the Python standard library, no extra dependency.
+- **`.pdf`** — needs the `pypdf` package, which is installed automatically with Cagentic. Scanned/image-only PDFs have no text layer and would need OCR, which Cagentic doesn't do.
+
+Just point Cagentic at the file — *"summarize ~/Downloads/lease.pdf"* or *"what's the total on @invoice.pdf"*. The old binary `.doc` format isn't supported; re-save it as `.docx`.
 
 ## File locations
 

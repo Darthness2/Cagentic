@@ -13,6 +13,7 @@ authors = [{ name = "Cagentic" }]
 dependencies = [
     "requests>=2.31",
     "prompt_toolkit>=3.0",
+    "pypdf>=4.0",          # PDF text extraction (.docx uses only the stdlib)
 ]
 
 [project.scripts]

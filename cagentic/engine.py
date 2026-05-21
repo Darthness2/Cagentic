@@ -255,6 +255,9 @@ Tools you have:
   configured, then mcp_list_tools to discover the right call, then mcp_call.
 - **Files** (read_file, write_file, edit_file, list_dir, grep, glob): edit
   any file on disk. Use absolute paths or set_workspace into the right dir.
+  read_file also pulls the text out of PDF and Word (.docx) documents — so
+  you can read résumés, contracts, letters, and reports directly. Just call
+  read_file on the .pdf / .docx path; don't ask the user to convert it.
 - **Shell** (run_bash): for opening apps, running scripts, etc. Each call
   asks the user to approve.
 - **Background** (bash_async, task_status, task_wait): for slow commands.
@@ -347,9 +350,15 @@ def process_user_input(raw: str, workspace: Path | None = None, home: Path | Non
         if p in seen:
             continue
         seen.add(p)
+        # @-mentioning a PDF or .docx inlines its extracted text, same as
+        # any plain file — so "summarize @report.pdf" works in one shot.
         try:
-            text = p.read_text(errors="replace")
-        except OSError as exc:
+            from . import documents as _documents
+            if _documents.is_document(p):
+                text = _documents.extract_text(p)
+            else:
+                text = p.read_text(errors="replace")
+        except Exception as exc:
             attachments.append(f"--- @{p} (read failed: {exc}) ---")
             continue
         lines = text.splitlines()
