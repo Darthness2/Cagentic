@@ -14,6 +14,8 @@ Cagentic **remembers things about you** across sessions, keeps a persistent remi
 - **Files & shell** — read/edit/create files, run shell commands (each one asks for approval unless you `/yolo`).
 - **Reads PDFs & Word docs** — `read_file` extracts text from `.pdf` and `.docx` files, so you can ask Cagentic to summarize a contract, pull dates out of an invoice, or review a résumé without converting anything first.
 - **MCP bridges** — point Cagentic at any MCP server (Notion, Google Drive, Slack, your own custom ones) via stdio JSON-RPC and it can call their tools and read their resources.
+- **Controls your browser** — a companion Chrome extension lets Cagentic read pages, open tabs, click links, and fill forms in your actual browser.
+- **Web UI** — `/gateway` starts a local web app: the full assistant in a browser tab, with tool approvals shown right on the page.
 - **Conversations persist** — sessions auto-save to `~/.config/cagentic/sessions/`. `/resume` to come back to one.
 - **Background jobs** — slow shell commands run in the background; their output gets injected back into the conversation when they finish.
 - **GitHub integration** (optional) — list repos, read files, browse issues/PRs with a personal access token.
@@ -138,11 +140,13 @@ Cagentic launches each server as a subprocess on first use and keeps a long-live
 | `/remind delete <id>` | delete |
 | `/name <your name>` | tell the assistant what to call you |
 
-### MCP
+### MCP, browser & web
 | | |
 |---|---|
-| `/mcp` | list configured servers |
+| `/mcp` | list configured MCP servers |
 | `/mcp <server>` | list tools on that server |
+| `/browser` | Chrome extension status + setup steps |
+| `/gateway` | start the web UI (`/gateway off` to stop) |
 
 ### Conversation
 | | |
@@ -202,6 +206,35 @@ Supports `@path`, `@path:N`, and `@path:N-M`. Works for PDFs and Word docs too �
 - **`.pdf`** — needs the `pypdf` package, which is installed automatically with Cagentic. Scanned/image-only PDFs have no text layer and would need OCR, which Cagentic doesn't do.
 
 Just point Cagentic at the file — *"summarize ~/Downloads/lease.pdf"* or *"what's the total on @invoice.pdf"*. The old binary `.doc` format isn't supported; re-save it as `.docx`.
+
+## Controlling your browser
+
+Cagentic ships with a companion Chrome extension (in the `extension/` folder). Once it's loaded, the assistant can see and act in your real browser — read the page you're on, open tabs, follow links, fill in forms.
+
+**How it works:** Cagentic runs a tiny HTTP server bound to `127.0.0.1`. The extension long-polls it for commands, runs them with Chrome's own APIs, and posts results back. Nothing is exposed beyond localhost, and every action that changes anything (open/navigate/click/fill/eval/close) asks for your approval first — only reads (`browser_read`, `browser_tabs`) go through unprompted.
+
+**Install the extension** (one time):
+
+1. Open `chrome://extensions`
+2. Turn on **Developer mode** (top-right)
+3. Click **Load unpacked** and select the `extension/` folder in this repo
+4. That's it — the extension connects automatically whenever Cagentic is running
+
+Run `/browser` in the REPL any time to check the connection or get the exact folder path. Then just ask: *"what's on this page?"*, *"open my email"*, *"click the login button"*, *"fill the search box with "weekend trips" and submit"*.
+
+Browser tools: `browser_status`, `browser_tabs`, `browser_read`, `browser_open`, `browser_navigate`, `browser_click`, `browser_fill`, `browser_eval`, `browser_close`. The bridge port is configurable (`browser.port` in config, default `8765`); set the matching port in the extension's popup if you change it.
+
+## The web UI — `/gateway`
+
+`/gateway` starts a local web app — the full Cagentic assistant in a browser tab instead of the terminal. Everything works: tools, notes, reminders, MCP, browser control. It streams responses token-by-token, and when a tool needs approval an **Approve / Always / Deny** prompt appears right in the page.
+
+```
+❯ /gateway
+  · gateway is live — open http://localhost:8700 in your browser.
+❯ /gateway off       # stop it
+```
+
+It runs its own conversation (separate from the terminal session) but shares your notes, reminders, and connected services. The port is `gateway.port` in config (default `8700`). Like everything else, it's bound to localhost only.
 
 ## File locations
 

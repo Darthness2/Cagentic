@@ -64,6 +64,10 @@ class AppState:
     # mcp_* tool call.
     mcp: object | None = None
 
+    # Live browser bridge (cagentic.browser.BrowserBridge) — the localhost
+    # channel to the companion Chrome extension. Started at launch or lazily.
+    browser: object | None = None
+
     _listeners: list[Listener] = field(default_factory=list, repr=False)
 
     # ------------------------------------------------------------------

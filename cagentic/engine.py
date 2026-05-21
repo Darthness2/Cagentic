@@ -184,6 +184,15 @@ def _summarize_args(name: str, args: dict) -> str:
         return f"{args.get('server', '?')}/{args.get('tool', '?')}"
     if name in ("web_fetch", "web_search"):
         return str(args.get("url") or args.get("query") or "")
+    if name in ("browser_open", "browser_navigate"):
+        return str(args.get("url", ""))
+    if name == "browser_click":
+        return str(args.get("selector") or args.get("text") or "")
+    if name == "browser_fill":
+        return str(args.get("selector", ""))
+    if name == "browser_eval":
+        code = str(args.get("code", ""))
+        return code if len(code) < 60 else code[:57] + "…"
     return ""
 
 
@@ -253,6 +262,13 @@ Tools you have:
   mcp_read_resource): bridges to Notion, Google Drive, Slack, etc. If a
   request needs one of those, run mcp_list_servers first to see what's
   configured, then mcp_list_tools to discover the right call, then mcp_call.
+- **Browser** (browser_status, browser_tabs, browser_read, browser_open,
+  browser_navigate, browser_click, browser_fill, browser_eval, browser_close):
+  control the user's Chrome browser through the companion extension. Call
+  browser_status FIRST — if it's not connected, tell the user to set up the
+  extension (mention the /browser command) and stop. Once connected, use
+  browser_read to see a page, browser_tabs to list tabs, browser_open /
+  browser_navigate to go places, and browser_click / browser_fill to act.
 - **Files** (read_file, write_file, edit_file, list_dir, grep, glob): edit
   any file on disk. Use absolute paths or set_workspace into the right dir.
   read_file also pulls the text out of PDF and Word (.docx) documents — so

@@ -15,6 +15,8 @@ SLASH_COMMANDS: list[tuple[str, str]] = [
     ("/note", "show a single note: /note <name>"),
     ("/remind", "list reminders, add one: /remind add <text>"),
     ("/mcp", "list MCP servers / tools: /mcp [server]"),
+    ("/browser", "Chrome extension status + setup instructions"),
+    ("/gateway", "start/stop the Cagentic web UI"),
     ("/plan", "toggle plan mode (read-only)"),
     ("/todo", "view or modify the session todo list"),
     ("/stream", "toggle token streaming on/off"),

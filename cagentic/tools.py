@@ -49,17 +49,16 @@ class ToolContext:
     read_cache: dict | None = None
 
     def confirm(self, action: str, detail: str) -> bool:
-        if self.yolo:
-            return True
-        ui.warn(f"\nApprove {action}? {detail}")
-        try:
-            ans = input("  [y]es / [n]o / [a]lways: ").strip().lower()
-        except EOFError:
-            return False
-        if ans in ("a", "always"):
-            self.yolo = True
-            return True
-        return ans in ("y", "yes")
+        """Approval hook for inside a tool.
+
+        Every tool is already gated by can_use_tool() + the permission
+        resolver BEFORE it runs — the terminal resolver prompts in the
+        REPL, the gateway resolver prompts in the web UI. So by the time a
+        tool body calls confirm(), the action is approved; this returns
+        True rather than prompting again (a second input() prompt would
+        double-ask in the REPL and block the thread in the web gateway).
+        """
+        return True
 
 
 # ============================================================================
@@ -696,6 +695,180 @@ def t_mcp_read_resource(args: dict, ctx: ToolContext) -> str:
 
 
 # ============================================================================
+# Browser — control Chrome through the companion extension
+# ============================================================================
+
+def _browser(ctx: ToolContext):
+    """Get (lazily creating + starting) the BrowserBridge on the state."""
+    state = getattr(ctx, "state", None)
+    if state is None:
+        return None
+    if getattr(state, "browser", None) is None:
+        from .browser import BrowserBridge
+        engine = getattr(ctx, "engine", None)
+        cfg = (engine.config if engine is not None else {}) or {}
+        port = int((cfg.get("browser") or {}).get("port", 8765))
+        bridge = BrowserBridge(port=port)
+        bridge.start()
+        state.browser = bridge
+    return state.browser
+
+
+def _browser_setup_hint(bridge) -> str:
+    return (
+        f"the Cagentic Chrome extension isn't connected (bridge listening on "
+        f"port {bridge.port}). To connect it: open chrome://extensions, turn on "
+        f"Developer mode, click 'Load unpacked', and select the 'extension/' "
+        f"folder in the Cagentic repo. Run /browser for the exact path."
+    )
+
+
+def t_browser_status(args: dict, ctx: ToolContext) -> str:
+    b = _browser(ctx)
+    if b is None:
+        return "ERROR: browser bridge unavailable"
+    if b.error:
+        return f"ERROR: browser bridge could not start — {b.error}"
+    if b.is_connected():
+        return f"OK: the Chrome extension is connected (bridge on port {b.port})."
+    return _browser_setup_hint(b)
+
+
+def t_browser_tabs(args: dict, ctx: ToolContext) -> str:
+    b = _browser(ctx)
+    if b is None:
+        return "ERROR: browser bridge unavailable"
+    r = b.send("tabs", {})
+    if not r.get("ok"):
+        return f"ERROR: {r.get('error')}"
+    tabs = r.get("result") or []
+    if not tabs:
+        return "(no open browser tabs)"
+    lines = []
+    for t in tabs:
+        mark = "*" if t.get("active") else " "
+        title = (t.get("title") or "")[:60]
+        lines.append(f"  [{mark}] tab {t.get('id')}  {title}  — {t.get('url', '')}")
+    return _truncate("\n".join(lines))
+
+
+def t_browser_read(args: dict, ctx: ToolContext) -> str:
+    b = _browser(ctx)
+    if b is None:
+        return "ERROR: browser bridge unavailable"
+    r = b.send("read", {"tab_id": args.get("tab_id")})
+    if not r.get("ok"):
+        return f"ERROR: {r.get('error')}"
+    res = r.get("result") or {}
+    return _truncate(
+        f"{res.get('title', '')}\n{res.get('url', '')}\n\n{res.get('text', '')}"
+    )
+
+
+def t_browser_open(args: dict, ctx: ToolContext) -> str:
+    b = _browser(ctx)
+    if b is None:
+        return "ERROR: browser bridge unavailable"
+    url = args.get("url")
+    if not url:
+        return "ERROR: browser_open requires 'url'"
+    if not ctx.confirm("open a browser tab", url):
+        return "ERROR: user denied"
+    r = b.send("open", {"url": url, "active": args.get("active", True)})
+    if not r.get("ok"):
+        return f"ERROR: {r.get('error')}"
+    res = r.get("result") or {}
+    return f"OK: opened tab {res.get('id')} → {res.get('url', url)}"
+
+
+def t_browser_navigate(args: dict, ctx: ToolContext) -> str:
+    b = _browser(ctx)
+    if b is None:
+        return "ERROR: browser bridge unavailable"
+    url = args.get("url")
+    if not url:
+        return "ERROR: browser_navigate requires 'url'"
+    if not ctx.confirm("navigate the browser", url):
+        return "ERROR: user denied"
+    r = b.send("navigate", {"url": url, "tab_id": args.get("tab_id")})
+    if not r.get("ok"):
+        return f"ERROR: {r.get('error')}"
+    return f"OK: navigated to {url}"
+
+
+def t_browser_click(args: dict, ctx: ToolContext) -> str:
+    b = _browser(ctx)
+    if b is None:
+        return "ERROR: browser bridge unavailable"
+    selector = args.get("selector")
+    text = args.get("text")
+    if not selector and not text:
+        return "ERROR: browser_click requires 'selector' or 'text'"
+    target = selector or f"text:{text}"
+    if not ctx.confirm("click in the browser", target):
+        return "ERROR: user denied"
+    r = b.send("click", {"selector": selector, "text": text, "tab_id": args.get("tab_id")})
+    if not r.get("ok"):
+        return f"ERROR: {r.get('error')}"
+    res = r.get("result") or {}
+    if not res.get("ok"):
+        return f"ERROR: {res.get('error', 'click failed')}"
+    return f"OK: clicked {res.get('clicked', target)}"
+
+
+def t_browser_fill(args: dict, ctx: ToolContext) -> str:
+    b = _browser(ctx)
+    if b is None:
+        return "ERROR: browser bridge unavailable"
+    selector = args.get("selector")
+    value = args.get("value")
+    if not selector or value is None:
+        return "ERROR: browser_fill requires 'selector' and 'value'"
+    if not ctx.confirm("fill a browser field", f"{selector} = {str(value)[:60]}"):
+        return "ERROR: user denied"
+    r = b.send("fill", {"selector": selector, "value": value, "tab_id": args.get("tab_id")})
+    if not r.get("ok"):
+        return f"ERROR: {r.get('error')}"
+    res = r.get("result") or {}
+    if not res.get("ok"):
+        return f"ERROR: {res.get('error', 'fill failed')}"
+    return f"OK: filled {selector}"
+
+
+def t_browser_eval(args: dict, ctx: ToolContext) -> str:
+    b = _browser(ctx)
+    if b is None:
+        return "ERROR: browser bridge unavailable"
+    code = args.get("code")
+    if not code:
+        return "ERROR: browser_eval requires 'code'"
+    if not ctx.confirm("run JavaScript in the browser", code[:120]):
+        return "ERROR: user denied"
+    r = b.send("eval", {"code": code, "tab_id": args.get("tab_id")})
+    if not r.get("ok"):
+        return f"ERROR: {r.get('error')}"
+    res = r.get("result") or {}
+    if not res.get("ok"):
+        return f"ERROR: {res.get('error', 'eval failed')}"
+    return _truncate(f"OK: {res.get('value', '')}")
+
+
+def t_browser_close(args: dict, ctx: ToolContext) -> str:
+    b = _browser(ctx)
+    if b is None:
+        return "ERROR: browser bridge unavailable"
+    tab_id = args.get("tab_id")
+    if tab_id is None:
+        return "ERROR: browser_close requires 'tab_id' (use browser_tabs to find it)"
+    if not ctx.confirm("close a browser tab", f"tab {tab_id}"):
+        return "ERROR: user denied"
+    r = b.send("close", {"tab_id": tab_id})
+    if not r.get("ok"):
+        return f"ERROR: {r.get('error')}"
+    return f"OK: closed tab {tab_id}"
+
+
+# ============================================================================
 # Web — fetch + search
 # ============================================================================
 
@@ -1111,6 +1284,16 @@ TOOLS: dict[str, ToolFn] = {
     "mcp_call": t_mcp_call,
     "mcp_list_resources": t_mcp_list_resources,
     "mcp_read_resource": t_mcp_read_resource,
+    # browser
+    "browser_status": t_browser_status,
+    "browser_tabs": t_browser_tabs,
+    "browser_read": t_browser_read,
+    "browser_open": t_browser_open,
+    "browser_navigate": t_browser_navigate,
+    "browser_click": t_browser_click,
+    "browser_fill": t_browser_fill,
+    "browser_eval": t_browser_eval,
+    "browser_close": t_browser_close,
     # web
     "web_fetch": t_web_fetch,
     "web_search": t_web_search,
@@ -1308,6 +1491,74 @@ TOOL_SCHEMAS: list[dict[str, Any]] = [
         }, "required": ["server", "uri"]},
     }},
 
+    # ---------- browser ----------
+    {"type": "function", "function": {
+        "name": "browser_status",
+        "description": "Check whether the Cagentic Chrome extension is connected. Call this before other browser_* tools.",
+        "parameters": {"type": "object", "properties": {}},
+    }},
+    {"type": "function", "function": {
+        "name": "browser_tabs",
+        "description": "List the open browser tabs (id, title, url, which is active).",
+        "parameters": {"type": "object", "properties": {}},
+    }},
+    {"type": "function", "function": {
+        "name": "browser_read",
+        "description": "Read the title, URL and visible text of a browser tab (the active tab if tab_id is omitted).",
+        "parameters": {"type": "object", "properties": {
+            "tab_id": {"type": "integer"},
+        }},
+    }},
+    {"type": "function", "function": {
+        "name": "browser_open",
+        "description": "Open a URL in a new browser tab. Asks for approval.",
+        "parameters": {"type": "object", "properties": {
+            "url": {"type": "string"},
+            "active": {"type": "boolean"},
+        }, "required": ["url"]},
+    }},
+    {"type": "function", "function": {
+        "name": "browser_navigate",
+        "description": "Navigate a tab to a URL (active tab if tab_id omitted). Asks for approval.",
+        "parameters": {"type": "object", "properties": {
+            "url": {"type": "string"},
+            "tab_id": {"type": "integer"},
+        }, "required": ["url"]},
+    }},
+    {"type": "function", "function": {
+        "name": "browser_click",
+        "description": "Click an element in a tab — by CSS 'selector' or by visible 'text'. Asks for approval.",
+        "parameters": {"type": "object", "properties": {
+            "selector": {"type": "string"},
+            "text": {"type": "string"},
+            "tab_id": {"type": "integer"},
+        }},
+    }},
+    {"type": "function", "function": {
+        "name": "browser_fill",
+        "description": "Set the value of a form field matched by CSS selector. Asks for approval.",
+        "parameters": {"type": "object", "properties": {
+            "selector": {"type": "string"},
+            "value": {"type": "string"},
+            "tab_id": {"type": "integer"},
+        }, "required": ["selector", "value"]},
+    }},
+    {"type": "function", "function": {
+        "name": "browser_eval",
+        "description": "Run a snippet of JavaScript in a browser tab and return its result. Asks for approval.",
+        "parameters": {"type": "object", "properties": {
+            "code": {"type": "string"},
+            "tab_id": {"type": "integer"},
+        }, "required": ["code"]},
+    }},
+    {"type": "function", "function": {
+        "name": "browser_close",
+        "description": "Close a browser tab by id. Asks for approval.",
+        "parameters": {"type": "object", "properties": {
+            "tab_id": {"type": "integer"},
+        }, "required": ["tab_id"]},
+    }},
+
     # ---------- web ----------
     {"type": "function", "function": {
         "name": "web_fetch",
@@ -1447,6 +1698,9 @@ TOOL_GROUPS: dict[str, list[str]] = {
                   "reminder_delete", "reminder_update"],
     "mcp": ["mcp_list_servers", "mcp_list_tools", "mcp_call",
             "mcp_list_resources", "mcp_read_resource"],
+    "browser": ["browser_status", "browser_tabs", "browser_read",
+                "browser_open", "browser_navigate", "browser_click",
+                "browser_fill", "browser_eval", "browser_close"],
     "shell": ["run_bash", "bash_async"],
     "tasks": ["task_get", "task_list", "task_status", "task_wait", "task_output"],
     "interaction": ["ask_user_question"],
@@ -1460,11 +1714,10 @@ TOOL_GROUPS: dict[str, list[str]] = {
     ],
 }
 
-# Personal-assistant defaults: files + web + notes + reminders + mcp + interaction.
-# Shell is on by default too (useful for "open this", "play music" style asks)
-# but uses run_bash's per-call confirm. Tasks is on because background bg jobs.
+# Personal-assistant defaults. Shell uses run_bash's per-call confirm;
+# browser tools gate their mutating actions the same way.
 DEFAULT_GROUPS: set[str] = {
-    "files", "web", "notes", "reminders", "mcp",
+    "files", "web", "notes", "reminders", "mcp", "browser",
     "shell", "tasks", "interaction", "planning", "system",
 }
 

@@ -35,6 +35,8 @@ _DEFAULTS: dict[str, Any] = {
     },
     "github": {"token": None},
     "mcp": {"servers": {}},      # {name: {"command": [...], "env": {...}, "enabled": bool}}
+    "browser": {"enabled": True, "port": 8765},   # companion Chrome extension bridge
+    "gateway": {"port": 8700},   # /gateway web UI
 }
 
 

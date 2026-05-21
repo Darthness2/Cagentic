@@ -40,6 +40,8 @@ Slash commands:
   /note <name>           show one note
   /remind [add <text>]   list reminders or add one
   /mcp [server]          list MCP servers, or list tools on one
+  /browser               Chrome extension status + setup steps
+  /gateway [off]         start (or stop) the Cagentic web UI
   /plan on|off           toggle plan mode (read-only)
   /todo [add|done|clear] session todo list
   /stream on|off         toggle token streaming
@@ -255,7 +257,8 @@ def _settle_in(agent: Agent) -> None:
             print(f"    …and {len(overdue) - 5} more — type /remind to see them all")
 
 
-def repl(agent: Agent, cfg: dict) -> int:
+def repl(agent: Agent, cfg: dict, gateway_holder: dict | None = None) -> int:
+    gateway_holder = gateway_holder if gateway_holder is not None else {"server": None}
     ui.banner(agent.model, str(agent.state.workspace),
               tools_enabled=agent.tools_enabled,
               user_name=agent.state.user_name)
@@ -451,6 +454,54 @@ def repl(agent: Agent, cfg: dict) -> int:
                             n = t.get("name", "?")
                             d = (t.get("description") or "").splitlines()[0][:140]
                             print(f"  - {n}  —  {d}")
+                continue
+            if cmd == "browser":
+                from .browser import BrowserBridge
+                if agent.state.browser is None:
+                    port = int((cfg.get("browser") or {}).get("port", 8765))
+                    b = BrowserBridge(port=port)
+                    b.start()
+                    agent.state.browser = b
+                b = agent.state.browser
+                ext_dir = Path(__file__).resolve().parent.parent / "extension"
+                if b.error:
+                    ui.error(f"browser bridge couldn't start: {b.error}")
+                elif b.is_connected():
+                    ui.info(f"Chrome extension is connected — bridge on port {b.port}.")
+                    ui.info("Cagentic can read pages, open tabs, click, and fill forms.")
+                else:
+                    ui.warn(f"bridge running on port {b.port}, but the Chrome extension "
+                            f"isn't connected yet.")
+                    ui.info("To connect it:")
+                    print(f"  1. Open  chrome://extensions")
+                    print(f"  2. Turn on 'Developer mode' (top-right)")
+                    print(f"  3. Click 'Load unpacked' and pick this folder:")
+                    print(ui.color(f"       {ext_dir}", ui.GLOW))
+                    print(f"  4. The extension connects automatically; re-run /browser.")
+                continue
+            if cmd == "gateway":
+                from .gateway import Gateway
+                gw = gateway_holder.get("server")
+                if arg1.lower() in ("off", "stop"):
+                    if gw is None or not gw.running:
+                        ui.info("the gateway isn't running.")
+                    else:
+                        gw.stop()
+                        gateway_holder["server"] = None
+                        ui.info("gateway stopped.")
+                    continue
+                if gw is not None and gw.running:
+                    ui.info(f"gateway is already live at {gw.url()}")
+                    continue
+                port = int((cfg.get("gateway") or {}).get("port", 8700))
+                gw = Gateway(agent, cfg, port=port)
+                if gw.start():
+                    gateway_holder["server"] = gw
+                    ui.info(f"gateway is live — open {gw.url()} in your browser.")
+                    ui.info("it's the full assistant on the web; tool approvals pop "
+                            "up right in the page. /gateway off to stop it.")
+                else:
+                    ui.error(f"gateway couldn't start: {gw.error}")
                 continue
 
             if cmd == "plan":
@@ -870,7 +921,20 @@ def main(argv: list[str] | None = None) -> int:
         from .mcp_client import MCPManager
         agent.state.mcp = MCPManager(cfg)
 
-    # Shutdown handlers: unload model + shut down MCP servers.
+    # Start the browser bridge so the Chrome extension can connect.
+    br_cfg = cfg.get("browser") or {}
+    if br_cfg.get("enabled", True):
+        from .browser import BrowserBridge
+        bridge = BrowserBridge(port=int(br_cfg.get("port", 8765)))
+        if bridge.start():
+            agent.state.browser = bridge
+        else:
+            ui.warn(f"browser bridge: {bridge.error}")
+
+    # The /gateway web UI, started on demand. Held here so /gateway can toggle it.
+    gateway_holder: dict = {"server": None}
+
+    # Shutdown handlers: unload model + shut down MCP / browser / gateway.
     import atexit
     import signal
     _shutdown_done = {"flag": False}
@@ -888,6 +952,16 @@ def main(argv: list[str] | None = None) -> int:
                 agent.state.mcp.shutdown()
         except Exception:
             pass
+        try:
+            if agent.state.browser is not None:
+                agent.state.browser.stop()
+        except Exception:
+            pass
+        try:
+            if gateway_holder["server"] is not None:
+                gateway_holder["server"].stop()
+        except Exception:
+            pass
 
     atexit.register(_shutdown)
     for sig_name in ("SIGTERM", "SIGBREAK", "SIGHUP"):
@@ -902,7 +976,7 @@ def main(argv: list[str] | None = None) -> int:
     if args.prompt:
         agent.turn(args.prompt)
         return 0
-    return repl(agent, cfg)
+    return repl(agent, cfg, gateway_holder)
 
 
 if __name__ == "__main__":
