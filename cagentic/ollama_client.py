@@ -16,12 +16,20 @@ def _is_apple_silicon() -> bool:
 
 
 def _normalize_host(host: str) -> str:
-    """Make `host` into a valid Ollama base URL.
+    """Make `host` into a valid Ollama base URL the client can connect to.
 
     Accepts bare values like '0.0.0.0', 'localhost', 'localhost:11434',
     'http://example' and rewrites them to include a scheme and (if missing)
     Ollama's default port 11434. URLs that already include both — or a
-    custom path — are left alone.
+    custom path — keep their port/path.
+
+    `0.0.0.0` (and the IPv6 equivalent `::`) mean "listen on every
+    interface" — they're valid for `ollama serve` to BIND to, but they are
+    NOT a routable destination for a client to CONNECT to (the connection
+    fails outright on macOS and Windows). Setting `OLLAMA_HOST=0.0.0.0` is
+    the standard way to expose the Ollama server on a LAN, so when we see
+    one of these as a target we rewrite it to the matching loopback address
+    (`127.0.0.1` / `::1`) that actually accepts connections.
     """
     from urllib.parse import urlparse, urlunparse
 
@@ -31,10 +39,31 @@ def _normalize_host(host: str) -> str:
     if "://" not in s:
         s = "http://" + s
     p = urlparse(s)
-    # If no explicit port AND no path component, assume Ollama's default port.
-    if not p.port and not p.path:
-        hostname = p.hostname or ""
-        netloc = f"{hostname}:11434"
+
+    hostname = p.hostname or ""
+    # "Any interface" bind addresses -> the loopback a client can reach.
+    _LOOPBACK = {
+        "0.0.0.0": "127.0.0.1",
+        "::": "::1",
+        "[::]": "::1",
+        "0": "127.0.0.1",          # `OLLAMA_HOST=0` is shorthand some tools accept
+    }
+    rewritten = _LOOPBACK.get(hostname)
+
+    # Add Ollama's default port only when no port AND no custom path is set
+    # (a path implies a reverse-proxy mount, which has its own routing).
+    needs_default_port = not p.port and not p.path
+
+    if rewritten is not None or needs_default_port:
+        new_host = rewritten if rewritten is not None else hostname
+        # Bracket IPv6 literals so the netloc parses back correctly.
+        if ":" in new_host and not new_host.startswith("["):
+            new_host = f"[{new_host}]"
+        port = p.port or (11434 if needs_default_port else None)
+        netloc = f"{new_host}:{port}" if port else new_host
+        if p.username:
+            cred = p.username + (f":{p.password}" if p.password else "")
+            netloc = f"{cred}@{netloc}"
         s = urlunparse((p.scheme, netloc, p.path, p.params, p.query, p.fragment))
     return s
 
@@ -114,7 +143,7 @@ class OllamaClient:
         `timeout` is kept for back-compat: if you pass it and leave both
         read timeouts at their defaults, it overrides them both.
         """
-        self.host = _normalize_host(host)
+        self.host = host   # property setter runs _normalize_host
         self.timeout = timeout
         self.connect_timeout = connect_timeout
         legacy_override = timeout != 600
@@ -127,6 +156,17 @@ class OllamaClient:
         self.keep_alive = keep_alive
         self.num_ctx = num_ctx
         self.num_predict = num_predict
+
+    @property
+    def host(self) -> str:
+        return self._host
+
+    @host.setter
+    def host(self, value: str) -> None:
+        # Normalize on EVERY assignment — env var, saved config, and the
+        # interactive /host command all funnel through here, so an
+        # unroutable 0.0.0.0 can never reach the request layer.
+        self._host = _normalize_host(value)
 
     def _apply_keep_alive(self, payload: dict) -> None:
         if self.keep_alive is not None and "keep_alive" not in payload:

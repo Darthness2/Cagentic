@@ -559,10 +559,16 @@ def repl(agent: Agent, cfg: dict) -> int:
                 if not arg1:
                     ui.info(f"current host: {agent.client.host}")
                 else:
-                    agent.client.host = arg1.rstrip("/")
+                    # The client's host setter normalizes (adds scheme/port,
+                    # rewrites bind-all 0.0.0.0 to a routable loopback).
+                    agent.client.host = arg1
                     cfg["host"] = agent.client.host
                     config.save(cfg)
-                    ui.info(f"host set to {agent.client.host}")
+                    if "0.0.0.0" in arg1 or arg1.strip() in ("::", "[::]", "0"):
+                        ui.info(f"{arg1!r} is a bind-all address — "
+                                f"using {agent.client.host} (a client can't dial 0.0.0.0).")
+                    else:
+                        ui.info(f"host set to {agent.client.host}")
                 continue
             if cmd == "config":
                 import json as _json
@@ -778,10 +784,9 @@ def main(argv: list[str] | None = None) -> int:
         config.set_value(cfg, "user_name", args.name)
         config.save(cfg)
 
-    host = args.host or os.environ.get("OLLAMA_HOST") or cfg.get("host", "http://localhost:11434")
-    cfg["host"] = host
+    raw_host = args.host or os.environ.get("OLLAMA_HOST") or cfg.get("host", "http://localhost:11434")
     client = OllamaClient(
-        host=host,
+        host=raw_host,
         connect_timeout=float(config.get_value(cfg, "ollama.connect_timeout", 15.0)),
         read_timeout=float(config.get_value(cfg, "ollama.read_timeout", 1800.0)),
         nonstream_read_timeout=float(config.get_value(cfg, "ollama.nonstream_read_timeout", 1800.0)),
@@ -789,6 +794,12 @@ def main(argv: list[str] | None = None) -> int:
         num_ctx=config.get_value(cfg, "ollama.num_ctx", 8192),
         num_predict=config.get_value(cfg, "ollama.num_predict", -1),
     )
+    # Store the normalized host the client will actually use — so /config and
+    # the next launch show the routable address, not a bind-only 0.0.0.0.
+    cfg["host"] = client.host
+    if "0.0.0.0" in raw_host or raw_host.strip() in ("::", "[::]", "0"):
+        ui.info(f"Ollama host {raw_host!r} is a bind-all address — "
+                f"connecting to {client.host} instead.")
 
     model = args.model or os.environ.get("CAGENTIC_MODEL") or cfg.get("model")
     if not model:
