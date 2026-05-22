@@ -95,6 +95,12 @@ def _explain_http_error(status: int, body: str) -> str:
             f"ollama HTTP 404: {body[:200]}\n"
             "→ the model isn't installed locally. Run: ollama pull <model>"
         )
+    if status == 400 and "max_tokens" in b and ("positive" in b or "-1" in b):
+        return (
+            f"cloud model rejected the request (HTTP 400): {body[:200]}\n"
+            "→ the model needs a positive max output length. Set a positive "
+            "value, e.g.  /set ollama.num_predict 4096"
+        )
     return f"chat HTTP {status}: {body}"
 
 
@@ -172,13 +178,19 @@ class OllamaClient:
         if self.keep_alive is not None and "keep_alive" not in payload:
             payload["keep_alive"] = self.keep_alive
         opts = payload.setdefault("options", {}) if (self.num_ctx or self.num_predict is not None) else None
-        if self.num_ctx:
+        if self.num_ctx and opts is not None:
             opts.setdefault("num_ctx", self.num_ctx)
-        # Many models in the Ollama library ship with a baked-in num_predict
-        # cap (often 128/256), which truncates the assistant mid-sentence.
-        # -1 = generate until natural stop / num_ctx. Explicit so the model
-        # default never silently clips the response.
-        if self.num_predict is not None and opts is not None:
+        # num_predict: only ever send a POSITIVE cap.
+        #
+        # Ollama uses -1 ("generate until stop") and -2 ("fill context") as
+        # sentinels. Those are fine for a local Ollama model, but cloud
+        # models — including ones routed THROUGH Ollama — forward num_predict
+        # as the provider's `max_tokens`, which must be positive (a -1 is
+        # rejected with HTTP 400). Omitting it instead lets every backend
+        # apply its own sensible default: unlimited on local Ollama, a
+        # reasonable cap on cloud providers.
+        if (isinstance(self.num_predict, int) and self.num_predict > 0
+                and opts is not None):
             opts.setdefault("num_predict", self.num_predict)
 
     def list_models(self) -> list[str]:
