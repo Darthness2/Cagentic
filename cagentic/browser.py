@@ -11,6 +11,7 @@ Wire protocol (JSON, server bound to 127.0.0.1 only):
     GET  /next     extension long-polls; receives {"command": {...}|null}
     POST /result   extension posts {"id", "ok", "result"}
     GET  /ping     health check + connection heartbeat
+    GET  /status   live status for the extension popup (model, activity, …)
 
 Nothing is reachable beyond localhost, and every mutating browser action
 still goes through Cagentic's normal approval prompt before it's queued.
@@ -29,6 +30,13 @@ _LONGPOLL_SECONDS = 25
 _CONNECTED_WINDOW = 45
 
 
+def _version() -> str:
+    try:
+        return __import__("cagentic").__version__
+    except Exception:
+        return "0.1.0"
+
+
 class BrowserBridge:
     """Localhost command channel to the Chrome extension."""
 
@@ -43,6 +51,11 @@ class BrowserBridge:
         self._next_id = 1
         self._last_poll = 0.0                # monotonic time of last extension poll
         self.error: str | None = None        # set if start() failed
+        # Live status surfaced to the extension popup.
+        self.model: str | None = None        # the loaded Ollama model
+        self.activity: str = "idle"          # what the assistant is doing
+        self.activity_at: float = time.time()
+        self._recent: list[dict] = []        # last browser actions, newest first
 
     # -- lifecycle ----------------------------------------------------------
 
@@ -80,17 +93,49 @@ class BrowserBridge:
         """True if the extension has polled recently enough to be considered live."""
         return self.running and (time.monotonic() - self._last_poll) < _CONNECTED_WINDOW
 
+    # -- live status (for the extension popup) ------------------------------
+
+    def set_status(self, *, model: str | None = None, activity: str | None = None) -> None:
+        """Update what the popup shows — the loaded model and current activity."""
+        with self._lock:
+            if model is not None:
+                self.model = model
+            if activity is not None and activity != self.activity:
+                self.activity = activity
+                self.activity_at = time.time()
+
+    def _record(self, action: str, summary: str, ok: bool) -> None:
+        with self._lock:
+            self._recent.insert(0, {
+                "action": action, "summary": summary, "ok": ok, "ts": time.time(),
+            })
+            del self._recent[8:]
+
+    def status(self) -> dict:
+        with self._lock:
+            return {
+                "ok": True,
+                "service": "cagentic-browser-bridge",
+                "version": _version(),
+                "model": self.model,
+                "activity": self.activity,
+                "activity_at": self.activity_at,
+                "recent": list(self._recent),
+            }
+
     # -- agent side ---------------------------------------------------------
 
     def send(self, action: str, params: dict | None = None, timeout: float = 30.0) -> dict:
         """Queue a command for the extension and block until its result
         comes back. Returns {"ok": bool, "result"|"error": ...}."""
+        params = params or {}
+        summary = _command_summary(action, params)
         if self._server is None:
             return {"ok": False, "error": "browser bridge is not running"}
         with self._cv:
             cmd_id = self._next_id
             self._next_id += 1
-            self._queue.append({"id": cmd_id, "action": action, "params": params or {}})
+            self._queue.append({"id": cmd_id, "action": action, "params": params})
             self._cv.notify_all()
             deadline = time.monotonic() + timeout
             while cmd_id not in self._results:
@@ -98,6 +143,7 @@ class BrowserBridge:
                 if remaining <= 0:
                     # Give up: drop the command so the extension doesn't run it late.
                     self._queue = [c for c in self._queue if c["id"] != cmd_id]
+                    self._record(action, summary, False)
                     if not self.is_connected():
                         return {"ok": False, "error": (
                             "the Cagentic Chrome extension isn't connected — "
@@ -105,7 +151,9 @@ class BrowserBridge:
                         )}
                     return {"ok": False, "error": f"browser command '{action}' timed out"}
                 self._cv.wait(remaining)
-            return self._results.pop(cmd_id)
+            result = self._results.pop(cmd_id)
+        self._record(action, summary, bool(result.get("ok")))
+        return result
 
     # -- extension side (called by the HTTP handler) ------------------------
 
@@ -128,6 +176,25 @@ class BrowserBridge:
     def _heartbeat(self) -> None:
         with self._lock:
             self._last_poll = time.monotonic()
+
+
+def _command_summary(action: str, params: dict) -> str:
+    """A short human label for a browser command, for the recent-actions list."""
+    if action in ("open", "navigate"):
+        return str(params.get("url", ""))
+    if action == "click":
+        return str(params.get("selector") or params.get("text") or "")
+    if action == "fill":
+        return str(params.get("selector", ""))
+    if action == "eval":
+        code = str(params.get("code", ""))
+        return code if len(code) < 44 else code[:41] + "…"
+    if action == "read":
+        tid = params.get("tab_id")
+        return f"tab {tid}" if tid else "active tab"
+    if action == "close":
+        return f"tab {params.get('tab_id', '')}"
+    return ""
 
 
 class _Handler(BaseHTTPRequestHandler):
@@ -169,6 +236,9 @@ class _Handler(BaseHTTPRequestHandler):
         elif path == "/ping":
             self._bridge()._heartbeat()
             self._send_json({"ok": True, "service": "cagentic-browser-bridge"})
+        elif path == "/status":
+            self._bridge()._heartbeat()
+            self._send_json(self._bridge().status())
         else:
             self._send_json({"error": "not found"}, status=404)
 

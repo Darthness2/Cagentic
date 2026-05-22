@@ -196,6 +196,17 @@ def _summarize_args(name: str, args: dict) -> str:
     return ""
 
 
+def _poke_browser(state, *, model: str | None = None, activity: str | None = None) -> None:
+    """Push the assistant's live status to the browser bridge (if one is up)
+    so the Chrome extension popup can show what Cagentic is doing."""
+    bridge = getattr(state, "browser", None)
+    if bridge is not None and hasattr(bridge, "set_status"):
+        try:
+            bridge.set_status(model=model, activity=activity)
+        except Exception:
+            pass
+
+
 def _load_memory(workspace: Path, home: Path) -> str:
     """Load any CAGENTIC.md / AGENTS.md memory files."""
     seen: set[Path] = set()
@@ -551,6 +562,7 @@ class QueryEngine:
             resets["files_read"] = set()
         if resets:
             self.state.update(**resets)
+        _poke_browser(self.state, model=self.model, activity="thinking")
 
         user_msg = process_user_input(prompt, workspace=self.state.workspace, home=self.state.home)
         yield Message("user", {"text": prompt})
@@ -709,6 +721,7 @@ class QueryEngine:
             if not calls:
                 if narration:
                     yield Message("assistant", {"text": narration})
+                _poke_browser(self.state, activity="idle")
                 yield Message("done", {
                     "text": narration,
                     "usage": dict(self._usage),
@@ -729,6 +742,7 @@ class QueryEngine:
                     yield Message("assistant", {"text": (
                         salvaged + "\n\n_(I got stuck. Try /retry.)_"
                     )})
+                _poke_browser(self.state, activity="idle")
                 yield Message("done", {
                     "text": "Stopped: stuck in a loop. Try /retry or /new for a fresh context.",
                     "usage": dict(self._usage),
@@ -871,6 +885,8 @@ class QueryEngine:
             cleaned_calls.append((name, args, role))
 
         for ev in self.executor.execute(cleaned_calls):
+            if ev.kind == "tool_call":
+                _poke_browser(self.state, activity=f"running {ev.data.get('name', 'a tool')}")
             yield ev
             if ev.kind == "tool_result":
                 d = ev.data

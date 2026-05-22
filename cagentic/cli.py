@@ -927,6 +927,7 @@ def main(argv: list[str] | None = None) -> int:
         from .browser import BrowserBridge
         bridge = BrowserBridge(port=int(br_cfg.get("port", 8765)))
         if bridge.start():
+            bridge.set_status(model=model, activity="idle")
             agent.state.browser = bridge
         else:
             ui.warn(f"browser bridge: {bridge.error}")

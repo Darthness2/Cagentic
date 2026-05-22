@@ -400,32 +400,43 @@ class _Handler(BaseHTTPRequestHandler):
 
 
 # ---------------------------------------------------------------- the page --
-# The web UI deliberately mirrors the terminal CLI: warm-dusk palette, a
-# monospace face throughout, the ✦ wordmark, and the same markers the REPL
-# uses (✦ assistant, ↳ tool, ❀ plan, · note, ▲ warn, ✗ error).
+# A professional AI chat app — clean sans-serif type, generous spacing,
+# refined components — dressed in Cagentic's warm-dusk palette.
 
 _HTML = """<!doctype html>
 <html lang="en">
 <head>
 <meta charset="utf-8" />
 <meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover" />
-<title>cagentic</title>
+<title>Cagentic</title>
 <link rel="stylesheet" href="/app.css" />
 </head>
 <body>
 <div id="app">
   <aside id="sidebar">
-    <div class="brand"><span class="spark">&#10022;</span><span class="word">cagentic</span></div>
-    <button id="newChat" class="new-chat"><span class="plus">+</span> new chat</button>
-    <div class="chats-label">chats</div>
+    <div class="brand">
+      <span class="brand-mark">&#10022;</span>
+      <span class="brand-name">Cagentic</span>
+    </div>
+    <button id="newChat" class="new-chat">
+      <svg viewBox="0 0 24 24" width="16" height="16"><path d="M12 5v14M5 12h14"
+        fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round"/></svg>
+      New chat
+    </button>
+    <div class="chats-label">Recent</div>
     <div id="chatList" class="chat-list"></div>
     <div class="sidebar-foot">
       <button id="openSettings" class="foot-btn">
-        <span class="gear">&#9881;</span> settings
+        <svg viewBox="0 0 24 24" width="16" height="16"><path
+          d="M12 15a3 3 0 100-6 3 3 0 000 6z" fill="none" stroke="currentColor"
+          stroke-width="2"/><path d="M19.4 15a1.6 1.6 0 00.3 1.8l.1.1a2 2 0 11-2.8 2.8l-.1-.1a1.6 1.6 0 00-1.8-.3 1.6 1.6 0 00-1 1.5V21a2 2 0 11-4 0v-.1a1.6 1.6 0 00-1-1.5 1.6 1.6 0 00-1.8.3l-.1.1a2 2 0 11-2.8-2.8l.1-.1a1.6 1.6 0 00.3-1.8 1.6 1.6 0 00-1.5-1H3a2 2 0 110-4h.1a1.6 1.6 0 001.5-1 1.6 1.6 0 00-.3-1.8l-.1-.1a2 2 0 112.8-2.8l.1.1a1.6 1.6 0 001.8.3H9a1.6 1.6 0 001-1.5V3a2 2 0 114 0v.1a1.6 1.6 0 001 1.5 1.6 1.6 0 001.8-.3l.1-.1a2 2 0 112.8 2.8l-.1.1a1.6 1.6 0 00-.3 1.8V9a1.6 1.6 0 001.5 1H21a2 2 0 110 4h-.1a1.6 1.6 0 00-1.5 1z"
+          fill="none" stroke="currentColor" stroke-width="2"/></svg>
+        Settings
       </button>
       <div id="footMeta" class="foot-meta"></div>
     </div>
   </aside>
+
   <main id="main">
     <header id="topbar">
       <button id="menuBtn" class="menu-btn" aria-label="Open chats">
@@ -433,22 +444,23 @@ _HTML = """<!doctype html>
           d="M3 6h18M3 12h18M3 18h18" fill="none" stroke="currentColor"
           stroke-width="2" stroke-linecap="round"/></svg>
       </button>
-      <div id="chatTitle">new chat</div>
+      <div id="chatTitle">New chat</div>
       <div id="modelChip" class="chip"></div>
     </header>
     <div id="log" class="log"></div>
     <div id="composer" class="composer">
-      <div class="composer-box">
-        <span class="prompt-mark">&#10022;</span>
-        <textarea id="input" rows="1" placeholder="message cagentic…"></textarea>
-        <button id="send" class="send" title="Send" aria-label="Send">
-          <svg viewBox="0 0 24 24" width="17" height="17"><path
-            d="M12 19V5M12 5l-6 6M12 5l6 6" fill="none" stroke="currentColor"
-            stroke-width="2.6" stroke-linecap="round" stroke-linejoin="round"/></svg>
-        </button>
-      </div>
-      <div class="composer-hint">
-        runs entirely on your machine &mdash; browse, files, notes, reminders
+      <div class="composer-inner">
+        <div class="composer-box">
+          <textarea id="input" rows="1" placeholder="Message Cagentic…"></textarea>
+          <button id="send" class="send" title="Send" aria-label="Send">
+            <svg viewBox="0 0 24 24" width="18" height="18"><path
+              d="M12 19V5M12 5l-6 6M12 5l6 6" fill="none" stroke="currentColor"
+              stroke-width="2.4" stroke-linecap="round" stroke-linejoin="round"/></svg>
+          </button>
+        </div>
+        <div class="composer-hint">
+          Cagentic runs on your machine — it can browse, manage files, and take notes.
+        </div>
       </div>
     </div>
   </main>
@@ -458,34 +470,39 @@ _HTML = """<!doctype html>
 <div id="settingsModal" class="modal hidden">
   <div class="modal-card">
     <div class="modal-head">
-      <h2><span class="spark">&#10022;</span> settings</h2>
-      <button id="closeSettings" class="icon-btn">&times;</button>
+      <h2>Settings</h2>
+      <button id="closeSettings" class="icon-btn" aria-label="Close">
+        <svg viewBox="0 0 24 24" width="18" height="18"><path d="M6 6l12 12M18 6L6 18"
+          fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round"/></svg>
+      </button>
     </div>
     <div class="modal-body">
-      <label class="field">
-        <span class="field-label">model</span>
+      <div class="field">
+        <span class="field-label">Model</span>
         <select id="setModel"></select>
-      </label>
-      <label class="field">
-        <span class="field-label">your name</span>
-        <input id="setName" type="text" placeholder="what should I call you?" />
-      </label>
-      <label class="field">
-        <span class="field-label">temperature <em id="tempVal">0.4</em></span>
+      </div>
+      <div class="field">
+        <span class="field-label">Your name</span>
+        <input id="setName" type="text" placeholder="What should I call you?" />
+      </div>
+      <div class="field">
+        <span class="field-label">Temperature <em id="tempVal">0.4</em></span>
         <input id="setTemp" type="range" min="0" max="1.5" step="0.05" />
-      </label>
-      <label class="field row">
-        <span class="field-label">stream responses</span>
-        <input id="setStream" type="checkbox" class="switch" />
-      </label>
-      <label class="field row">
-        <span class="field-label">auto-approve tools
-          <em>skip approval prompts</em></span>
-        <input id="setYolo" type="checkbox" class="switch" />
-      </label>
+      </div>
+      <div class="field row">
+        <div><span class="field-label">Stream responses</span>
+          <span class="field-hint">show replies as they're written</span></div>
+        <label class="toggle"><input id="setStream" type="checkbox" /><span></span></label>
+      </div>
+      <div class="field row">
+        <div><span class="field-label">Auto-approve tools</span>
+          <span class="field-hint">skip every approval prompt</span></div>
+        <label class="toggle"><input id="setYolo" type="checkbox" /><span></span></label>
+      </div>
     </div>
     <div class="modal-foot">
-      <button id="saveSettings" class="primary">save</button>
+      <button id="cancelSettings" class="btn-ghost">Cancel</button>
+      <button id="saveSettings" class="btn-primary">Save changes</button>
     </div>
   </div>
 </div>
@@ -496,385 +513,415 @@ _HTML = """<!doctype html>
 """
 
 _CSS = """
-/* ===== cagentic gateway — terminal-styled web app ======================= */
+/* ===== Cagentic — gateway web app ====================================== */
 :root {
-  /* warm dusk — the CLI palette, tuned for screens */
-  --bg:        #16121b;
-  --bg-2:      #120f17;
-  --panel:     #1f1926;
-  --raised:    #2a2233;
-  --border:    #362c42;
-  --border-2:  #473a55;
-  --text:      #e9e1ec;
-  --muted:     #9a8fa6;
-  --soft:      #6b6076;
-  --dusk:      #c79ec7;   /* orchid  — greetings, info */
-  --glow:      #ffb892;   /* peach   — the spark, prompt, you */
-  --plum:      #a384a3;   /* plum    — tool marker, structure */
-  --gold:      #e3bd6e;   /* gold    — plans, code, accents */
-  --ok:        #93c58f;
-  --warn:      #f0b266;
-  --err:       #e29696;
-  --mono: "JetBrains Mono","SF Mono","Cascadia Code","Fira Code",
-          ui-monospace,"Roboto Mono",Menlo,Consolas,monospace;
-  --radius: 11px;
+  --bg:        #161118;
+  --bg-side:   #1a141e;
+  --surface:   #221b29;
+  --surface-2: #2a2233;
+  --surface-3: #342a3f;
+  --border:    rgba(237,231,242,.07);
+  --border-2:  rgba(237,231,242,.13);
+  --text:      #ece7f0;
+  --text-2:    #ada3b8;
+  --text-3:    #7c7388;
+  --accent:    #f0a87a;
+  --accent-2:  #f6bd95;
+  --accent-dim:rgba(240,168,122,.13);
+  --orchid:    #c79ccf;
+  --gold:      #e6c073;
+  --ok:        #8ecf95;
+  --err:       #e5928f;
+  --grad:      linear-gradient(135deg, #f0a87a, #c79ccf);
+  --shadow:    0 18px 48px rgba(0,0,0,.42);
+  --sans: -apple-system, BlinkMacSystemFont, "Inter", "Segoe UI", Roboto,
+          system-ui, sans-serif;
+  --mono: ui-monospace, "SF Mono", "Cascadia Code", Menlo, Consolas, monospace;
 }
 * { box-sizing: border-box; }
 html, body { height: 100%; margin: 0; }
 body {
-  background: var(--bg);
-  color: var(--text);
-  font: 14px/1.66 var(--mono);
+  background: var(--bg); color: var(--text);
+  font: 15px/1.62 var(--sans);
   -webkit-font-smoothing: antialiased;
-  text-rendering: optimizeLegibility;
 }
-#app {
-  display: grid; grid-template-columns: 264px 1fr;
-  height: 100vh; height: 100dvh;
-}
-::selection { background: rgba(255,184,146,.26); }
+#app { display: grid; grid-template-columns: 268px 1fr; height: 100vh; height: 100dvh; }
+::selection { background: rgba(240,168,122,.26); }
 
 /* ---- sidebar ---------------------------------------------------------- */
 #sidebar {
-  background: var(--bg-2);
-  border-right: 1px solid var(--border);
-  display: flex; flex-direction: column;
-  padding: 16px 12px;
+  background: var(--bg-side); border-right: 1px solid var(--border);
+  display: flex; flex-direction: column; padding: 16px 12px;
 }
-.brand {
-  display: flex; align-items: center; gap: 9px;
-  padding: 6px 8px 18px;
+.brand { display: flex; align-items: center; gap: 10px; padding: 6px 8px 16px; }
+.brand-mark {
+  width: 27px; height: 27px; border-radius: 8px; background: var(--grad);
+  display: flex; align-items: center; justify-content: center;
+  color: #1c1018; font-size: 14px;
 }
-.brand .spark { color: var(--gold); font-size: 16px; }
-.brand .word {
-  color: var(--glow); font-weight: 600;
-  letter-spacing: .26em; font-size: 14.5px;
-}
+.brand-name { font-size: 15.5px; font-weight: 650; letter-spacing: -.01em; }
 .new-chat {
-  display: flex; align-items: center; gap: 9px;
-  width: 100%; padding: 10px 12px; cursor: pointer;
-  background: var(--panel); color: var(--text);
-  border: 1px solid var(--border); border-radius: 9px;
-  font: inherit; transition: border-color .14s, background .14s;
+  display: flex; align-items: center; gap: 9px; width: 100%;
+  padding: 10px 13px; cursor: pointer; color: var(--text);
+  background: var(--surface); border: 1px solid var(--border-2);
+  border-radius: 10px; font: 600 14px var(--sans);
+  transition: background .15s, border-color .15s;
 }
-.new-chat:hover { border-color: var(--border-2); background: var(--raised); }
-.new-chat .plus { color: var(--gold); font-size: 15px; }
+.new-chat:hover { background: var(--surface-2); border-color: var(--accent); }
+.new-chat svg { color: var(--accent); }
 .chats-label {
-  font-size: 11px; letter-spacing: .14em; color: var(--soft);
-  padding: 20px 8px 8px;
+  font-size: 11px; font-weight: 600; letter-spacing: .07em;
+  text-transform: uppercase; color: var(--text-3); padding: 20px 9px 8px;
 }
 .chat-list { flex: 1; overflow-y: auto; margin: 0 -4px; padding: 0 4px; }
 .chat-item {
   display: flex; align-items: center; gap: 8px; position: relative;
-  padding: 8px 10px; border-radius: 8px; cursor: pointer;
-  color: var(--muted); transition: background .12s, color .12s;
+  padding: 9px 11px; border-radius: 9px; cursor: pointer;
+  color: var(--text-2); transition: background .13s, color .13s;
 }
-.chat-item:hover { background: var(--panel); color: var(--text); }
-.chat-item.active { background: var(--raised); color: var(--text); }
-.chat-item.active::before {
-  content: ""; position: absolute; left: 0; top: 8px; bottom: 8px;
-  width: 2px; border-radius: 2px; background: var(--glow);
-}
+.chat-item:hover { background: var(--surface); color: var(--text); }
+.chat-item.active { background: var(--surface-2); color: var(--text); }
 .chat-item .ci-title {
-  flex: 1; min-width: 0; font-size: 13px;
+  flex: 1; min-width: 0; font-size: 13.5px;
   white-space: nowrap; overflow: hidden; text-overflow: ellipsis;
 }
 .chat-item .ci-del {
-  opacity: 0; border: 0; background: transparent; color: var(--soft);
-  cursor: pointer; font-size: 15px; line-height: 1; padding: 0 3px;
-  transition: opacity .12s, color .12s;
+  opacity: 0; border: 0; background: transparent; color: var(--text-3);
+  cursor: pointer; padding: 2px; display: flex; border-radius: 5px;
+  transition: opacity .13s, color .13s, background .13s;
 }
 .chat-item:hover .ci-del { opacity: 1; }
-.chat-item .ci-del:hover { color: var(--err); }
-.sidebar-foot { border-top: 1px solid var(--border); padding-top: 10px; margin-top: 8px; }
+.chat-item .ci-del:hover { color: var(--err); background: var(--surface-3); }
+.sidebar-foot { border-top: 1px solid var(--border); padding-top: 8px; margin-top: 8px; }
 .foot-btn {
   display: flex; align-items: center; gap: 9px; width: 100%;
-  background: transparent; color: var(--muted); border: 0; cursor: pointer;
-  padding: 8px 10px; border-radius: 8px; font: inherit;
-  transition: background .12s, color .12s;
+  background: transparent; color: var(--text-2); border: 0; cursor: pointer;
+  padding: 9px 11px; border-radius: 9px; font: 500 13.5px var(--sans);
+  transition: background .13s, color .13s;
 }
-.foot-btn:hover { background: var(--panel); color: var(--text); }
-.foot-meta { font-size: 11px; color: var(--soft); padding: 7px 10px 0; letter-spacing: .04em; }
+.foot-btn:hover { background: var(--surface); color: var(--text); }
+.foot-meta { font-size: 11px; color: var(--text-3); padding: 8px 11px 2px; }
 
-/* ---- main ------------------------------------------------------------- */
+/* ---- main + topbar ---------------------------------------------------- */
 #main { display: flex; flex-direction: column; min-width: 0; background: var(--bg); }
 #topbar {
   display: flex; align-items: center; gap: 12px;
-  padding: 13px 24px; border-bottom: 1px solid var(--border);
+  padding: 0 24px; height: 58px; flex-shrink: 0;
+  border-bottom: 1px solid var(--border);
 }
 #chatTitle {
-  flex: 1; min-width: 0; font-size: 13px; color: var(--muted);
+  flex: 1; min-width: 0; font-size: 14px; font-weight: 600; color: var(--text);
   white-space: nowrap; overflow: hidden; text-overflow: ellipsis;
 }
 .chip {
-  font-size: 12px; color: var(--muted);
-  background: var(--panel); border: 1px solid var(--border);
-  padding: 4px 11px; border-radius: 999px; white-space: nowrap;
+  display: flex; align-items: center; gap: 7px;
+  font-size: 12.5px; color: var(--text-2);
+  background: var(--surface); border: 1px solid var(--border);
+  padding: 5px 11px; border-radius: 999px; white-space: nowrap;
 }
 .chip::before {
-  content: "●"; color: var(--ok); font-size: 8px;
-  vertical-align: 2px; margin-right: 7px;
+  content: ""; width: 6px; height: 6px; border-radius: 50%;
+  background: var(--ok); box-shadow: 0 0 0 3px rgba(142,207,149,.18);
 }
 .menu-btn {
   display: none; align-items: center; justify-content: center;
-  width: 36px; height: 36px; margin-left: -6px; flex-shrink: 0;
+  width: 36px; height: 36px; margin-left: -8px; flex-shrink: 0;
   background: transparent; border: 0; border-radius: 8px;
-  color: var(--muted); cursor: pointer;
+  color: var(--text-2); cursor: pointer;
 }
-.menu-btn:hover { background: var(--panel); color: var(--text); }
+.menu-btn:hover { background: var(--surface); color: var(--text); }
 
-.log { flex: 1; overflow-y: auto; padding: 26px 24px 10px; }
-.thread { max-width: 720px; margin: 0 auto; }
+/* ---- message log ------------------------------------------------------ */
+.log { flex: 1; overflow-y: auto; }
+.thread { max-width: 768px; margin: 0 auto; padding: 30px 28px 14px; }
+.row { margin-bottom: 26px; animation: rise .26s ease both; }
+@keyframes rise { from { opacity: 0; transform: translateY(7px); } }
 
-/* ---- messages --------------------------------------------------------- */
-.row { margin-bottom: 20px; }
-
-.row.user {
-  display: flex; gap: 10px;
-  background: var(--panel); border: 1px solid var(--border);
-  border-radius: var(--radius); padding: 11px 14px;
+/* user message — a bubble on the right */
+.row.user { display: flex; justify-content: flex-end; }
+.row.user .bubble {
+  background: var(--surface-2); border: 1px solid var(--border);
+  padding: 11px 16px; border-radius: 16px 16px 5px 16px;
+  max-width: 80%; white-space: pre-wrap; word-wrap: break-word;
+  line-height: 1.55;
 }
-.row.user .umark { color: var(--glow); flex-shrink: 0; }
-.row.user .utext { white-space: pre-wrap; word-wrap: break-word; }
 
-.row.assistant .who {
-  display: flex; align-items: center; gap: 8px;
-  font-size: 11px; letter-spacing: .16em; color: var(--soft);
-  margin-bottom: 9px;
+/* assistant message — avatar + content */
+.row.assistant { display: flex; gap: 14px; }
+.avatar {
+  width: 30px; height: 30px; border-radius: 9px; background: var(--grad);
+  flex-shrink: 0; display: flex; align-items: center; justify-content: center;
+  color: #1c1018; font-size: 14px; margin-top: 1px;
 }
-.row.assistant .who .spark { color: var(--glow); font-size: 13px; letter-spacing: 0; }
-.row.assistant .body { color: var(--text); }
-.body p { margin: 0 0 11px; }
+.row.assistant .body { min-width: 0; flex: 1; padding-top: 3px; }
+.body p { margin: 0 0 12px; }
 .body p:last-child { margin-bottom: 0; }
 .body h2, .body h3 {
-  font-size: 14px; font-weight: 600; color: var(--glow);
-  margin: 17px 0 9px; letter-spacing: .01em;
+  font-size: 16px; font-weight: 650; margin: 20px 0 9px; color: var(--text);
 }
-.body ul { margin: 9px 0; padding-left: 4px; list-style: none; }
-.body li { margin: 4px 0; padding-left: 18px; position: relative; }
-.body li::before {
-  content: "–"; color: var(--dusk); position: absolute; left: 2px;
-}
-.body a { color: var(--glow); text-decoration: none; border-bottom: 1px solid var(--border-2); }
-.body a:hover { border-color: var(--glow); }
+.body h2:first-child, .body h3:first-child { margin-top: 0; }
+.body ul { margin: 10px 0; padding-left: 22px; }
+.body li { margin: 4px 0; }
+.body li::marker { color: var(--accent); }
+.body a { color: var(--accent); text-decoration: none; }
+.body a:hover { text-decoration: underline; }
 .body code {
-  background: var(--raised); color: var(--gold);
-  padding: 1.5px 5px; border-radius: 5px; font-size: 13px;
+  background: var(--surface-2); color: var(--accent-2);
+  padding: 2px 6px; border-radius: 5px; font: 13.5px var(--mono);
 }
-.body pre {
-  background: var(--panel); border: 1px solid var(--border);
-  border-left: 2.5px solid var(--plum);
-  border-radius: 8px; padding: 12px 14px; overflow-x: auto; margin: 11px 0;
-}
-.body pre code { background: none; padding: 0; color: var(--text); }
+.body strong { font-weight: 650; }
 .cursor::after {
-  content: "▌"; color: var(--glow); margin-left: 1px;
-  animation: blink 1.1s steps(2) infinite;
+  content: ""; display: inline-block; width: 8px; height: 15px;
+  background: var(--accent); border-radius: 2px; margin-left: 2px;
+  vertical-align: -2px; animation: blink 1.05s steps(2) infinite;
 }
 @keyframes blink { 50% { opacity: 0; } }
 
-/* tool rows — '↳ name  summary    ✓ result' */
-.tool {
-  display: flex; align-items: baseline; gap: 8px; flex-wrap: wrap;
-  font-size: 12.5px; margin: 8px 0; padding: 7px 12px;
-  background: var(--panel); border: 1px solid var(--border); border-radius: 8px;
+/* code blocks */
+.codeblock {
+  margin: 12px 0; border: 1px solid var(--border-2); border-radius: 10px;
+  overflow: hidden; background: #18131e;
 }
-.tool .arrow { color: var(--plum); }
-.tool .tname { color: var(--dusk); }
-.tool .tsum { color: var(--soft); }
-.tool .tres { margin-left: auto; }
+.cb-head {
+  display: flex; align-items: center; justify-content: space-between;
+  padding: 7px 12px; background: var(--surface);
+  border-bottom: 1px solid var(--border);
+}
+.cb-lang { font: 11px var(--mono); color: var(--text-3); letter-spacing: .04em; }
+.cb-copy {
+  background: transparent; border: 0; color: var(--text-3); cursor: pointer;
+  font: 11.5px var(--sans); padding: 2px 6px; border-radius: 5px;
+  transition: color .13s, background .13s;
+}
+.cb-copy:hover { color: var(--text); background: var(--surface-2); }
+.codeblock pre { margin: 0; padding: 13px 14px; overflow-x: auto; }
+.codeblock code { font: 13px/1.6 var(--mono); color: var(--text); background: none; }
+
+/* thinking indicator */
+.thinking { display: flex; gap: 14px; margin-bottom: 26px; }
+.thinking .dots { display: flex; gap: 5px; align-items: center; padding-top: 11px; }
+.thinking .dots span {
+  width: 7px; height: 7px; border-radius: 50%; background: var(--text-3);
+  animation: bob 1.25s ease-in-out infinite;
+}
+.thinking .dots span:nth-child(2) { animation-delay: .16s; }
+.thinking .dots span:nth-child(3) { animation-delay: .32s; }
+@keyframes bob { 0%,80%,100% { opacity: .3; transform: translateY(0); }
+                 40% { opacity: 1; transform: translateY(-4px); } }
+
+/* tool call rows */
+.tool {
+  display: flex; align-items: center; gap: 9px; flex-wrap: wrap;
+  margin: 9px 0; padding: 9px 13px; font-size: 13px;
+  background: var(--surface); border: 1px solid var(--border); border-radius: 10px;
+}
+.tool .ticon { color: var(--orchid); display: flex; flex-shrink: 0; }
+.tool .tname { color: var(--text); font-weight: 600; }
+.tool .tsum { color: var(--text-3); }
+.tool .tres { margin-left: auto; font-size: 12.5px; }
 .tool.ok .tres { color: var(--ok); }
 .tool.bad .tres { color: var(--err); }
-.tool.pending .tres::after { content: "running…"; color: var(--soft); }
+.tool.pending .tres { color: var(--text-3); }
 
-.note { font-size: 12.5px; margin: 8px 0; color: var(--dusk); }
-.note::before { content: "· "; }
-.note.err { color: var(--err); }
-.note.err::before { content: "✗ "; }
-
-/* plan panel — '❀ here's my plan' */
+/* plan card */
 .plan {
-  background: var(--panel); border: 1px solid var(--border);
-  border-left: 2.5px solid var(--gold); border-radius: 8px;
-  padding: 12px 15px; margin: 11px 0;
+  margin: 12px 0; padding: 14px 16px; background: var(--surface);
+  border: 1px solid var(--border); border-radius: 11px;
 }
-.plan .ph { color: var(--gold); font-size: 12.5px; margin-bottom: 7px; letter-spacing: .03em; }
-.plan ol { margin: 0; padding-left: 22px; color: var(--muted); font-size: 13px; }
-.plan li { margin: 3px 0; }
+.plan .ph {
+  display: flex; align-items: center; gap: 7px;
+  font-weight: 650; font-size: 13px; color: var(--gold); margin-bottom: 9px;
+}
+.plan ol { margin: 0; padding-left: 22px; color: var(--text-2); }
+.plan li { margin: 5px 0; }
 .plan li::marker { color: var(--gold); }
+
+/* notes / errors */
+.note { margin: 9px 0; font-size: 13px; color: var(--text-3); }
+.note.err { color: var(--err); }
 
 /* permission card */
 .perm {
-  background: var(--raised); border: 1px solid var(--border-2);
-  border-left: 2.5px solid var(--glow);
-  border-radius: var(--radius); padding: 14px 16px; margin: 12px 0;
+  margin: 13px 0; padding: 15px 17px; background: var(--surface-2);
+  border: 1px solid var(--border-2); border-left: 3px solid var(--accent);
+  border-radius: 11px;
 }
-.perm .pq { margin-bottom: 12px; font-size: 13px; color: var(--text); }
+.perm .pq { font-size: 14px; margin-bottom: 13px; }
 .perm .pq code {
-  background: var(--bg); color: var(--glow);
-  padding: 2px 7px; border-radius: 5px;
+  background: var(--bg); color: var(--accent-2);
+  padding: 2px 7px; border-radius: 5px; font: 13px var(--mono);
 }
-.perm .pbtns { display: flex; gap: 8px; flex-wrap: wrap; }
+.perm .pbtns { display: flex; gap: 9px; flex-wrap: wrap; }
 .perm button {
-  border: 1px solid transparent; border-radius: 8px;
-  padding: 7px 15px; cursor: pointer; font: 600 12.5px var(--mono);
-  transition: filter .12s;
+  border: 1px solid transparent; border-radius: 9px; padding: 8px 16px;
+  cursor: pointer; font: 600 13px var(--sans); transition: filter .13s, background .13s;
 }
-.perm button:hover { filter: brightness(1.13); }
-.perm .yes { background: var(--ok); color: #15240f; }
-.perm .always { background: var(--gold); color: #281e08; }
-.perm .no { background: transparent; color: var(--muted); border-color: var(--border-2); }
-.perm .decided { color: var(--soft); font-size: 12.5px; }
+.perm .yes { background: var(--accent); color: #241408; }
+.perm .yes:hover { filter: brightness(1.08); }
+.perm .always { background: var(--surface-3); color: var(--gold); border-color: var(--border-2); }
+.perm .always:hover { background: var(--surface); }
+.perm .no { background: transparent; color: var(--text-2); border-color: var(--border-2); }
+.perm .no:hover { background: var(--surface); }
+.perm .decided { color: var(--text-3); font-size: 13px; }
 
-/* ---- empty state — the CLI banner, on the web ------------------------- */
+/* ---- empty state ------------------------------------------------------ */
 .empty {
   min-height: 100%; display: flex; flex-direction: column;
-  align-items: center; justify-content: center; gap: 26px; padding: 30px 0;
+  align-items: center; justify-content: center; padding: 40px 24px;
 }
-.banner {
-  background: var(--panel); border: 1px solid var(--border-2);
-  border-radius: 16px; padding: 30px 36px; width: 420px; max-width: 88vw;
+.empty .e-mark {
+  width: 52px; height: 52px; border-radius: 15px; background: var(--grad);
+  display: flex; align-items: center; justify-content: center;
+  color: #1c1018; font-size: 24px; margin-bottom: 22px;
 }
-.banner .b-mark { color: var(--gold); font-size: 22px; }
-.banner .b-word {
-  color: var(--glow); font-weight: 600; font-size: 21px;
-  letter-spacing: .34em; margin-top: 12px;
+.empty .e-greet { font-size: 27px; font-weight: 680; letter-spacing: -.02em; }
+.empty .e-sub { font-size: 15px; color: var(--text-3); margin-top: 6px; }
+.cards {
+  display: grid; grid-template-columns: 1fr 1fr; gap: 11px;
+  margin-top: 30px; width: 100%; max-width: 540px;
 }
-.banner .b-tag { color: var(--muted); font-size: 12.5px; margin-top: 8px; }
-.banner .b-greet {
-  color: var(--dusk); font-size: 13.5px; margin-top: 20px;
-  padding-top: 16px; border-top: 1px solid var(--border);
+.card {
+  text-align: left; padding: 15px 16px; cursor: pointer;
+  background: var(--surface); border: 1px solid var(--border);
+  border-radius: 13px; transition: border-color .15s, background .15s, transform .15s;
 }
-.suggestions {
-  display: flex; flex-wrap: wrap; gap: 9px;
-  justify-content: center; max-width: 540px;
-}
-.suggestion {
-  background: var(--panel); border: 1px solid var(--border);
-  border-radius: 9px; padding: 9px 13px; cursor: pointer;
-  font-size: 12.5px; color: var(--muted);
-  transition: border-color .14s, color .14s, background .14s;
-}
-.suggestion::before { content: "› "; color: var(--plum); }
-.suggestion:hover { border-color: var(--border-2); color: var(--text); background: var(--raised); }
+.card:hover { border-color: var(--border-2); background: var(--surface-2);
+  transform: translateY(-2px); }
+.card .c-title { font-weight: 600; font-size: 14px; }
+.card .c-sub { font-size: 12.5px; color: var(--text-3); margin-top: 3px; }
 
 /* ---- composer --------------------------------------------------------- */
-.composer { padding: 8px 24px 18px; }
+.composer { flex-shrink: 0; padding: 10px 28px 18px; }
+.composer-inner { max-width: 768px; margin: 0 auto; }
 .composer-box {
-  max-width: 720px; margin: 0 auto;
-  display: flex; align-items: flex-end; gap: 10px;
-  background: var(--panel); border: 1px solid var(--border);
-  border-radius: 13px; padding: 9px 9px 9px 14px;
-  transition: border-color .14s;
+  display: flex; align-items: flex-end; gap: 9px;
+  background: var(--surface); border: 1px solid var(--border-2);
+  border-radius: 17px; padding: 9px 9px 9px 17px;
+  transition: border-color .15s, box-shadow .15s;
 }
-.composer-box:focus-within { border-color: var(--border-2); }
-.prompt-mark { color: var(--glow); padding: 6px 0; user-select: none; }
+.composer-box:focus-within {
+  border-color: var(--accent);
+  box-shadow: 0 0 0 3px var(--accent-dim);
+}
 .composer-box textarea {
   flex: 1; resize: none; background: transparent; border: 0; outline: 0;
-  color: var(--text); font: inherit; padding: 6px 0; max-height: 200px;
-  line-height: 1.6;
+  color: var(--text); font: 15px/1.55 var(--sans); padding: 8px 0;
+  max-height: 200px;
 }
-.composer-box textarea::placeholder { color: var(--soft); }
+.composer-box textarea::placeholder { color: var(--text-3); }
 .send {
-  flex-shrink: 0; width: 34px; height: 34px; border-radius: 9px;
-  border: 0; cursor: pointer; background: var(--glow); color: #2a1808;
+  flex-shrink: 0; width: 36px; height: 36px; border-radius: 11px;
+  border: 0; cursor: pointer; background: var(--accent); color: #241408;
   display: flex; align-items: center; justify-content: center;
-  transition: filter .12s, opacity .12s;
+  transition: filter .13s, opacity .13s;
 }
 .send:hover { filter: brightness(1.08); }
-.send:disabled { opacity: .4; cursor: default; }
+.send:disabled { opacity: .35; cursor: default; }
 .composer-hint {
-  max-width: 720px; margin: 9px auto 0; text-align: center;
-  font-size: 11px; color: var(--soft); letter-spacing: .03em;
+  text-align: center; font-size: 11.5px; color: var(--text-3); margin-top: 10px;
 }
 
 /* ---- settings modal --------------------------------------------------- */
 .modal {
-  position: fixed; inset: 0; background: rgba(8,6,11,.66);
-  display: flex; align-items: center; justify-content: center; z-index: 40;
+  position: fixed; inset: 0; background: rgba(10,7,13,.66);
+  display: flex; align-items: center; justify-content: center; z-index: 60;
+  animation: fade .15s ease;
 }
+@keyframes fade { from { opacity: 0; } }
 .modal.hidden { display: none; }
 .modal-card {
-  background: var(--bg); border: 1px solid var(--border-2);
-  border-radius: 14px; width: 430px; max-width: calc(100vw - 36px);
-  box-shadow: 0 28px 70px rgba(0,0,0,.55);
+  background: var(--bg-side); border: 1px solid var(--border-2);
+  border-radius: 16px; width: 460px; max-width: calc(100vw - 36px);
+  box-shadow: var(--shadow);
 }
 .modal-head {
   display: flex; align-items: center; justify-content: space-between;
-  padding: 15px 20px; border-bottom: 1px solid var(--border);
+  padding: 17px 22px; border-bottom: 1px solid var(--border);
 }
-.modal-head h2 { margin: 0; font-size: 14px; font-weight: 600; color: var(--text); }
-.modal-head .spark { color: var(--gold); }
+.modal-head h2 { margin: 0; font-size: 16px; font-weight: 650; }
 .icon-btn {
-  background: transparent; border: 0; color: var(--muted); cursor: pointer;
-  font-size: 22px; line-height: 1; padding: 0 4px;
+  background: transparent; border: 0; color: var(--text-3); cursor: pointer;
+  padding: 4px; display: flex; border-radius: 7px;
 }
-.icon-btn:hover { color: var(--text); }
-.modal-body { padding: 18px 20px; display: flex; flex-direction: column; gap: 17px; }
-.field { display: flex; flex-direction: column; gap: 7px; }
+.icon-btn:hover { color: var(--text); background: var(--surface); }
+.modal-body { padding: 20px 22px; display: flex; flex-direction: column; gap: 19px; }
+.field { display: flex; flex-direction: column; gap: 8px; }
 .field.row { flex-direction: row; align-items: center; justify-content: space-between; }
-.field-label { font-size: 12.5px; color: var(--text); }
-.field-label em {
-  color: var(--soft); font-style: normal; margin-left: 7px; font-size: 11.5px;
-}
+.field-label { font-size: 13.5px; font-weight: 600; }
+.field-label em { color: var(--text-3); font-style: normal; font-weight: 400; margin-left: 6px; }
+.field-hint { display: block; font-size: 12px; color: var(--text-3); margin-top: 2px; }
 .field select, .field input[type=text] {
-  background: var(--panel); border: 1px solid var(--border);
-  border-radius: 8px; color: var(--text); padding: 9px 11px; font: inherit;
+  background: var(--surface); border: 1px solid var(--border-2);
+  border-radius: 9px; color: var(--text); padding: 10px 12px; font: 14px var(--sans);
 }
 .field select:focus, .field input[type=text]:focus {
-  outline: 0; border-color: var(--border-2);
+  outline: 0; border-color: var(--accent); box-shadow: 0 0 0 3px var(--accent-dim);
 }
-.field input[type=range] { accent-color: var(--gold); }
-.switch { width: 36px; height: 20px; accent-color: var(--glow); cursor: pointer; }
+.field input[type=range] { accent-color: var(--accent); }
+/* toggle switch */
+.toggle { position: relative; width: 42px; height: 24px; flex-shrink: 0; }
+.toggle input { position: absolute; opacity: 0; }
+.toggle span {
+  position: absolute; inset: 0; cursor: pointer; border-radius: 999px;
+  background: var(--surface-3); transition: background .15s;
+}
+.toggle span::after {
+  content: ""; position: absolute; width: 18px; height: 18px; border-radius: 50%;
+  background: #ece7f0; top: 3px; left: 3px; transition: transform .16s;
+}
+.toggle input:checked + span { background: var(--accent); }
+.toggle input:checked + span::after { transform: translateX(18px); }
 .modal-foot {
-  padding: 14px 20px; border-top: 1px solid var(--border);
-  display: flex; justify-content: flex-end;
+  padding: 15px 22px; border-top: 1px solid var(--border);
+  display: flex; justify-content: flex-end; gap: 9px;
 }
-.primary {
-  background: var(--glow); color: #2a1808; border: 0; border-radius: 9px;
-  padding: 9px 22px; font: 600 13px var(--mono); cursor: pointer;
-  transition: filter .12s;
+.btn-primary {
+  background: var(--accent); color: #241408; border: 0; border-radius: 9px;
+  padding: 9px 18px; font: 600 13.5px var(--sans); cursor: pointer;
+  transition: filter .13s;
 }
-.primary:hover { filter: brightness(1.08); }
+.btn-primary:hover { filter: brightness(1.08); }
+.btn-ghost {
+  background: transparent; color: var(--text-2); border: 1px solid var(--border-2);
+  border-radius: 9px; padding: 9px 16px; font: 600 13.5px var(--sans); cursor: pointer;
+}
+.btn-ghost:hover { background: var(--surface); color: var(--text); }
 
-/* ---- scrollbars ------------------------------------------------------- */
-::-webkit-scrollbar { width: 9px; height: 9px; }
-::-webkit-scrollbar-thumb { background: var(--raised); border-radius: 6px; }
-::-webkit-scrollbar-thumb:hover { background: var(--border-2); }
+/* ---- scrollbars + backdrop ------------------------------------------- */
+::-webkit-scrollbar { width: 10px; height: 10px; }
+::-webkit-scrollbar-thumb { background: var(--surface-3); border-radius: 6px;
+  border: 2px solid transparent; background-clip: padding-box; }
+::-webkit-scrollbar-thumb:hover { background: #423650; background-clip: padding-box; }
 ::-webkit-scrollbar-track { background: transparent; }
-
-/* drawer backdrop — only visible on small screens */
 .backdrop { display: none; }
 
-/* ---- phones & small tablets ------------------------------------------ */
-@media (max-width: 760px) {
+/* ---- responsive ------------------------------------------------------- */
+@media (max-width: 820px) {
   #app { grid-template-columns: 1fr; }
   #sidebar {
     position: fixed; top: 0; bottom: 0; left: 0; width: 286px; max-width: 86vw;
-    z-index: 50; transform: translateX(-100%); transition: transform .22s ease;
+    z-index: 70; transform: translateX(-100%); transition: transform .22s ease;
     padding-top: max(16px, env(safe-area-inset-top));
   }
-  #sidebar.open { transform: translateX(0); box-shadow: 0 0 44px rgba(0,0,0,.65); }
+  #sidebar.open { transform: translateX(0); box-shadow: var(--shadow); }
   .backdrop {
     display: block; position: fixed; inset: 0;
-    background: rgba(8,6,11,.6); z-index: 45;
+    background: rgba(10,7,13,.6); z-index: 65;
   }
   .backdrop.hidden { display: none; }
   .menu-btn { display: flex; }
-  #topbar { padding: 12px 14px; }
-  .chip { max-width: 42vw; overflow: hidden; text-overflow: ellipsis; }
-  .log { padding: 18px 14px 6px; }
+  #topbar { padding: 0 14px; }
+  .thread { padding: 22px 16px 12px; }
   .composer { padding: 8px 14px max(14px, env(safe-area-inset-bottom)); }
   .composer-hint { display: none; }
+  .cards { grid-template-columns: 1fr; }
+  .row.user .bubble { max-width: 88%; }
   .chat-item .ci-del { opacity: 1; }
-  .chat-item { padding: 11px 10px; }
   .composer-box textarea,
   .field select, .field input[type=text] { font-size: 16px; }
   .modal { align-items: flex-end; }
-  .modal-card {
-    width: 100%; max-width: 100%; border-radius: 14px 14px 0 0;
-    padding-bottom: env(safe-area-inset-bottom);
-  }
+  .modal-card { width: 100%; max-width: 100%; border-radius: 18px 18px 0 0;
+    padding-bottom: env(safe-area-inset-bottom); }
 }
 """
 
@@ -882,6 +929,7 @@ _JS = r"""
 const $ = (s) => document.querySelector(s);
 const log = $('#log'), input = $('#input'), sendBtn = $('#send');
 let state = { chats: [], currentId: null, settings: {}, busy: false };
+const SPARK = '✦';
 
 // ---- helpers --------------------------------------------------------------
 function esc(s) {
@@ -889,8 +937,11 @@ function esc(s) {
 }
 function md(src) {
   const blocks = [];
-  let s = (src || '').replace(/```(\w*)\n?([\s\S]*?)```/g, (m, l, c) => {
-    blocks.push('<pre><code>' + esc(c.replace(/\n$/, '')) + '</code></pre>');
+  let s = (src || '').replace(/```(\w*)\n?([\s\S]*?)```/g, (m, lang, code) => {
+    blocks.push(
+      '<div class="codeblock"><div class="cb-head"><span class="cb-lang">' +
+      (lang || 'text') + '</span><button class="cb-copy">Copy</button></div>' +
+      '<pre><code>' + esc(code.replace(/\n$/, '')) + '</code></pre></div>');
     return '\x00B' + (blocks.length - 1) + '\x00';
   });
   s = esc(s);
@@ -905,7 +956,7 @@ function md(src) {
       '<li>' + x.replace(/^\s*[-*]\s+/, '') + '</li>').join('') + '</ul>');
   s = s.split(/\n{2,}/).map(p => p.trim() ? '<p>' + p + '</p>' : '').join('');
   s = s.replace(/\n/g, '<br>');
-  s = s.replace(/<p>(<(?:ul|h3|pre))/g, '$1').replace(/(<\/(?:ul|h3|pre)>)<\/p>/g, '$1');
+  s = s.replace(/<p>(<(?:ul|h3|div))/g, '$1').replace(/(<\/(?:ul|h3|div)>)<\/p>/g, '$1');
   s = s.replace(/\x00B(\d+)\x00/g, (m, i) => blocks[+i]);
   return s;
 }
@@ -916,31 +967,36 @@ function thread() {
   return t;
 }
 function clearLog() { log.innerHTML = ''; }
+function avatarHTML() { return '<div class="avatar">' + SPARK + '</div>'; }
 
 // ---- rendering ------------------------------------------------------------
 function showEmpty() {
   clearLog();
   const name = state.settings.user_name;
   const h = new Date().getHours();
-  const greet = h < 5 ? "you're up late" : h < 12 ? 'good morning'
-    : h < 18 ? 'good afternoon' : h < 22 ? 'good evening' : 'winding down';
+  const greet = h < 5 ? 'Working late' : h < 12 ? 'Good morning'
+    : h < 18 ? 'Good afternoon' : 'Good evening';
   const e = document.createElement('div');
   e.className = 'empty';
   e.innerHTML =
-    '<div class="banner">' +
-      '<div class="b-mark">&#10022;</div>' +
-      '<div class="b-word">cagentic</div>' +
-      '<div class="b-tag">your local personal assistant</div>' +
-      '<div class="b-greet">' + greet + (name ? ', ' + esc(name) : '') + '.</div>' +
-    '</div>' +
-    '<div class="suggestions"></div>';
-  const sg = e.querySelector('.suggestions');
-  ["what's on my screen right now?", 'show me my reminders',
-   'take a note about something', 'search the web for me'].forEach(t => {
+    '<div class="e-mark">' + SPARK + '</div>' +
+    '<div class="e-greet">' + greet + (name ? ', ' + esc(name) : '') + '</div>' +
+    '<div class="e-sub">How can I help you today?</div>' +
+    '<div class="cards"></div>';
+  const cards = [
+    ['Look something up', 'Search the web and summarize'],
+    ['Check my reminders', 'See what\'s on your list'],
+    ['Take a note', 'Remember something for later'],
+    ['Read my screen', 'Summarize the page in my browser'],
+  ];
+  const grid = e.querySelector('.cards');
+  cards.forEach(([title, sub]) => {
     const c = document.createElement('div');
-    c.className = 'suggestion'; c.textContent = t;
-    c.onclick = () => { input.value = t; input.focus(); autoGrow(); };
-    sg.appendChild(c);
+    c.className = 'card';
+    c.innerHTML = '<div class="c-title">' + title + '</div>' +
+      '<div class="c-sub">' + sub + '</div>';
+    c.onclick = () => { input.value = title; input.focus(); autoGrow(); };
+    grid.appendChild(c);
   });
   log.appendChild(e);
 }
@@ -948,15 +1004,13 @@ function showEmpty() {
 function addUser(text) {
   const r = document.createElement('div');
   r.className = 'row user';
-  r.innerHTML = '<span class="umark">&#10022;</span>' +
-    '<div class="utext">' + esc(text) + '</div>';
+  r.innerHTML = '<div class="bubble">' + esc(text) + '</div>';
   thread().appendChild(r); scrollDown();
 }
 function addAssistant(html, tools) {
   const r = document.createElement('div');
   r.className = 'row assistant';
-  r.innerHTML = '<div class="who"><span class="spark">&#10022;</span>cagentic</div>' +
-    '<div class="body">' + (html || '') + '</div>';
+  r.innerHTML = avatarHTML() + '<div class="body">' + (html || '') + '</div>';
   thread().appendChild(r);
   (tools || []).forEach(t => addToolRow({ name: t }, true));
   scrollDown();
@@ -965,9 +1019,13 @@ function addAssistant(html, tools) {
 function addToolRow(t, done) {
   const row = document.createElement('div');
   row.className = 'tool' + (done ? '' : ' pending');
-  row.innerHTML = '<span class="arrow">&#8627;</span>' +
+  row.innerHTML =
+    '<span class="ticon"><svg viewBox="0 0 24 24" width="14" height="14">' +
+    '<path d="M4 7h16M4 12h16M4 17h10" fill="none" stroke="currentColor" ' +
+    'stroke-width="2" stroke-linecap="round"/></svg></span>' +
     '<span class="tname">' + esc(t.name || '') + '</span>' +
-    (t.summary ? '<span class="tsum">' + esc(t.summary) + '</span>' : '');
+    (t.summary ? '<span class="tsum">' + esc(t.summary) + '</span>' : '') +
+    (done ? '' : '<span class="tres">running…</span>');
   thread().appendChild(row); scrollDown();
   return row;
 }
@@ -980,19 +1038,19 @@ function addNote(text, isErr) {
 function showPermission(d) {
   const box = document.createElement('div');
   box.className = 'perm';
-  box.innerHTML = '<div class="pq">cagentic wants to run <code>' + esc(d.tool) +
+  box.innerHTML = '<div class="pq">Cagentic wants to run <code>' + esc(d.tool) +
     '</code>' + (d.summary ? ' &mdash; ' + esc(d.summary) : '') + '</div>';
   const btns = document.createElement('div'); btns.className = 'pbtns';
   const answer = (a, past) => {
-    box.innerHTML = '<div class="pq"><code>' + esc(d.tool) +
-      '</code></div><div class="decided">&rarr; ' + past + '</div>';
+    box.innerHTML = '<div class="pq"><code>' + esc(d.tool) + '</code></div>' +
+      '<div class="decided">&rarr; ' + past + '</div>';
     fetch('/api/permission', {
       method: 'POST', headers: { 'Content-Type': 'application/json' },
       body: JSON.stringify({ answer: a })
     });
   };
-  [['yes', 'approve', 'approved'], ['always', 'always allow', 'always allowed'],
-   ['no', 'deny', 'denied']].forEach(([a, lbl, past]) => {
+  [['yes', 'Approve', 'approved'], ['always', 'Always allow', 'always allowed'],
+   ['no', 'Deny', 'denied']].forEach(([a, lbl, past]) => {
     const b = document.createElement('button');
     b.className = a; b.textContent = lbl;
     b.onclick = () => answer(a, past);
@@ -1003,10 +1061,22 @@ function showPermission(d) {
 }
 
 // ---- live turn ------------------------------------------------------------
-let live = { body: null, raw: '', toolRow: null };
+let live = { body: null, raw: '', toolRow: null, thinking: null };
+
+function showThinking() {
+  const t = document.createElement('div');
+  t.className = 'thinking';
+  t.innerHTML = avatarHTML() + '<div class="dots"><span></span><span></span><span></span></div>';
+  thread().appendChild(t); scrollDown();
+  live.thinking = t;
+}
+function clearThinking() {
+  if (live.thinking) { live.thinking.remove(); live.thinking = null; }
+}
 
 function handle(ev) {
   const k = ev.kind, d = ev.data || {};
+  if (k !== 'user') clearThinking();
   if (k === 'delta') {
     if (!live.body) { live.body = addAssistant(''); live.raw = ''; }
     live.raw += d.text || '';
@@ -1021,7 +1091,10 @@ function handle(ev) {
   } else if (k === 'plan') {
     const p = document.createElement('div');
     p.className = 'plan';
-    p.innerHTML = '<div class="ph">&#10047; here\'s my plan</div><ol>' +
+    p.innerHTML = '<div class="ph">' +
+      '<svg viewBox="0 0 24 24" width="14" height="14"><path d="M9 11l3 3 8-8M4 12l3 3" ' +
+      'fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" ' +
+      'stroke-linejoin="round"/></svg> Plan</div><ol>' +
       (d.steps || []).map(s => '<li>' + esc(s) + '</li>').join('') + '</ol>';
     thread().appendChild(p); live.body = null; scrollDown();
   } else if (k === 'tool_call') {
@@ -1031,10 +1104,10 @@ function handle(ev) {
     if (live.toolRow) {
       live.toolRow.classList.remove('pending');
       live.toolRow.classList.add(d.ok ? 'ok' : 'bad');
-      const res = document.createElement('span');
+      const res = live.toolRow.querySelector('.tres') || document.createElement('span');
       res.className = 'tres';
-      res.textContent = (d.ok ? '✓ ' : '✗ ') + (d.first_line || '').slice(0, 90);
-      live.toolRow.appendChild(res);
+      res.textContent = (d.ok ? '✓ ' : '✗ ') + (d.first_line || '').slice(0, 80);
+      if (!res.parentNode) live.toolRow.appendChild(res);
       live.toolRow = null;
     }
   } else if (k === 'permission') {
@@ -1042,7 +1115,7 @@ function handle(ev) {
   } else if (k === 'info' || k === 'warn') {
     addNote(d.text, false); live.body = null;
   } else if (k === 'error') {
-    addNote(d.text || 'something went wrong', true); live.body = null;
+    addNote(d.text || 'Something went wrong.', true); live.body = null;
   } else if (k === 'done') {
     if (live.body) live.body.classList.remove('cursor');
     live.body = null;
@@ -1052,18 +1125,31 @@ function handle(ev) {
   scrollDown();
 }
 
+// ---- code-block copy (event delegation) -----------------------------------
+log.addEventListener('click', (e) => {
+  const btn = e.target.closest('.cb-copy');
+  if (!btn) return;
+  const code = btn.closest('.codeblock').querySelector('pre code');
+  navigator.clipboard.writeText(code.textContent || '').then(() => {
+    btn.textContent = 'Copied';
+    setTimeout(() => { btn.textContent = 'Copy'; }, 1400);
+  });
+});
+
 // ---- sidebar --------------------------------------------------------------
 function renderChats() {
   const list = $('#chatList');
   list.innerHTML = '';
   if (!state.chats.length) {
-    list.innerHTML = '<div class="foot-meta">no chats yet</div>';
+    list.innerHTML = '<div class="foot-meta">No chats yet</div>';
   }
+  const x = '<svg viewBox="0 0 24 24" width="14" height="14"><path d="M6 6l12 12M18 6L6 18" ' +
+    'fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round"/></svg>';
   state.chats.forEach(c => {
     const item = document.createElement('div');
     item.className = 'chat-item' + (c.id === state.currentId ? ' active' : '');
     item.innerHTML = '<span class="ci-title">' + esc(c.title) + '</span>' +
-      '<button class="ci-del" title="Delete">&times;</button>';
+      '<button class="ci-del" title="Delete">' + x + '</button>';
     item.querySelector('.ci-title').onclick = () => loadChat(c.id);
     item.querySelector('.ci-del').onclick = (e) => {
       e.stopPropagation();
@@ -1074,7 +1160,7 @@ function renderChats() {
 }
 function setCurrent(cur) {
   state.currentId = cur.id;
-  $('#chatTitle').textContent = cur.title || 'new chat';
+  $('#chatTitle').textContent = cur.title || 'New chat';
   clearLog();
   if (!cur.messages || !cur.messages.length) { showEmpty(); return; }
   cur.messages.forEach(m => {
@@ -1097,7 +1183,7 @@ async function boot() {
   const b = await api('/api/bootstrap');
   state.chats = b.chats; state.settings = b.settings;
   $('#modelChip').textContent = b.model;
-  $('#footMeta').textContent = 'v' + b.version + ' · local';
+  $('#footMeta').textContent = 'Cagentic v' + b.version;
   renderChats();
   setCurrent(b.current);
 }
@@ -1118,7 +1204,7 @@ async function deleteChat(id) {
 async function refreshChats() {
   const b = await api('/api/bootstrap');
   state.chats = b.chats;
-  $('#chatTitle').textContent = b.current.title || 'new chat';
+  $('#chatTitle').textContent = b.current.title || 'New chat';
   renderChats();
 }
 
@@ -1146,14 +1232,15 @@ async function send(text) {
   sendBtn.disabled = true;
   if (log.querySelector('.empty')) clearLog();
   addUser(text);
-  live = { body: null, raw: '', toolRow: null };
+  live = { body: null, raw: '', toolRow: null, thinking: null };
+  showThinking();
   let res;
   try {
     res = await fetch('/api/chat', {
       method: 'POST', headers: { 'Content-Type': 'application/json' },
       body: JSON.stringify({ message: text })
     });
-  } catch (e) { addNote('connection failed', true); finishTurn(); return; }
+  } catch (e) { clearThinking(); addNote('Connection failed.', true); finishTurn(); return; }
   const reader = res.body.getReader();
   const dec = new TextDecoder();
   let buf = '';
@@ -1170,6 +1257,7 @@ async function send(text) {
       }
     }
   }
+  clearThinking();
   if (state.busy) finishTurn();
 }
 
@@ -1191,6 +1279,7 @@ function openSettings() {
   $('#setYolo').checked = !!s.yolo;
   $('#settingsModal').classList.remove('hidden');
 }
+function closeSettings() { $('#settingsModal').classList.add('hidden'); }
 async function saveSettings() {
   const body = {
     model: $('#setModel').value,
@@ -1201,7 +1290,7 @@ async function saveSettings() {
   };
   state.settings = await api('/api/settings', body);
   $('#modelChip').textContent = state.settings.model;
-  $('#settingsModal').classList.add('hidden');
+  closeSettings();
   if (log.querySelector('.empty')) showEmpty();
 }
 
@@ -1223,19 +1312,19 @@ input.addEventListener('keydown', (e) => {
 sendBtn.onclick = submit;
 $('#newChat').onclick = newChat;
 $('#openSettings').onclick = openSettings;
-$('#closeSettings').onclick = () => $('#settingsModal').classList.add('hidden');
+$('#closeSettings').onclick = closeSettings;
+$('#cancelSettings').onclick = closeSettings;
 $('#saveSettings').onclick = saveSettings;
 $('#menuBtn').onclick = openDrawer;
 $('#backdrop').onclick = closeDrawer;
 $('#setTemp').addEventListener('input', (e) =>
   $('#tempVal').textContent = (+e.target.value).toFixed(2));
 $('#settingsModal').addEventListener('click', (e) => {
-  if (e.target.id === 'settingsModal') e.target.classList.add('hidden');
+  if (e.target.id === 'settingsModal') closeSettings();
 });
 document.addEventListener('keydown', (e) => {
   if (e.key !== 'Escape') return;
-  if (!$('#settingsModal').classList.contains('hidden'))
-    $('#settingsModal').classList.add('hidden');
+  if (!$('#settingsModal').classList.contains('hidden')) closeSettings();
   else closeDrawer();
 });
 
