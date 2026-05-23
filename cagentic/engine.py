@@ -25,7 +25,11 @@ from .tools import ToolContext, all_tool_schemas, dispatch
 
 
 MAX_TOOL_ITERATIONS = 1000
-LOOP_THRESHOLD = 2
+# How many identical tool-call/result repeats to tolerate before steering
+# the model. Was 2 — far too eager: any innocent duplicate tripped a steer.
+# At 4 a tool can repeat three times before we intervene, which still
+# catches genuine infinite loops without crying wolf on normal retries.
+LOOP_THRESHOLD = 4
 COMPACT_TOKENS = 12000
 COMPACT_KEEP_RECENT = 12
 
@@ -871,6 +875,11 @@ class QueryEngine:
         return ""
 
     def _result_loop_count(self, name: str, result: str) -> int:
+        # The "[CACHED — you already read X]" nudges are an INTERNAL
+        # recovery signal, not a real loop — don't let them pile up
+        # toward a steer.
+        if (result or "").lstrip().startswith("[CACHED"):
+            return 0
         key = (name, (result or "")[:240])
         self._recent_results.append(key)
         self._recent_results = self._recent_results[-30:]
