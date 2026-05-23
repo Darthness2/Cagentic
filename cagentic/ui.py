@@ -633,11 +633,21 @@ class Spinner:
             frame = _SPIN_FRAMES[i % len(_SPIN_FRAMES)]
             elapsed = time.monotonic() - self._t0
             timer = f"({elapsed:0.1f}s)"
+            # If the label would push the line past the terminal width, the
+            # row wraps and `\r\033[2K` only clears the LAST visual row,
+            # leaving the wrapped fragment behind. Truncate the label so
+            # the whole line always fits on one row.
+            term_w = width()
+            label_text = self._current_label(elapsed) + "…"
+            fixed = len(frame) + len(timer) + 6   # spaces + padding
+            avail = max(8, term_w - fixed)
+            if len(label_text) > avail:
+                label_text = label_text[: max(1, avail - 1)] + "…"
             line = (
                 "  "
                 + color(frame, self.color_c)
                 + " "
-                + color(self._current_label(elapsed) + "…", MUTED)
+                + color(label_text, MUTED)
                 + "  "
                 + color(timer, SOFT)
             )

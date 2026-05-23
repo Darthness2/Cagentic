@@ -618,9 +618,9 @@ class QueryEngine:
                     spinner = ui.Spinner(
                         "thinking",
                         escalations=[
-                            (10.0, "thinking (large prompt — Ollama is in prompt-eval)"),
-                            (30.0, "still thinking — model may not fully fit in VRAM"),
-                            (60.0, "still thinking — try /new for smaller context, or Ctrl+C to abort"),
+                            (10.0, "thinking · prompt-eval"),
+                            (30.0, "still thinking · check VRAM in /diag"),
+                            (60.0, "still thinking · Ctrl+C to abort"),
                         ],
                     )
                     spinner.start()

@@ -125,6 +125,14 @@ class Agent:
 
 
 @dataclass
+class _ToolRun:
+    """A run of consecutive successful tool calls of the same name —
+    rendered as one line that updates in place ('read_file × 5')."""
+    name: str
+    count: int = 1
+
+
+@dataclass
 class _RenderState:
     final_text: str = ""
     streaming: bool = False
@@ -132,6 +140,93 @@ class _RenderState:
     streamed_visible: bool = False
     md: object | None = None
     pending_tool_call: tuple[str, str] | None = None
+    run: _ToolRun | None = None
+
+
+def _short_path(p: str) -> str:
+    """Replace the home directory with '~' for display."""
+    if not p:
+        return p
+    try:
+        from pathlib import Path
+        home = str(Path.home())
+        if p == home:
+            return "~"
+        if p.startswith(home + "/") or p.startswith(home + "\\"):
+            return "~" + p[len(home):]
+    except Exception:
+        pass
+    return p
+
+
+def _extract_meta(first_line: str, summary: str) -> str:
+    """Pull the 'metadata tail' off a tool result — '(203 lines)' from
+    success, the error reason from failure — without repeating any path
+    that's already shown in the tool_call summary."""
+    if not first_line:
+        return ""
+    s = first_line
+    if s.startswith("ERROR:"):
+        s = s[len("ERROR:"):].lstrip()
+    if summary and s.startswith(summary):
+        return s[len(summary):].lstrip()[:80]
+    # Path may appear mid-message ("not found: /Users/.../foo"); drop it.
+    if summary and summary in s:
+        s = s.replace(summary, "").strip(" :")
+    return s[:80]
+
+
+def _truncate_line(width: int, *segments) -> tuple[str, ...]:
+    """Trim each segment to fit total width. Segments are (text, weight)
+    tuples — weight 0 means 'fixed, don't trim'; positive means flexible."""
+    fixed = sum(len(t) for t, w in segments if w == 0)
+    flex_total = sum(len(t) for t, w in segments if w > 0)
+    budget = max(0, width - fixed)
+    if flex_total <= budget:
+        return tuple(t for t, _ in segments)
+    out = []
+    for t, w in segments:
+        if w == 0:
+            out.append(t)
+        else:
+            share = max(6, int(budget * len(t) / flex_total)) if flex_total else 0
+            if len(t) > share:
+                out.append(t[: max(1, share - 1)] + "…")
+            else:
+                out.append(t)
+    return tuple(out)
+
+
+def _print_tool_line(name: str, summary: str, meta: str,
+                     *, ok: bool, count: int) -> None:
+    """Render a tool call as a single line. Successful runs of the same
+    name update in place ('× N'); failures paint the whole line red."""
+    name_label = name + (f"  × {count}" if count > 1 else "")
+    term_w = max(40, ui.width()) - 2
+    if ok:
+        marker = "  ↳ "
+        check = "  ✓ " if meta else ""
+        name_seg, sum_seg, meta_seg = _truncate_line(
+            term_w - len(marker) - len(check),
+            (name_label, 0), (summary, 2), (meta, 1),
+        )
+        line = (
+            ui.color(marker, ui.DUSK)
+            + ui.color(name_seg, ui.DUSK)
+            + (("  " + ui.color(sum_seg, ui.MUTED)) if sum_seg else "")
+            + ((ui.color(check, ui.OK) + ui.color(meta_seg, ui.MUTED)) if meta_seg else "")
+        )
+    else:
+        marker = "  ✗ "
+        name_seg, sum_seg, meta_seg = _truncate_line(
+            term_w - len(marker) - 3,
+            (name_label, 0), (summary, 2), (meta, 1),
+        )
+        bits = [name_seg]
+        if sum_seg: bits.append(sum_seg)
+        if meta_seg: bits.append(meta_seg)
+        line = ui.color(marker + "  ".join(bits), ui.ERR)
+    print(line)
 
 
 def _end_stream_line(rs: _RenderState) -> None:
@@ -155,6 +250,11 @@ def render_event(event: Message, rs: _RenderState) -> None:
 
     if k != "delta":
         _end_stream_line(rs)
+
+    # Any event that prints something else closes the in-place tool run —
+    # the next same-name tool can no longer reach the line above with \r↑.
+    if k not in ("tool_call", "tool_result"):
+        rs.run = None
 
     if k == "thinking":
         ui.thinking(d["text"])
@@ -185,19 +285,26 @@ def render_event(event: Message, rs: _RenderState) -> None:
             if d["text"].strip():
                 ui.assistant(d["text"])
     elif k == "tool_call":
+        # The line isn't printed yet — defer until the result arrives so we
+        # know if it should be suppressed (CACHED), collapsed into a run,
+        # or painted red on failure.
         rs.pending_tool_call = (d["name"], d["summary"])
     elif k == "tool_result":
         name = d.get("name") or ""
         result = d.get("result") or ""
         first_line = d.get("first_line") or ""
+        ok = bool(d.get("ok", True))
         if first_line.startswith("[CACHED"):
             rs.pending_tool_call = None
             return
+
+        summary = ""
         if rs.pending_tool_call is not None:
-            pname, psummary = rs.pending_tool_call
-            ui.tool_call(pname, psummary)
+            _, summary = rs.pending_tool_call
             rs.pending_tool_call = None
-        if d["ok"] and name in ("write_file", "edit_file"):
+
+        # Special case: write_file / edit_file keeps the diff-style line.
+        if ok and name in ("write_file", "edit_file"):
             import re as _re_edit
             m = _re_edit.match(r"OK:\s+(\w+)\s+(.+?)\s+\+(\d+)\s+-(\d+)\s*$", result)
             if m:
@@ -205,12 +312,25 @@ def render_event(event: Message, rs: _RenderState) -> None:
                 mark = ui.color("    ✓", ui.OK)
                 print(
                     mark + " " + ui.color(op, ui.DUSK)
-                    + " " + ui.color(path, ui.SURFACE)
+                    + " " + ui.color(_short_path(path), ui.SURFACE)
                     + "  " + ui.color(f"+{adds}", ui.OK)
                     + " " + ui.color(f"-{dels}", ui.ERR)
                 )
+                rs.run = None
                 return
-        ui.tool_result(first_line[:160], ok=d["ok"])
+
+        meta = _extract_meta(first_line, summary)
+        short_summary = _short_path(summary)
+
+        if ok and rs.run is not None and rs.run.name == name:
+            # Continue an existing run — overwrite the line above instead
+            # of printing a new one, so "read_file × 5" shows in place.
+            rs.run.count += 1
+            sys.stdout.write("\r\033[1A\033[2K")
+            _print_tool_line(name, short_summary, meta, ok=True, count=rs.run.count)
+        else:
+            rs.run = _ToolRun(name=name) if ok else None
+            _print_tool_line(name, short_summary, meta, ok=ok, count=1)
     elif k == "info":
         ui.info(d["text"])
     elif k == "warn":
@@ -223,9 +343,10 @@ def render_event(event: Message, rs: _RenderState) -> None:
     elif k == "tool_denied":
         if rs.pending_tool_call is not None:
             pname, psummary = rs.pending_tool_call
-            ui.tool_call(pname, psummary)
             rs.pending_tool_call = None
+            _print_tool_line(pname, _short_path(psummary), "", ok=False, count=1)
         ui.warn(f"permission denied: {d['name']} ({d['reason']})")
+        rs.run = None
     elif k == "done":
         usage = d.get("usage", {})
         if any(usage.values()):

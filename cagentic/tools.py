@@ -1091,8 +1091,9 @@ def t_ask_user_question(args: dict, ctx: ToolContext) -> str:
     if not question:
         return "ERROR: missing argument 'question'"
     options = args.get("options") or []
-    if ctx.yolo:
-        return "ERROR: cannot ask user in yolo mode"
+    # Yolo mode skips APPROVAL prompts — but asking the user a question
+    # is a separate channel (the model needs information, not permission),
+    # so it's allowed regardless. EOFError still handles non-interactive runs.
     ui.stop_all_spinners()
     import sys as _sys
     if _sys.stdout.isatty():

@@ -18,6 +18,9 @@ from .state import AppState
 READ_ONLY: set[str] = {
     # files / search / shell-less inspection
     "read_file", "list_dir", "grep", "glob", "tool_search",
+    # asking the user is interactive but not destructive — skip the
+    # extra approval prompt so it just shows the question.
+    "ask_user_question",
     # web
     "web_fetch", "web_search",
     # tasks / state inspection
