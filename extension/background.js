@@ -71,6 +71,7 @@ async function postResult(port, id, ok, result) {
 
 const PER_TAB_ACTIONS = new Set([
   "read", "navigate", "click", "fill", "scroll", "eval", "close",
+  "screenshot", "click_at",
 ]);
 
 async function dispatch(action, p) {
@@ -171,6 +172,29 @@ async function dispatch(action, p) {
           args: [p.to || null,
                  p.y == null ? null : Number(p.y),
                  p.selector || null],
+        });
+        return result;
+      }
+      case "screenshot": {
+        // captureVisibleTab grabs the active tab in the focused window —
+        // good enough since the model just told us which tab to act on.
+        const dataUrl = await chrome.tabs.captureVisibleTab(null, {
+          format: "png",
+        });
+        // Strip "data:image/png;base64," prefix → raw base64 for Ollama.
+        const base64 = dataUrl.replace(/^data:image\/[a-z]+;base64,/, "");
+        // Also report the viewport size so the model knows the coord space.
+        const [{ result: size }] = await chrome.scripting.executeScript({
+          target: { tabId },
+          func: () => ({ w: window.innerWidth, h: window.innerHeight }),
+        });
+        return { format: "png", data: base64, width: size.w, height: size.h };
+      }
+      case "click_at": {
+        const [{ result }] = await chrome.scripting.executeScript({
+          target: { tabId },
+          func: clickAtPoint,
+          args: [Number(p.x), Number(p.y)],
         });
         return result;
       }
@@ -384,6 +408,67 @@ async function fillInPage(selector, value) {
   el.dispatchEvent(new Event("input", { bubbles: true }));
   el.dispatchEvent(new Event("change", { bubbles: true }));
   return { ok: true, filled: selector };
+}
+
+async function clickAtPoint(x, y) {
+  // Inline cursor helpers (Chrome serializes func source).
+  function ensureCagCursor() {
+    if (document.getElementById("__cag-cursor")) return;
+    const s = document.createElement("style");
+    s.id = "__cag-cursor-style";
+    s.textContent =
+      "#__cag-cursor{position:fixed;width:26px;height:26px;pointer-events:none;" +
+      "z-index:2147483647;background:radial-gradient(circle,rgba(255,140,66,1) 0 30%," +
+      "rgba(255,140,66,.45) 55%,transparent 72%);border-radius:50%;opacity:0;" +
+      "left:50vw;top:50vh;transform:translate(-50%,-50%);" +
+      "transition:left .36s cubic-bezier(.4,0,.2,1),top .36s cubic-bezier(.4,0,.2,1)," +
+      "opacity .2s,transform .18s}" +
+      "#__cag-cursor.on{opacity:1}" +
+      "#__cag-cursor.click{transform:translate(-50%,-50%) scale(1.65);" +
+      "background:radial-gradient(circle,rgba(255,200,120,1) 0 38%," +
+      "rgba(255,140,66,.55) 60%,transparent 75%)}";
+    document.head.appendChild(s);
+    const c = document.createElement("div");
+    c.id = "__cag-cursor";
+    document.documentElement.appendChild(c);
+  }
+  function cagCursorTo(cx, cy) {
+    ensureCagCursor();
+    const c = document.getElementById("__cag-cursor");
+    c.style.left = cx + "px";
+    c.style.top = cy + "px";
+    c.classList.add("on");
+    return new Promise((r) => setTimeout(r, 380));
+  }
+  function cagCursorClick() {
+    const c = document.getElementById("__cag-cursor");
+    if (!c) return;
+    c.classList.add("click");
+    setTimeout(() => c.classList.remove("click"), 280);
+  }
+
+  const el = document.elementFromPoint(x, y);
+  if (!el) return { ok: false, error: `no element at (${x}, ${y})` };
+
+  await cagCursorTo(x, y);
+  cagCursorClick();
+  await new Promise((r) => setTimeout(r, 170));
+
+  // Full mouse-event sequence so frameworks (React, Vue) react properly,
+  // not just the bare .click() — some apps only listen for mousedown/up.
+  const opts = {
+    bubbles: true, cancelable: true, composed: true,
+    clientX: x, clientY: y, button: 0, view: window,
+  };
+  el.dispatchEvent(new MouseEvent("mousedown", opts));
+  el.dispatchEvent(new MouseEvent("mouseup", opts));
+  el.dispatchEvent(new MouseEvent("click", opts));
+
+  return {
+    ok: true,
+    clicked: el.tagName.toLowerCase() + (el.id ? "#" + el.id : ""),
+    at: { x, y },
+  };
 }
 
 function scrollInPage(to, y, selector) {

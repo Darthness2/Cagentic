@@ -8,7 +8,7 @@ from __future__ import annotations
 import os
 import re
 import subprocess
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Any, Callable
 
@@ -47,6 +47,10 @@ class ToolContext:
     background: object | None = None
     tasks: object | None = None
     read_cache: dict | None = None
+    # A tool that produces an image (e.g. browser_screenshot) appends raw
+    # base64 PNG data here; the engine attaches it to the tool result
+    # message so vision-capable models actually see the picture.
+    pending_images: list = field(default_factory=list)
 
     def confirm(self, action: str, detail: str) -> bool:
         """Approval hook for inside a tool.
@@ -889,6 +893,65 @@ def t_browser_scroll(args: dict, ctx: ToolContext) -> str:
     return f"OK: scrolled {res.get('scrolled', target)}"
 
 
+def t_browser_screenshot(args: dict, ctx: ToolContext) -> str:
+    b = _browser(ctx)
+    if b is None:
+        return "ERROR: browser bridge unavailable"
+    r = b.send("screenshot", {"tab_id": args.get("tab_id")}, timeout=15)
+    if not r.get("ok"):
+        return f"ERROR: {r.get('error')}"
+    res = r.get("result") or {}
+    img_b64 = res.get("data")
+    if not img_b64:
+        return "ERROR: screenshot returned no image data"
+    w = res.get("width") or 0
+    h = res.get("height") or 0
+    # Hand the raw base64 to the engine so it can attach the image to the
+    # tool result message — vision-capable Ollama models will see it.
+    try:
+        ctx.pending_images.append(img_b64)
+    except Exception:
+        pass
+    # Also save a copy to disk so the user can open it directly.
+    saved = ""
+    try:
+        import base64 as _b64
+        import time as _t
+        from pathlib import Path
+        sdir = Path.home() / ".config" / "cagentic" / "screenshots"
+        sdir.mkdir(parents=True, exist_ok=True)
+        path = sdir / f"shot-{int(_t.time())}.png"
+        path.write_bytes(_b64.b64decode(img_b64))
+        saved = f"  ·  saved to {path}"
+    except Exception:
+        pass
+    return (f"OK: captured the viewport ({w}×{h}). The image is attached for "
+            f"vision models — use browser_click_at with x,y in this coordinate "
+            f"space (origin top-left).{saved}")
+
+
+def t_browser_click_at(args: dict, ctx: ToolContext) -> str:
+    b = _browser(ctx)
+    if b is None:
+        return "ERROR: browser bridge unavailable"
+    x = args.get("x")
+    y = args.get("y")
+    if x is None or y is None:
+        return ("ERROR: browser_click_at needs 'x' and 'y' — call "
+                "browser_screenshot first to see where things are")
+    if not ctx.confirm("click at coordinates", f"({x}, {y})"):
+        return "ERROR: user denied"
+    r = b.send("click_at", {
+        "x": int(x), "y": int(y), "tab_id": args.get("tab_id"),
+    })
+    if not r.get("ok"):
+        return f"ERROR: {r.get('error')}"
+    res = r.get("result") or {}
+    if not res.get("ok"):
+        return f"ERROR: {res.get('error', 'click failed')}"
+    return f"OK: clicked {res.get('clicked', '')} at ({x}, {y})"
+
+
 # ============================================================================
 # Web — fetch + search
 # ============================================================================
@@ -1316,6 +1379,8 @@ TOOLS: dict[str, ToolFn] = {
     "browser_fill": t_browser_fill,
     "browser_eval": t_browser_eval,
     "browser_scroll": t_browser_scroll,
+    "browser_screenshot": t_browser_screenshot,
+    "browser_click_at": t_browser_click_at,
     "browser_close": t_browser_close,
     # web
     "web_fetch": t_web_fetch,
@@ -1585,6 +1650,22 @@ TOOL_SCHEMAS: list[dict[str, Any]] = [
         }},
     }},
     {"type": "function", "function": {
+        "name": "browser_screenshot",
+        "description": "Capture the visible viewport of the current browser tab as a PNG. Vision-capable models receive the image inline (attached to the tool result); a copy is also saved to ~/.config/cagentic/screenshots/. Use this with browser_click_at when CSS selectors aren't enough.",
+        "parameters": {"type": "object", "properties": {
+            "tab_id": {"type": "integer"},
+        }},
+    }},
+    {"type": "function", "function": {
+        "name": "browser_click_at",
+        "description": "Click at exact viewport coordinates (x, y) — the fallback when browser_click can't find the element by CSS. Coordinates are in the same space as the most recent browser_screenshot (origin top-left, pixels). Bypasses CSP and works with framework-rendered apps. Asks for approval.",
+        "parameters": {"type": "object", "properties": {
+            "x": {"type": "integer"},
+            "y": {"type": "integer"},
+            "tab_id": {"type": "integer"},
+        }, "required": ["x", "y"]},
+    }},
+    {"type": "function", "function": {
         "name": "browser_close",
         "description": "Close a browser tab by id. Asks for approval.",
         "parameters": {"type": "object", "properties": {
@@ -1733,7 +1814,8 @@ TOOL_GROUPS: dict[str, list[str]] = {
             "mcp_list_resources", "mcp_read_resource"],
     "browser": ["browser_status", "browser_tabs", "browser_read",
                 "browser_open", "browser_navigate", "browser_click",
-                "browser_fill", "browser_scroll", "browser_eval", "browser_close"],
+                "browser_fill", "browser_scroll", "browser_screenshot",
+                "browser_click_at", "browser_eval", "browser_close"],
     "shell": ["run_bash", "bash_async"],
     "tasks": ["task_get", "task_list", "task_status", "task_wait", "task_output"],
     "interaction": ["ask_user_question"],

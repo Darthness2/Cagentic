@@ -201,6 +201,8 @@ def _summarize_args(name: str, args: dict) -> str:
         return str(args.get("selector") or
                    (f"y={args['y']}" if args.get("y") is not None else "")
                    or args.get("to") or "bottom")
+    if name == "browser_click_at":
+        return f"({args.get('x')}, {args.get('y')})"
     return ""
 
 
@@ -282,12 +284,17 @@ Tools you have:
   request needs one of those, run mcp_list_servers first to see what's
   configured, then mcp_list_tools to discover the right call, then mcp_call.
 - **Browser** (browser_status, browser_tabs, browser_read, browser_open,
-  browser_navigate, browser_click, browser_fill, browser_eval, browser_close):
+  browser_navigate, browser_click, browser_fill, browser_scroll,
+  browser_screenshot, browser_click_at, browser_eval, browser_close):
   control the user's Chrome browser through the companion extension. Call
   browser_status FIRST — if it's not connected, tell the user to set up the
   extension (mention the /browser command) and stop. Once connected, use
   browser_read to see a page, browser_tabs to list tabs, browser_open /
   browser_navigate to go places, and browser_click / browser_fill to act.
+  If a CSS-selector click fails (CSP-blocked page, Shadow-DOM widget,
+  framework that ignores .click()), fall back to browser_screenshot —
+  vision-capable models will see the page — then browser_click_at with
+  the (x, y) coordinates of the target.
 - **Files** (read_file, write_file, edit_file, list_dir, grep, glob): edit
   any file on disk. Use absolute paths or set_workspace into the right dir.
   read_file also pulls the text out of PDF and Word (.docx) documents — so
@@ -412,7 +419,8 @@ def process_user_input(raw: str, workspace: Path | None = None, home: Path | Non
 
 
 def normalize_messages_for_api(messages: list[dict]) -> list[dict]:
-    keep_keys = {"role", "content", "tool_calls", "name", "tool_call_id"}
+    # 'images' carries inline screenshots through to vision-capable models.
+    keep_keys = {"role", "content", "tool_calls", "name", "tool_call_id", "images"}
     out: list[dict] = []
     for m in messages:
         cleaned = {k: v for k, v in m.items() if k in keep_keys}
@@ -494,10 +502,14 @@ class StreamingToolExecutor:
 
         ok = not result.startswith("ERROR")
         first_line = result.splitlines()[0] if result else ""
+        # Tools (browser_screenshot) stash inline images here; pass them
+        # through so _execute_and_record can attach them to the message.
+        images = list(getattr(ctx, "pending_images", None) or [])
         yield Message("tool_result", {
             "id": tid, "name": name, "result": result,
             "ok": ok, "first_line": first_line, "role": role,
             "ctx_root": str(ctx.root),
+            "images": images,
         }, task_id=tid)
 
     def _run_one_collect(self, call):
@@ -912,13 +924,17 @@ class QueryEngine:
                     self.state.update(workspace=new_root)
                     self.refresh_system_prompt()
 
+                images = d.get("images") or []
                 if role == "tool":
-                    self.messages.append({"role": "tool", "name": name, "content": result})
+                    msg = {"role": "tool", "name": name, "content": result}
                 else:
-                    self.messages.append({
+                    msg = {
                         "role": "user",
                         "content": f"Tool result for {name}:\n{result}",
-                    })
+                    }
+                if images:
+                    msg["images"] = images
+                self.messages.append(msg)
                 record_transcript(self.session_id or "", "tool", result, name=name)
 
                 seen = self._result_loop_count(name, result)
