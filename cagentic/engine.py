@@ -197,6 +197,10 @@ def _summarize_args(name: str, args: dict) -> str:
     if name == "browser_eval":
         code = str(args.get("code", ""))
         return code if len(code) < 60 else code[:57] + "…"
+    if name == "browser_scroll":
+        return str(args.get("selector") or
+                   (f"y={args['y']}" if args.get("y") is not None else "")
+                   or args.get("to") or "bottom")
     return ""
 
 

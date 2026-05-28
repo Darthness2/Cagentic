@@ -307,13 +307,14 @@ class _Handler(BaseHTTPRequestHandler):
         return self.server.gateway  # type: ignore[attr-defined]
 
     def _send(self, body: bytes, content_type: str, status: int = 200) -> None:
-        self.send_response(status)
-        self.send_header("Content-Type", content_type)
-        self.send_header("Content-Length", str(len(body)))
-        self.end_headers()
         try:
+            self.send_response(status)
+            self.send_header("Content-Type", content_type)
+            self.send_header("Content-Length", str(len(body)))
+            self.end_headers()
             self.wfile.write(body)
-        except (BrokenPipeError, ConnectionResetError):
+        except OSError:
+            # Client closed mid-response. Includes Windows' ConnectionAbortedError.
             pass
 
     def _json(self, obj, status: int = 200) -> None:
@@ -383,7 +384,9 @@ class _Handler(BaseHTTPRequestHandler):
             try:
                 self.wfile.write(f"data: {payload}\n\n".encode("utf-8"))
                 self.wfile.flush()
-            except (BrokenPipeError, ConnectionResetError):
+            except OSError:
+                # Any socket-write failure (BrokenPipe, ConnectionReset,
+                # ConnectionAborted on Windows, etc.) means the client hung up.
                 raise _ClientGone()
 
         if not message:

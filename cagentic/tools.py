@@ -868,6 +868,27 @@ def t_browser_close(args: dict, ctx: ToolContext) -> str:
     return f"OK: closed tab {tab_id}"
 
 
+def t_browser_scroll(args: dict, ctx: ToolContext) -> str:
+    b = _browser(ctx)
+    if b is None:
+        return "ERROR: browser bridge unavailable"
+    to = args.get("to")
+    y = args.get("y")
+    selector = args.get("selector")
+    target = selector or (f"y={y}" if y is not None else (to or "bottom"))
+    if not ctx.confirm("scroll the page", target):
+        return "ERROR: user denied"
+    r = b.send("scroll", {
+        "to": to, "y": y, "selector": selector, "tab_id": args.get("tab_id"),
+    })
+    if not r.get("ok"):
+        return f"ERROR: {r.get('error')}"
+    res = r.get("result") or {}
+    if not res.get("ok"):
+        return f"ERROR: {res.get('error', 'scroll failed')}"
+    return f"OK: scrolled {res.get('scrolled', target)}"
+
+
 # ============================================================================
 # Web — fetch + search
 # ============================================================================
@@ -1294,6 +1315,7 @@ TOOLS: dict[str, ToolFn] = {
     "browser_click": t_browser_click,
     "browser_fill": t_browser_fill,
     "browser_eval": t_browser_eval,
+    "browser_scroll": t_browser_scroll,
     "browser_close": t_browser_close,
     # web
     "web_fetch": t_web_fetch,
@@ -1546,11 +1568,21 @@ TOOL_SCHEMAS: list[dict[str, Any]] = [
     }},
     {"type": "function", "function": {
         "name": "browser_eval",
-        "description": "Run a snippet of JavaScript in a browser tab and return its result. Asks for approval.",
+        "description": "Run a JavaScript expression in a browser tab and return its result. Prefer the dedicated browser_scroll, browser_click, and browser_fill for those actions — pages with strict Content Security Policy reject eval. Asks for approval.",
         "parameters": {"type": "object", "properties": {
             "code": {"type": "string"},
             "tab_id": {"type": "integer"},
         }, "required": ["code"]},
+    }},
+    {"type": "function", "function": {
+        "name": "browser_scroll",
+        "description": "Scroll a browser tab. Set 'to' to 'top' or 'bottom', OR pass a 'selector' to scroll an element into view, OR pass a numeric 'y' pixel offset. CSP-safe — works on every page.",
+        "parameters": {"type": "object", "properties": {
+            "to": {"type": "string", "enum": ["top", "bottom"]},
+            "selector": {"type": "string"},
+            "y": {"type": "integer"},
+            "tab_id": {"type": "integer"},
+        }},
     }},
     {"type": "function", "function": {
         "name": "browser_close",
@@ -1701,7 +1733,7 @@ TOOL_GROUPS: dict[str, list[str]] = {
             "mcp_list_resources", "mcp_read_resource"],
     "browser": ["browser_status", "browser_tabs", "browser_read",
                 "browser_open", "browser_navigate", "browser_click",
-                "browser_fill", "browser_eval", "browser_close"],
+                "browser_fill", "browser_scroll", "browser_eval", "browser_close"],
     "shell": ["run_bash", "bash_async"],
     "tasks": ["task_get", "task_list", "task_status", "task_wait", "task_output"],
     "interaction": ["ask_user_question"],
