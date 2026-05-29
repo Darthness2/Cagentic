@@ -127,6 +127,25 @@ def context_collapse(messages: list[dict]) -> int:
 # --------- autoCompact ---------------------------------------------------
 
 _FALLBACK_BULLETS_LIMIT = 80
+# Earlier this kept only the LAST line (160 chars) of each assistant
+# message, which threw away the substantive answer to whatever the user
+# had asked. The summary became "user asked X · assistant wrote a closing
+# sentence" with the actual content gone, so a follow-up turn ("compare
+# to the X we just talked about") had nothing to ground itself in. Keep
+# meaningfully more — the head of the message, where the answer is.
+_USER_BUDGET = 400
+_ASSISTANT_BUDGET = 700
+_TOOL_BUDGET = 320
+
+
+def _flatten(text: str, limit: int) -> str:
+    """Collapse whitespace and cap to `limit` chars, with an ellipsis if cut."""
+    if not text:
+        return ""
+    flat = re.sub(r"\s+", " ", text).strip()
+    if len(flat) <= limit:
+        return flat
+    return flat[: max(1, limit - 1)] + "…"
 
 
 def _bulletize(messages: list[dict]) -> str:
@@ -135,17 +154,19 @@ def _bulletize(messages: list[dict]) -> str:
         role = m.get("role")
         content = (m.get("content") or "").strip()
         if role == "assistant":
-            tail = content.splitlines()[-1][:160] if content else ""
-            if tail:
-                bullets.append(f"- assistant: {tail}")
+            if content:
+                # Was last-line-only — that erased every long answer. Keep
+                # the gist (head of the message) so the next turn can
+                # actually reason about what was discussed.
+                bullets.append(f"- assistant: {_flatten(content, _ASSISTANT_BUDGET)}")
             for tc in m.get("tool_calls") or []:
                 fn = tc.get("function", {}) or {}
                 bullets.append(f"  - called {fn.get('name', '?')}")
         elif role == "tool":
-            head = content.splitlines()[0][:160] if content else ""
+            head = _flatten(content, _TOOL_BUDGET)
             bullets.append(f"- tool {m.get('name', '?')}: {head}")
         elif role == "user":
-            head = content.splitlines()[0][:120] if content else ""
+            head = _flatten(content, _USER_BUDGET)
             if head:
                 bullets.append(f"- user: {head}")
     return "\n".join(bullets[-_FALLBACK_BULLETS_LIMIT:])

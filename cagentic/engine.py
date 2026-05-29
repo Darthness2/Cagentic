@@ -30,8 +30,15 @@ MAX_TOOL_ITERATIONS = 1000
 # At 4 a tool can repeat three times before we intervene, which still
 # catches genuine infinite loops without crying wolf on normal retries.
 LOOP_THRESHOLD = 4
-COMPACT_TOKENS = 12000
-COMPACT_KEEP_RECENT = 12
+# Compact older history when the conversation exceeds this many approx
+# tokens. Was 12000 — wired for tiny local models. Cloud models routinely
+# carry 100k+ tokens of context, and dropping below 32k means a couple of
+# web_fetch results force a compact that loses substance.
+COMPACT_TOKENS = 32000
+# Keep this many of the most recent messages full-fidelity (the rest get
+# bulletized). With many tool calls per turn 12 didn't span a full user
+# turn; 24 keeps roughly the last 2–3 turns intact.
+COMPACT_KEEP_RECENT = 24
 
 
 EventKind = Literal[
