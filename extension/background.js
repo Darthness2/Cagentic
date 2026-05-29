@@ -71,7 +71,7 @@ async function postResult(port, id, ok, result) {
 
 const PER_TAB_ACTIONS = new Set([
   "read", "navigate", "click", "fill", "scroll", "eval", "close",
-  "screenshot", "click_at",
+  "screenshot", "click_at", "links",
 ]);
 
 async function dispatch(action, p) {
@@ -197,6 +197,47 @@ async function dispatch(action, p) {
           args: [Number(p.x), Number(p.y)],
         });
         return result;
+      }
+      case "links": {
+        const [{ result }] = await chrome.scripting.executeScript({
+          target: { tabId },
+          func: harvestLinks,
+        });
+        return result;
+      }
+      case "download": {
+        // The extension's own fetch carries the user's cookies because
+        // <all_urls> is in host_permissions — that's how we authenticate
+        // against Google Drive / Docs export endpoints without an OAuth
+        // flow. No tab needed.
+        try {
+          const r = await fetch(p.url, {
+            credentials: "include",
+            redirect: "follow",
+          });
+          if (!r.ok) return { ok: false, error: `HTTP ${r.status}` };
+          const buf = await r.arrayBuffer();
+          const MAX = 25 * 1024 * 1024;     // 25 MB
+          if (buf.byteLength > MAX) {
+            return { ok: false, error:
+              `file is ${(buf.byteLength/1e6).toFixed(1)} MB — too large (cap ${MAX/1e6} MB)` };
+          }
+          const bytes = new Uint8Array(buf);
+          let s = "";
+          const CHUNK = 0x8000;
+          for (let i = 0; i < bytes.length; i += CHUNK) {
+            s += String.fromCharCode.apply(null, bytes.subarray(i, i + CHUNK));
+          }
+          return {
+            ok: true,
+            url: r.url,
+            contentType: r.headers.get("content-type") || "",
+            size: bytes.length,
+            data: btoa(s),
+          };
+        } catch (e) {
+          return { ok: false, error: String((e && e.message) || e) };
+        }
       }
       default:
         throw new Error("unknown action: " + action);
@@ -469,6 +510,35 @@ async function clickAtPoint(x, y) {
     clicked: el.tagName.toLowerCase() + (el.id ? "#" + el.id : ""),
     at: { x, y },
   };
+}
+
+function harvestLinks() {
+  // Pull every clickable thing on the page with the bits a model needs to
+  // pick the right one — text, href, aria-label, role — without ever
+  // touching eval. Works on strict-CSP pages and on the page-internal
+  // links that browser_read's innerText doesn't surface (Drive's file
+  // list, classroom tiles, etc.).
+  const out = [];
+  const seen = new Set();
+  const sel = 'a[href], [role="link"], [role="button"], button';
+  const nodes = document.querySelectorAll(sel);
+  for (let i = 0; i < nodes.length && out.length < 250; i++) {
+    const el = nodes[i];
+    // Skip hidden things.
+    const rect = el.getBoundingClientRect();
+    if (rect.width === 0 && rect.height === 0) continue;
+    const text = (el.innerText || el.textContent || "").trim().slice(0, 160);
+    const href = el.href ||
+                 el.getAttribute("data-href") ||
+                 el.getAttribute("href") || "";
+    const aria = el.getAttribute("aria-label") || "";
+    const key = href || (text + "\x00" + aria);
+    if (!key || seen.has(key)) continue;
+    if (!text && !href && !aria) continue;
+    seen.add(key);
+    out.push({ text, href, aria });
+  }
+  return { ok: true, count: out.length, links: out };
 }
 
 function scrollInPage(to, y, selector) {

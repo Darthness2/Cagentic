@@ -33,6 +33,7 @@ READ_ONLY: set[str] = {
     "mcp_list_servers", "mcp_list_tools", "mcp_list_resources", "mcp_read_resource",
     # browser inspection (acting in the browser is gated; looking is not)
     "browser_status", "browser_tabs", "browser_read", "browser_screenshot",
+    "browser_links",
     # github read
     "gh_whoami", "gh_list_repos", "gh_get_repo", "gh_get_file",
     "gh_list_issues", "gh_list_pulls", "gh_get_pull", "gh_search_code",

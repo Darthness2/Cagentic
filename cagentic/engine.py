@@ -203,6 +203,11 @@ def _summarize_args(name: str, args: dict) -> str:
                    or args.get("to") or "bottom")
     if name == "browser_click_at":
         return f"({args.get('x')}, {args.get('y')})"
+    if name == "browser_links":
+        return str(args.get("contains", "") or "all")
+    if name == "browser_download":
+        url = str(args.get("url", ""))
+        return url if len(url) < 80 else url[:77] + "…"
     return ""
 
 
@@ -283,18 +288,29 @@ Tools you have:
   mcp_read_resource): bridges to Notion, Google Drive, Slack, etc. If a
   request needs one of those, run mcp_list_servers first to see what's
   configured, then mcp_list_tools to discover the right call, then mcp_call.
-- **Browser** (browser_status, browser_tabs, browser_read, browser_open,
-  browser_navigate, browser_click, browser_fill, browser_scroll,
-  browser_screenshot, browser_click_at, browser_eval, browser_close):
-  control the user's Chrome browser through the companion extension. Call
-  browser_status FIRST — if it's not connected, tell the user to set up the
-  extension (mention the /browser command) and stop. Once connected, use
-  browser_read to see a page, browser_tabs to list tabs, browser_open /
-  browser_navigate to go places, and browser_click / browser_fill to act.
-  If a CSS-selector click fails (CSP-blocked page, Shadow-DOM widget,
-  framework that ignores .click()), fall back to browser_screenshot —
-  vision-capable models will see the page — then browser_click_at with
-  the (x, y) coordinates of the target.
+- **Browser** (browser_status, browser_tabs, browser_read, browser_links,
+  browser_open, browser_navigate, browser_click, browser_fill,
+  browser_scroll, browser_screenshot, browser_click_at, browser_download,
+  browser_eval, browser_close): control the user's Chrome browser through
+  the companion extension. Call browser_status FIRST — if not connected,
+  tell the user to run /browser and stop. Then browser_read for plain
+  pages, browser_tabs to list tabs, browser_open / browser_navigate to go
+  places, and browser_click / browser_fill to act.
+  Dynamic / framework-rendered pages (Google Drive, Classroom, React
+  apps): browser_read often returns very little because the content is
+  rendered after page load. Use browser_links to enumerate every
+  clickable thing with its text and href without going through eval.
+  When a click won't land — strict CSP, Shadow DOM, framework swallows
+  .click() — fall back to browser_screenshot then browser_click_at with
+  the (x, y) of the target.
+  When the user asks you to DOWNLOAD or PROCESS a file from a logged-in
+  site, use browser_download with the file's URL — your session cookies
+  are sent, so Google Drive / Docs export URLs work directly:
+    https://docs.google.com/document/d/<ID>/export?format=txt
+    https://docs.google.com/presentation/d/<ID>/export/txt
+    https://docs.google.com/presentation/d/<ID>/export/pdf
+    https://drive.google.com/uc?export=download&id=<ID>
+  Then read_file the saved path to use the contents.
 - **Files** (read_file, write_file, edit_file, list_dir, grep, glob): edit
   any file on disk. Use absolute paths or set_workspace into the right dir.
   read_file also pulls the text out of PDF and Word (.docx) documents — so
@@ -890,10 +906,20 @@ class QueryEngine:
             return content
         return ""
 
+    # Tools whose repeat is normal usage, not a sign of being stuck:
+    # waiting, status checks, listing what's currently open. The model
+    # SHOULD call these multiple times in a turn.
+    _LOOP_EXEMPT = {
+        "sleep",
+        "browser_tabs", "browser_status",
+        "task_status", "task_list", "task_wait",
+        "reminder_list", "note_list",
+    }
+
     def _result_loop_count(self, name: str, result: str) -> int:
-        # The "[CACHED — you already read X]" nudges are an INTERNAL
-        # recovery signal, not a real loop — don't let them pile up
-        # toward a steer.
+        if name in self._LOOP_EXEMPT:
+            return 0
+        # CACHED nudges are an INTERNAL recovery signal, not a real loop.
         if (result or "").lstrip().startswith("[CACHED"):
             return 0
         key = (name, (result or "")[:240])

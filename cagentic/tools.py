@@ -930,6 +930,93 @@ def t_browser_screenshot(args: dict, ctx: ToolContext) -> str:
             f"space (origin top-left).{saved}")
 
 
+def t_browser_links(args: dict, ctx: ToolContext) -> str:
+    b = _browser(ctx)
+    if b is None:
+        return "ERROR: browser bridge unavailable"
+    r = b.send("links", {"tab_id": args.get("tab_id")}, timeout=15)
+    if not r.get("ok"):
+        return f"ERROR: {r.get('error')}"
+    res = r.get("result") or {}
+    links = res.get("links") or []
+    if not links:
+        return "(no links found on this page)"
+    contains = (args.get("contains") or "").lower().strip()
+    if contains:
+        links = [
+            ln for ln in links
+            if contains in (ln.get("text", "").lower())
+            or contains in (ln.get("aria", "").lower())
+            or contains in (ln.get("href", "").lower())
+        ]
+    out = []
+    for ln in links[:120]:
+        label = (ln.get("text") or ln.get("aria") or "").strip()
+        label = label.replace("\n", " ")
+        out.append(f"  {label[:80]}  →  {ln.get('href', '')}")
+    head = f"{len(links)} link(s){' matching ' + contains if contains else ''}:"
+    return _truncate(head + "\n" + "\n".join(out))
+
+
+def t_browser_download(args: dict, ctx: ToolContext) -> str:
+    b = _browser(ctx)
+    if b is None:
+        return "ERROR: browser bridge unavailable"
+    url = args.get("url")
+    if not url:
+        return "ERROR: browser_download requires 'url'"
+    if not ctx.confirm("download via browser", url[:80]):
+        return "ERROR: user denied"
+    r = b.send("download", {"url": url}, timeout=120)
+    if not r.get("ok"):
+        return f"ERROR: {r.get('error')}"
+    res = r.get("result") or {}
+    if not res.get("ok"):
+        return f"ERROR: {res.get('error', 'download failed')}"
+    data_b64 = res.get("data") or ""
+    if not data_b64:
+        return "ERROR: download returned no bytes"
+
+    import base64 as _b64
+    try:
+        raw = _b64.b64decode(data_b64)
+    except Exception as e:
+        return f"ERROR: bad base64 from extension: {e}"
+
+    # Decide on the destination path.
+    out_path = args.get("path")
+    if out_path:
+        p = _resolve(out_path, ctx.root)
+        p.parent.mkdir(parents=True, exist_ok=True)
+    else:
+        import re as _re
+        import time as _t
+        ddir = Path.home() / ".config" / "cagentic" / "downloads"
+        ddir.mkdir(parents=True, exist_ok=True)
+        ext = ""
+        ct = (res.get("contentType") or "").lower()
+        if "pdf" in ct: ext = ".pdf"
+        elif "html" in ct: ext = ".html"
+        elif "json" in ct: ext = ".json"
+        elif "text/plain" in ct: ext = ".txt"
+        elif "csv" in ct: ext = ".csv"
+        elif "presentation" in ct or "powerpoint" in ct: ext = ".pptx"
+        elif "wordprocessing" in ct or "msword" in ct: ext = ".docx"
+        elif "png" in ct: ext = ".png"
+        elif "jpeg" in ct or "jpg" in ct: ext = ".jpg"
+        elif "zip" in ct: ext = ".zip"
+        # Try to lift a name out of the URL.
+        slug = _re.search(r"[?&]title=([^&]+)", url)
+        name = slug.group(1) if slug else f"download-{int(_t.time())}"
+        name = _re.sub(r"[^A-Za-z0-9_.-]", "_", name)[:80]
+        p = ddir / (name + ext)
+
+    p.write_bytes(raw)
+    sz = len(raw)
+    return (f"OK: saved {sz:,} bytes to {p}  "
+            f"(content-type: {res.get('contentType', 'unknown')})")
+
+
 def t_browser_click_at(args: dict, ctx: ToolContext) -> str:
     b = _browser(ctx)
     if b is None:
@@ -1381,6 +1468,8 @@ TOOLS: dict[str, ToolFn] = {
     "browser_scroll": t_browser_scroll,
     "browser_screenshot": t_browser_screenshot,
     "browser_click_at": t_browser_click_at,
+    "browser_links": t_browser_links,
+    "browser_download": t_browser_download,
     "browser_close": t_browser_close,
     # web
     "web_fetch": t_web_fetch,
@@ -1666,6 +1755,22 @@ TOOL_SCHEMAS: list[dict[str, Any]] = [
         }, "required": ["x", "y"]},
     }},
     {"type": "function", "function": {
+        "name": "browser_links",
+        "description": "List every clickable thing on the page — text, href, aria-label — without using eval. Use this on dynamically-rendered pages (Google Drive, Classroom, React apps) where browser_read returns very little. Pass 'contains' to filter to matching links.",
+        "parameters": {"type": "object", "properties": {
+            "contains": {"type": "string", "description": "Case-insensitive substring filter."},
+            "tab_id": {"type": "integer"},
+        }},
+    }},
+    {"type": "function", "function": {
+        "name": "browser_download",
+        "description": "Download a URL through the browser session and save the bytes to disk. Authenticated as the user (their cookies are sent), so it works with Google Drive / Docs export URLs and any other login-walled file. Saves to ~/.config/cagentic/downloads/ unless 'path' is given; returns the local file path so you can read_file it. Asks for approval. Google export URL patterns:  https://docs.google.com/document/d/<ID>/export?format=txt  ·  https://docs.google.com/presentation/d/<ID>/export/txt  ·  https://docs.google.com/presentation/d/<ID>/export/pdf  ·  https://drive.google.com/uc?export=download&id=<ID>",
+        "parameters": {"type": "object", "properties": {
+            "url": {"type": "string"},
+            "path": {"type": "string", "description": "Optional destination path; defaults to ~/.config/cagentic/downloads/."},
+        }, "required": ["url"]},
+    }},
+    {"type": "function", "function": {
         "name": "browser_close",
         "description": "Close a browser tab by id. Asks for approval.",
         "parameters": {"type": "object", "properties": {
@@ -1815,7 +1920,8 @@ TOOL_GROUPS: dict[str, list[str]] = {
     "browser": ["browser_status", "browser_tabs", "browser_read",
                 "browser_open", "browser_navigate", "browser_click",
                 "browser_fill", "browser_scroll", "browser_screenshot",
-                "browser_click_at", "browser_eval", "browser_close"],
+                "browser_click_at", "browser_links", "browser_download",
+                "browser_eval", "browser_close"],
     "shell": ["run_bash", "bash_async"],
     "tasks": ["task_get", "task_list", "task_status", "task_wait", "task_output"],
     "interaction": ["ask_user_question"],
