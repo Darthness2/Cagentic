@@ -568,7 +568,10 @@ class QueryEngine:
             engine=self, background=self.background,
             tasks=self.task_graph,
         )
-        self.messages: list[dict] = [{"role": "system", "content": fetch_system_prompt_parts(state)}]
+        # Optional extra instructions appended to the system prompt (e.g. the
+        # gateway teaches the model to drive its HUD). Empty for the REPL.
+        self.system_suffix: str = ""
+        self.messages: list[dict] = [{"role": "system", "content": self._system_content()}]
         self._recent_calls: list[tuple[str, str]] = []
         self._recent_results: list[tuple[str, str]] = []
         self._abort_turn = False
@@ -576,17 +579,23 @@ class QueryEngine:
         self._usage = {"input": 0, "output": 0, "ms": 0}
         self._read_cache: dict = {}
 
+    def _system_content(self) -> str:
+        prompt = fetch_system_prompt_parts(self.state)
+        if self.system_suffix:
+            prompt += "\n\n" + self.system_suffix
+        return prompt
+
     def reset(self) -> None:
-        self.messages = [{"role": "system", "content": fetch_system_prompt_parts(self.state)}]
+        self.messages = [{"role": "system", "content": self._system_content()}]
         self._usage = {"input": 0, "output": 0, "ms": 0}
 
     def load_messages(self, messages: list[dict]) -> None:
         if not messages or messages[0].get("role") != "system":
-            messages = [{"role": "system", "content": fetch_system_prompt_parts(self.state)}] + list(messages)
+            messages = [{"role": "system", "content": self._system_content()}] + list(messages)
         self.messages = list(messages)
 
     def refresh_system_prompt(self) -> None:
-        prompt = fetch_system_prompt_parts(self.state)
+        prompt = self._system_content()
         if self.messages and self.messages[0].get("role") == "system":
             self.messages[0]["content"] = prompt
         else:
