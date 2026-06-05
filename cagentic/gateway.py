@@ -216,6 +216,7 @@ class Gateway:
         return {
             "id": self.session["id"],
             "title": self.session.get("title") or "New chat",
+            "model": self.agent.model,
             "messages": self.render_messages(
                 [m for m in self.engine.messages if m.get("role") != "system"]
             ),
@@ -422,6 +423,51 @@ class Gateway:
 
     # -- a chat turn --------------------------------------------------------
 
+    def edit_and_resend(self, index: int, message: str, emit) -> None:
+        """Truncate history after the *index*-th user message, replace its text
+        with *message*, and re-run the turn from that point."""
+        if not self._turn_lock.acquire(blocking=False):
+            emit("error", {"text": "Cagentic is still working on the previous message."})
+            return
+        # Find user messages in the engine's message list
+        user_indices = [i for i, m in enumerate(self.engine.messages) if m.get("role") == "user"]
+        if index < 0 or index >= len(user_indices):
+            self._turn_lock.release()
+            emit("error", {"text": f"invalid message index {index}"})
+            return
+        target = user_indices[index]
+        # Truncate everything after this user message
+        self.engine.messages = self.engine.messages[: target + 1]
+        # Replace the user message content
+        self.engine.messages[target]["content"] = message
+        self._active_emit = emit
+        self.engine.model = self.agent.model
+        try:
+            for ev in self.engine.submit_message(message):
+                emit(ev.kind, ev.data)
+        except _ClientGone:
+            raise
+        except Exception as e:
+            emit("error", {"text": f"{type(e).__name__}: {e}"})
+        finally:
+            self._active_emit = None
+            try:
+                self._save_current()
+            except Exception:
+                pass
+            self._turn_lock.release()
+
+    def delete_message(self, index: int) -> dict:
+        """Delete the *index*-th user message and everything after it."""
+        user_indices = [i for i, m in enumerate(self.engine.messages) if m.get("role") == "user"]
+        if index < 0 or index >= len(user_indices):
+            return {"error": f"invalid message index {index}"}
+        target = user_indices[index]
+        # Truncate everything from this user message onward
+        self.engine.messages = self.engine.messages[:target]
+        self._save_current()
+        return self.current_chat()
+
     def run_turn(self, message: str, emit) -> None:
         if not self._turn_lock.acquire(blocking=False):
             emit("error", {"text": "Cagentic is still working on the previous message."})
@@ -508,6 +554,14 @@ class _Handler(BaseHTTPRequestHandler):
         if path == "/api/chat":
             self._stream_chat(str(self._body().get("message", "")).strip())
             return
+        if path == "/api/chat/edit":
+            b = self._body()
+            self._stream_chat_edit(int(b.get("index", 0)), str(b.get("message", "")).strip())
+            return
+        if path == "/api/chat/delete-msg":
+            b = self._body()
+            self._json(self._gw().delete_message(int(b.get("index", 0))))
+            return
         if path == "/api/permission":
             gw.deliver_permission(str(self._body().get("answer", "no")))
             self._json({"ok": True})
@@ -586,6 +640,33 @@ class _Handler(BaseHTTPRequestHandler):
         except _ClientGone:
             return
 
+    def _stream_chat_edit(self, index: int, message: str) -> None:
+        self.send_response(200)
+        self.send_header("Content-Type", "text/event-stream")
+        self.send_header("Cache-Control", "no-cache")
+        self.send_header("Connection", "close")
+        self.end_headers()
+
+        def emit(kind: str, data: dict) -> None:
+            payload = json.dumps({"kind": kind, "data": data})
+            try:
+                self.wfile.write(f"data: {payload}\n\n".encode("utf-8"))
+                self.wfile.flush()
+            except OSError:
+                raise _ClientGone()
+
+        if not message:
+            try:
+                emit("error", {"text": "empty message"})
+            except _ClientGone:
+                pass
+            return
+        try:
+            self._gw().edit_and_resend(index, message, emit)
+            emit("end", {})
+        except _ClientGone:
+            return
+
 
 # ---------------------------------------------------------------- the page --
 # Cagentic — AI Assistant
@@ -605,20 +686,17 @@ _HTML = """<!doctype html>
 
   <header class="hud-header">
     <div class="hdr-left">
-      <span class="jl">C</span><span class="jd">.</span><span class="jl">A</span><span class="jd">.</span><span class="jl">G</span><span class="jd">.</span><span class="jl">E</span><span class="jd">.</span><span class="jl">N</span><span class="jd">.</span><span class="jl">T</span><span class="jd">.</span><span class="jl">I</span><span class="jd">.</span><span class="jl">C</span><span class="jd">.</span>
+      <span class="jl">C</span><span class="jd">·</span><span class="jl">A</span><span class="jd">·</span><span class="jl">G</span><span class="jd">·</span><span class="jl">E</span><span class="jd">·</span><span class="jl">N</span><span class="jd">·</span><span class="jl">T</span><span class="jd">·</span><span class="jl">I</span><span class="jd">·</span><span class="jl">C</span>
       <span class="j-sub">COGNITIVE AGENT NETWORK FOR INTELLIGENT COMPUTING</span>
     </div>
-    <div class="hdr-center">
+    <div class="hdr-right">
       <span class="badge b-on">&#9679; Connected</span>
-      <span class="badge b-enc">&#9679; Secured</span>
       <div class="model-switch" id="modelSwitch" title="Switch model">
         <span class="ms-dot">&#9679;</span>
         <span class="ms-name" id="msName">---</span>
         <span class="ms-caret">&#9662;</span>
         <div class="model-menu hidden" id="modelMenu"></div>
       </div>
-    </div>
-    <div class="hdr-right">
       <div class="j-clock" id="jClock">00:00:00</div>
       <div class="j-date"  id="jDate">---</div>
     </div>
@@ -885,13 +963,11 @@ body {
   font-size: 8px; color: var(--text-2); letter-spacing: .14em;
   margin-left: 18px; align-self: flex-end; padding-bottom: 3px; text-transform: uppercase;
 }
-.hdr-center { display: flex; align-items: center; gap: 10px; flex: 1; justify-content: center; }
 .badge {
   font-size: 9px; padding: 3px 9px; border: 1px solid;
   letter-spacing: .1em; text-transform: uppercase; white-space: nowrap;
 }
 .b-on  { color: var(--ok);  border-color: rgba(142,207,149,.35); background: rgba(142,207,149,.05); }
-.b-enc { color: var(--accent); border-color: var(--border); background: var(--accent-dim); }
 
 /* model switcher */
 .model-switch {
@@ -919,7 +995,7 @@ body {
 .mm-item.active { color: var(--accent); }
 .mm-item .mm-tick { color: var(--accent); width: 8px; }
 
-.hdr-right { text-align: right; flex-shrink: 0; }
+.hdr-right { display: flex; align-items: center; gap: 10px; flex-shrink: 0; }
 .j-clock { font-size: 22px; color: #fff; letter-spacing: .12em; text-shadow: 0 0 18px var(--accent-glow); }
 .j-date { font-size: 9px; color: var(--text-2); letter-spacing: .1em; margin-top: 2px; }
 
@@ -993,19 +1069,38 @@ body {
 /* messages */
 .msg-row { margin: 10px 0; animation: fadeIn .25s ease; }
 @keyframes fadeIn { from { opacity: 0; transform: translateY(5px); } }
-.msg-row.user { display: flex; justify-content: flex-end; }
+.msg-row.user { display: flex; flex-direction: column; align-items: flex-end; }
 .msg-row.user .bubble {
   background: rgba(142,100,120,.28); border: 1px solid rgba(240,168,122,.3);
   padding: 9px 14px; max-width: 78%; font-size: 12px; color: #d8c8e0;
   line-height: 1.55; letter-spacing: .02em;
 }
 .msg-row.user .bubble::before { content: "> "; color: var(--accent); }
+.msg-actions { display: flex; gap: 6px; padding: 2px 0 0; }
+.msg-act-btn {
+  background: transparent; border: 0; color: var(--text-dim);
+  padding: 0; font: 9px/1.4 var(--mono); letter-spacing: .06em; cursor: pointer;
+  transition: color .15s;
+}
+.msg-act-btn:hover { color: var(--accent); }
+.msg-act-btn.del-btn:hover { color: var(--hot); }
+.msg-row.user.editing .bubble { background: rgba(142,100,120,.18); }
+.edit-area {
+  width: 100%; min-height: 40px; background: rgba(22,17,24,.6); border: 1px solid var(--accent);
+  color: var(--text); font: 12px/1.55 var(--mono); padding: 6px 8px; resize: vertical;
+  outline: none; box-sizing: border-box;
+}
+.edit-save { color: #8ecf95 !important; border-color: #8ecf95 !important; }
+.edit-save:hover { background: rgba(142,207,149,.12) !important; }
+.edit-cancel { color: #e5928f !important; border-color: #e5928f !important; }
+.edit-cancel:hover { background: rgba(229,146,143,.12) !important; }
 .msg-row.assistant { display: flex; gap: 12px; align-items: flex-start; }
 .j-avatar {
   width: 26px; height: 26px; flex-shrink: 0; margin-top: 1px;
   border: 1px solid var(--accent); display: flex; align-items: center;
   justify-content: center; color: var(--accent); font-size: 11px;
   box-shadow: 0 0 10px var(--accent-glow); background: rgba(240,168,122,.05);
+  font-weight: bold;
 }
 .msg-body { flex: 1; min-width: 0; font-size: 12px; color: var(--text); line-height: 1.65; }
 .msg-body p { margin: 0 0 9px; }
@@ -1031,16 +1126,17 @@ body {
 
 /* tool rows */
 .tool-row {
-  display: flex; align-items: center; gap: 8px; padding: 6px 9px;
-  margin: 5px 0; font-size: 10px; border: 1px solid var(--border);
-  background: rgba(34,27,42,.7); letter-spacing: .04em;
+  display: flex; align-items: center; gap: 8px; padding: 7px 12px;
+  margin: 6px 0; font-size: 11px; border: 1px solid var(--border);
+  background: rgba(34,27,42,.85); letter-spacing: .04em;
 }
-.tool-row .tname { color: #d8c8e0; }
-.tool-row .tsum  { color: var(--text-2); flex: 1; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.tool-row .tname { color: #d8c8e0; font-weight: 600; }
+.tool-row .tsum  { color: var(--text-2); flex: 1; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; font-family: var(--mono); font-size: 10px; }
 .tool-row .tres  { margin-left: auto; }
 .tool-row.ok  .tres { color: var(--ok); }
 .tool-row.bad .tres { color: var(--hot); }
-.tool-row.pending .tres { color: var(--text-dim); animation: pulse 1s ease infinite; }
+.tool-row.pending .tres { color: var(--warn); animation: pulse 1s ease infinite; }
+.tool-row.pending { border-color: rgba(255,170,0,.3); background: rgba(255,170,0,.04); }
 @keyframes pulse { 50% { opacity: .3; } }
 
 /* thinking */
@@ -1049,7 +1145,11 @@ body {
 .thinking-dots span { width: 6px; height: 6px; background: var(--accent); border-radius: 50%; animation: bob 1s ease-in-out infinite; }
 .thinking-dots span:nth-child(2) { animation-delay: .18s; }
 .thinking-dots span:nth-child(3) { animation-delay: .36s; }
+.thinking-timer { color: var(--text-dim); font-variant-numeric: tabular-nums; }
 @keyframes bob { 0%,100%{opacity:.15;transform:translateY(0)} 50%{opacity:1;transform:translateY(-4px)} }
+/* done stats */
+.done-stats { padding: 2px 0 4px 38px; font-size: 9px; color: var(--text-dim); letter-spacing: .06em; opacity: .7; }
+.done-stats .ds-sep { margin: 0 4px; }
 
 /* plan / note / error / permission */
 .plan-box { margin: 9px 0; padding: 11px 14px; border: 1px solid rgba(255,170,0,.3); background: rgba(255,170,0,.03); }
@@ -1147,9 +1247,9 @@ body {
 .cmd-box textarea { flex: 1; background: transparent; border: 0; outline: 0; color: #ece7f0; font: 13px/1.55 var(--mono); resize: none; max-height: 130px; letter-spacing: .03em; }
 .cmd-box textarea::placeholder { color: var(--text-dim); }
 .mic-btn {
-  flex-shrink: 0; width: 34px; height: 32px; border: 1px solid var(--border);
-  background: var(--accent-dim); color: var(--accent); font-size: 15px; cursor: pointer;
-  transition: background .15s, border-color .15s;
+  flex-shrink: 0; width: 28px; height: 24px; border: 1px solid var(--border);
+  background: var(--accent-dim); color: var(--accent); font-size: 13px; cursor: pointer;
+  transition: background .15s, border-color .15s; line-height: 24px; padding: 0;
 }
 .mic-btn:hover { background: rgba(240,168,122,.22); }
 .mic-btn.listening { border-color: var(--ok); color: var(--ok); background: rgba(142,207,149,.12); animation: micPulse 1.1s ease infinite; }
@@ -1366,7 +1466,7 @@ function plain(text){
 function scrollDown(){ log.scrollTop=log.scrollHeight; }
 function getThread(){ let t=log.querySelector('.j-thread'); if(!t){t=document.createElement('div');t.className='j-thread';log.appendChild(t);} return t; }
 function clearLog(){ log.innerHTML=''; }
-function avatarHTML(){ return '<div class="j-avatar">J</div>'; }
+function avatarHTML(){ return '<div class="j-avatar">C</div>'; }
 function setOrbLabel(text){ const l=$('#orbLabel'); if(l) l.textContent=(text||'New Chat'); }
 function compactOrb(on){ const z=$('#orbZone'); if(z) z.classList.toggle('compact', on); }
 
@@ -1526,10 +1626,109 @@ function showEmpty() {
 }
 
 // ---- RENDERING --------------------------------------------------------------
+let _userMsgIdx=0;
 function addUser(text){
-  const r=document.createElement('div'); r.className='msg-row user';
-  r.innerHTML='<div class="bubble">'+esc(text)+'</div>';
+  const idx=_userMsgIdx++;
+  const r=document.createElement('div'); r.className='msg-row user'; r.dataset.idx=idx;
+  r.innerHTML='<div class="bubble">'+esc(text)+'</div><div class="msg-actions"><button class="msg-act-btn" data-act="resend" title="Resend">&#8635; resend</button><button class="msg-act-btn" data-act="edit" title="Edit">&#9998; edit</button><button class="msg-act-btn del-btn" data-act="delete" title="Delete">&#10005; delete</button></div>';
+  r.querySelector('[data-act="resend"]').onclick=()=>resendMsg(idx,r);
+  r.querySelector('[data-act="edit"]').onclick=()=>editMsg(idx,r,text);
+  r.querySelector('[data-act="delete"]').onclick=()=>deleteMsg(idx,r);
   getThread().appendChild(r); scrollDown();
+}
+function resendMsg(idx,row){
+  if(state.busy) return;
+  const bubble=row.querySelector('.bubble');
+  const text=bubble.textContent||'';
+  // Truncate DOM after this user message
+  const thread=getThread();
+  let cutting=false;
+  const toRemove=[];
+  for(const ch of thread.children){
+    if(ch===row){ cutting=true; continue; }
+    if(cutting) toRemove.push(ch);
+  }
+  toRemove.forEach(ch=>ch.remove());
+  streamEdit(idx,text);
+}
+function streamEdit(idx,text){
+  setBusy(true); compactOrb(true);
+  live={body:null,raw:'',toolRow:null,thinking:null,turnStart:null};
+  showThinking(); setOrbLabel('Thinking\u2026');
+  fetch('/api/chat/edit',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({index:idx,message:text})})
+  .then(r=>{ const reader=r.body.getReader(),dec=new TextDecoder(); let buf='';
+    function pump(){ return reader.read().then(ch=>{
+      if(ch.done){clearThinking();if(state.busy)finishTurn();return;}
+      buf+=dec.decode(ch.value,{stream:true}); let i;
+      while((i=buf.indexOf('\n\n'))>=0){ const line=buf.slice(0,i); buf=buf.slice(i+2);
+        if(line.startsWith('data: ')){ try{handle(JSON.parse(line.slice(6)));}catch(e){} } }
+      return pump();
+    });}
+    return pump();
+  }).catch(()=>{clearThinking();addNote('CONNECTION FAILURE',true);finishTurn();});
+}
+
+function deleteMsg(idx,row){
+  if(state.busy) return;
+  // Truncate DOM from this user message onward
+  const thread=getThread();
+  const toRemove=[];
+  let cutting=false;
+  for(const ch of thread.children){
+    if(ch===row){ cutting=true; }
+    if(cutting) toRemove.push(ch);
+  }
+  toRemove.forEach(ch=>ch.remove());
+  // If no messages left, show empty state
+  if(!thread.children.length) showEmpty();
+  // Tell backend to truncate history
+  fetch('/api/chat/delete-msg',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({index:idx})})
+  .then(r=>r.json()).then(d=>{
+    if(d.messages) { /* reload chat state */ }
+    refreshChats();
+  }).catch(()=>{});
+}
+
+function editMsg(idx,row,origText){
+  if(state.busy) return;
+  row.classList.add('editing');
+  const bubble=row.querySelector('.bubble');
+  const actions=row.querySelector('.msg-actions');
+  const ta=document.createElement('textarea'); ta.className='edit-area'; ta.value=origText;
+  bubble.innerHTML=''; bubble.appendChild(ta);
+  ta.style.height=Math.min(ta.scrollHeight,130)+'px';
+  ta.focus();
+  actions.innerHTML='<button class="msg-act-btn edit-save" title="Save &amp; send">&#10003; save</button><button class="msg-act-btn edit-cancel" title="Cancel">&#10005; cancel</button>';
+  const save=()=>{
+    const newText=ta.value.trim(); if(!newText){cancel();return;}
+    row.classList.remove('editing');
+    // Truncate DOM after this user message
+    const thread=getThread();
+    const toRemove=[];
+    let cutting=false;
+    for(const ch of thread.children){
+      if(ch===row){ cutting=true; continue; }
+      if(cutting) toRemove.push(ch);
+    }
+    toRemove.forEach(ch=>ch.remove());
+    // Update the bubble with new text
+    bubble.innerHTML=esc(newText);
+    streamEdit(idx,newText);
+  };
+  const cancel=()=>{
+    row.classList.remove('editing');
+    bubble.innerHTML=esc(origText);
+    actions.innerHTML='<button class="msg-act-btn" data-act="resend" title="Resend">&#8635; resend</button><button class="msg-act-btn" data-act="edit" title="Edit">&#9998; edit</button><button class="msg-act-btn del-btn" data-act="delete" title="Delete">&#10005; delete</button>';
+    row.querySelector('[data-act="resend"]').onclick=()=>resendMsg(idx,row);
+    row.querySelector('[data-act="edit"]').onclick=()=>editMsg(idx,row,origText);
+    row.querySelector('[data-act="delete"]').onclick=()=>deleteMsg(idx,row);
+  };
+  actions.querySelector('.edit-save').onclick=save;
+  actions.querySelector('.edit-cancel').onclick=cancel;
+  ta.addEventListener('keydown',e=>{
+    if(e.key==='Enter'&&!e.shiftKey){e.preventDefault();save();}
+    if(e.key==='Escape'){e.preventDefault();cancel();}
+  });
 }
 function addAssistant(html, tools){
   const r=document.createElement('div'); r.className='msg-row assistant';
@@ -1561,10 +1760,13 @@ function addToolRow(t, done){
   }
   const row=document.createElement('div'); row.className='tool-row'+(done?'':' pending');
   row.dataset.name=t.name||'';
-  row.innerHTML='<span style="color:var(--accent);font-size:13px">&#9889;</span>'+
+  const isCmd=(t.name||'').startsWith('run_')||(t.name||'').startsWith('bash');
+  const icon=isCmd?'&#9656;':'&#9889;';
+  const iconColor=isCmd?'var(--warn)':'var(--accent)';
+  row.innerHTML='<span style="color:'+iconColor+';font-size:13px">'+icon+'</span>'+
     '<span class="tname">'+esc(t.name||'')+'</span>'+
     (t.summary?'<span class="tsum">'+esc(t.summary)+'</span>':'')+
-    (done?'':'<span class="tres">EXECUTING&#8230;</span>');
+    (done?'':'<span class="tres">RUNNING&#8230;</span>');
   getThread().appendChild(row); scrollDown(); return row;
 }
 function addNote(text, isErr){
@@ -1586,13 +1788,17 @@ function showPermission(d){
 }
 
 // ---- LIVE TURN --------------------------------------------------------------
-let live={body:null,raw:'',toolRow:null,thinking:null};
+let live={body:null,raw:'',toolRow:null,thinking:null,turnStart:null};
+let _thinkTimer=null;
 function showThinking(){
   const t=document.createElement('div'); t.className='thinking-row';
-  t.innerHTML=avatarHTML()+'<span>Thinking\u2026</span><div class="thinking-dots"><span></span><span></span><span></span></div>';
+  t.innerHTML=avatarHTML()+'<span>Thinking\u2026</span><div class="thinking-dots"><span></span><span></span><span></span></div><span class="thinking-timer" id="thinkTimer"></span>';
   getThread().appendChild(t); scrollDown(); live.thinking=t;
+  live.turnStart=Date.now();
+  const timerEl=t.querySelector('#thinkTimer');
+  _thinkTimer=setInterval(()=>{ if(!live.turnStart){clearInterval(_thinkTimer);_thinkTimer=null;return;} const s=((Date.now()-live.turnStart)/1000).toFixed(1); if(timerEl) timerEl.textContent=s+'s'; },100);
 }
-function clearThinking(){ if(live.thinking){live.thinking.remove();live.thinking=null;} }
+function clearThinking(){ if(live.thinking){live.thinking.remove();live.thinking=null;} if(_thinkTimer){clearInterval(_thinkTimer);_thinkTimer=null;} }
 function handle(ev){
   const k=ev.kind, d=ev.data||{};
   if(k!=='user') clearThinking();
@@ -1624,7 +1830,24 @@ function handle(ev){
   } else if(k==='permission'){ live.body=null; showPermission(d);
   } else if(k==='info'||k==='warn'){ addNote(d.text,false); live.body=null;
   } else if(k==='error'){ addNote(d.text||'ERROR: SYSTEM FAULT',true); live.body=null;
-  } else if(k==='done'){ if(live.body) live.body.classList.remove('cursor'); live.body=null;
+  } else if(k==='done'){
+    if(live.body) live.body.classList.remove('cursor'); live.body=null;
+    if(_thinkTimer){clearInterval(_thinkTimer);_thinkTimer=null;}
+    const usage=d.usage||{};
+    const hasStats=usage.input||usage.output||usage.ms;
+    if(hasStats||live.turnStart){
+      const row=document.createElement('div'); row.className='done-stats';
+      let parts=[];
+      if(usage.input||usage.output) parts.push('tokens in/out '+usage.input+'/'+usage.output);
+      if(usage.ms) parts.push(Math.round(usage.ms)+'ms');
+      if(live.turnStart){
+        const elapsed=((Date.now()-live.turnStart)/1000).toFixed(1);
+        parts.push(elapsed+'s');
+      }
+      row.innerHTML=parts.join('<span class="ds-sep">·</span>');
+      getThread().appendChild(row); scrollDown();
+    }
+    live.turnStart=null;
   } else if(k==='end'){ finishTurn(); }
   scrollDown();
 }
@@ -1909,6 +2132,7 @@ function makeChatItem(c){
 }
 function setCurrent(cur){
   state.currentId=cur.id;
+  _userMsgIdx=0;
   const s=$('#jSession'); if(s) s.textContent=(cur.id||'--------').slice(0,8).toUpperCase();
   setOrbLabel(cur.title||'New Chat');
   clearLog();
@@ -1916,7 +2140,12 @@ function setCurrent(cur){
   compactOrb(true);
   cur.messages.forEach(m=>{
     if(m.role==='user') addUser(m.content);
-    else { addAssistant(md(stripHud(m.content)),m.tools); renderHudPanels(m.content); }
+    else {
+      const html=md(stripHud(m.content));
+      const hasContent=html&&html.trim();
+      if(hasContent){ addAssistant(html,m.tools); renderHudPanels(m.content); }
+      else { (m.tools||[]).forEach(t=>addToolRow({name:t},true)); }
+    }
   });
   scrollDown();
 }
@@ -1937,13 +2166,14 @@ async function boot(){
 }
 async function newChat(){
   const r=await api('/api/chats/new',{}); state.chats=r.chats; renderSessions(); setCurrent(r.current);
+  if(r.current&&r.current.model){state.settings.model=r.current.model;setModelBadge(r.current.model);renderModelMenu();}
   clearViewport(); closeSessions(); input.focus();
 }
 async function loadChat(id){
-  const r=await api('/api/chats/load',{id}); state.chats=r.chats; clearViewport(); renderSessions(); setCurrent(r.current); closeSessions();
+  const r=await api('/api/chats/load',{id}); state.chats=r.chats; clearViewport(); renderSessions(); setCurrent(r.current); if(r.current&&r.current.model){state.settings.model=r.current.model;setModelBadge(r.current.model);renderModelMenu();} closeSessions();
 }
 async function deleteChat(id){
-  const r=await api('/api/chats/delete',{id}); state.chats=r.chats; state.projects=r.projects||state.projects; renderSessions(); setCurrent(r.current);
+  const r=await api('/api/chats/delete',{id}); state.chats=r.chats; state.projects=r.projects||state.projects; renderSessions(); setCurrent(r.current); closeSessions();
 }
 async function refreshChats(){
   const b=await api('/api/bootstrap'); state.chats=b.chats; state.projects=b.projects||[]; renderSessions(); setOrbLabel(b.current.title||'New Chat');
@@ -2009,19 +2239,22 @@ async function send(text){
   setBusy(true); compactOrb(true);
   if(log.querySelector('.j-empty')) clearLog();
   addUser(text);
-  live={body:null,raw:'',toolRow:null,thinking:null};
+  live={body:null,raw:'',toolRow:null,thinking:null,turnStart:null};
   showThinking(); setOrbLabel('Thinking\u2026');
   let res;
   try{ res=await fetch('/api/chat',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({message:text})}); }
   catch(e){ clearThinking(); addNote('CONNECTION FAILURE',true); finishTurn(); return; }
-  const reader=res.body.getReader(), dec=new TextDecoder(); let buf='';
-  while(true){
-    let chunk; try{chunk=await reader.read();}catch(e){break;}
-    if(chunk.done) break;
-    buf+=dec.decode(chunk.value,{stream:true}); let i;
-    while((i=buf.indexOf('\n\n'))>=0){ const line=buf.slice(0,i); buf=buf.slice(i+2);
-      if(line.startsWith('data: ')){ try{handle(JSON.parse(line.slice(6)));}catch(e){} } }
-  }
+  if(!res||!res.ok||!res.body){ clearThinking(); addNote('REQUEST FAILED: '+(res?res.status:'no response'),true); finishTurn(); return; }
+  try{
+    const reader=res.body.getReader(), dec=new TextDecoder(); let buf='';
+    while(true){
+      let chunk; try{chunk=await reader.read();}catch(e){break;}
+      if(chunk.done) break;
+      buf+=dec.decode(chunk.value,{stream:true}); let i;
+      while((i=buf.indexOf('\n\n'))>=0){ const line=buf.slice(0,i); buf=buf.slice(i+2);
+        if(line.startsWith('data: ')){ try{handle(JSON.parse(line.slice(6)));}catch(e){} } }
+    }
+  }catch(e){ console.error('Stream read error:',e); }
   clearThinking(); if(state.busy) finishTurn();
 }
 
