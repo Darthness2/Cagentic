@@ -15,10 +15,15 @@ def parse_model(model_str: str) -> tuple[str, str]:
     """Split 'provider:model' into (provider, model_name).
 
     Plain model names (no colon, or starting with http) are treated as Ollama.
+    Ollama model tags like 'llama3:8b' are also handled — only known provider
+    prefixes (ollama, openai, anthropic) are split off; everything else is
+    treated as an Ollama model name.
     """
+    _KNOWN_PROVIDERS = {"ollama", "openai", "anthropic"}
     if ":" in model_str and not model_str.startswith("http"):
         provider, _, name = model_str.partition(":")
-        return provider.lower(), name
+        if provider.lower() in _KNOWN_PROVIDERS:
+            return provider.lower(), name
     return "ollama", model_str
 
 

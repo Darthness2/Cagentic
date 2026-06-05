@@ -31,16 +31,17 @@ def new_id() -> str:
     return uuid.uuid4().hex[:12]
 
 
-def make(model: str, title: str | None = None) -> dict[str, Any]:
-    now = int(time.time())
-    return {
-        "id": new_id(),
-        "title": title or "untitled",
-        "model": model,
-        "created_at": now,
-        "updated_at": now,
-        "messages": [],
-    }
+def make(model: str, title: str | None = None, project_id: str | None = None) -> dict[str, Any]:
+      now = int(time.time())
+      return {
+          "id": new_id(),
+          "title": title or "untitled",
+          "model": model,
+          "project_id": project_id or "",
+          "created_at": now,
+          "updated_at": now,
+          "messages": [],
+      }
 
 
 def derive_title(messages: list[dict]) -> str:
@@ -96,6 +97,7 @@ def list_all() -> list[dict]:
             "id": data.get("id", p.stem),
             "title": data.get("title", "untitled"),
             "model": data.get("model", "?"),
+            "project_id": data.get("project_id", ""),
             "updated_at": data.get("updated_at", 0),
             "turns": sum(1 for m in data.get("messages", []) if m.get("role") == "user"),
         })

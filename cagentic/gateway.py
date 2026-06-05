@@ -18,6 +18,7 @@ from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 
 from . import config as _config
 from . import sessions
+from . import projects
 from .providers import build_client as _build_client, parse_model as _parse_model, list_all_models as _all_models
 
 
@@ -38,12 +39,12 @@ def _clean(text: str) -> str:
 
 
 # Taught to the gateway's engine only — lets the model "summon" panels into
-# the J.A.R.V.I.S. viewport by emitting fenced ```hud blocks of JSON. The web
+# the viewport by emitting fenced ```hud blocks of JSON. The web
 # UI parses these out of the reply, renders them as holographic cards, and
 # strips them from the chat text. Purely optional sugar — plain replies still
 # work — but it makes the interface feel alive.
-_HUD_INSTRUCTIONS = """=== J.A.R.V.I.S. HOLOGRAPHIC DISPLAY ===
-You are speaking through a holographic heads-up display. Besides your normal
+_HUD_INSTRUCTIONS = """=== HUD Display ===
+You are speaking through a heads-up display. Besides your normal
 reply, you MAY render visual panels into the viewport by emitting one or more
 fenced code blocks with the language tag `hud`, each containing a single JSON
 object. Use them when a visual would help — comparisons, status, search hits,
@@ -59,8 +60,8 @@ Panel schemas (pick the type that fits; all fields optional except shown):
   {"panel":"alert","level":"info|warn|critical","title":"...","text":"..."}
   {"panel":"progress","title":"...","items":[{"label":"...","pct":75}]}
   {"panel":"map","title":"...","lat":34.05,"lon":-118.24,"label":"..."}
-  {"panel":"bar","title":"...","labels":["Jan","Feb"],"values":[42,87],"color":"#00d4ff"}
-  {"panel":"line","title":"...","labels":["Mon","Tue"],"datasets":[{"label":"CPU","values":[30,80],"color":"#00d4ff"}]}
+  {"panel":"bar","title":"...","labels":["Jan","Feb"],"values":[42,87],"color":"#f0a87a"}
+  {"panel":"line","title":"...","labels":["Mon","Tue"],"datasets":[{"label":"CPU","values":[30,80],"color":"#f0a87a"}]}
   {"panel":"pie","title":"...","labels":["A","B","C"],"values":[40,35,25]}
   {"panel":"clear"}   ← clears all current viewport panels when you want a fresh display
 
@@ -184,6 +185,7 @@ class Gateway:
                 "title": s["title"] if s["title"] not in (None, "", "untitled") else "New chat",
                 "updated_at": s["updated_at"],
                 "turns": s["turns"],
+                "project_id": s.get("project_id", ""),
             })
         return out
 
@@ -222,6 +224,8 @@ class Gateway:
     def new_chat(self) -> dict:
         self._save_current()
         self.session = sessions.make(self.agent.model)
+        self.engine.project_system_prompt = ""
+        self.engine.project_context = ""
         self.engine.reset()
         self.engine.session_id = self.session["id"]
         return self.current_chat()
@@ -236,13 +240,31 @@ class Gateway:
         self.engine.model = self.agent.model
         self.engine.load_messages(data.get("messages", []))
         self.engine.session_id = self.session["id"]
+        # Apply project config if chat belongs to a project
+        pid = data.get("project_id", "")
+        if pid:
+            proj = projects.load(pid)
+            if proj:
+                self.engine.project_system_prompt = proj.get("system_prompt", "")
+                self.engine.project_context = proj.get("context", "")
+            else:
+                self.engine.project_system_prompt = ""
+                self.engine.project_context = ""
+        else:
+            self.engine.project_system_prompt = ""
+            self.engine.project_context = ""
+        self.engine.refresh_system_prompt()
         return self.current_chat()
 
     def delete_chat(self, chat_id: str) -> dict:
         sessions.delete(chat_id)
+        # Remove from any project
+        for proj in projects.list_all():
+            if chat_id in proj.get("chats", []):
+                projects.remove_chat(proj["id"], chat_id)
         if chat_id == self.session.get("id"):
             self.new_chat()
-        return {"chats": self.list_chats(), "current": self.current_chat()}
+        return {"chats": self.list_chats(), "current": self.current_chat(), "projects": self.list_projects()}
 
     def rename_chat(self, chat_id: str, title: str) -> dict:
         title = (title or "").strip()
@@ -255,6 +277,60 @@ class Gateway:
                 data["title"] = title or "New chat"
                 sessions.save(data)
         return {"chats": self.list_chats()}
+
+    # -- projects ------------------------------------------------------------
+
+    def list_projects(self) -> list[dict]:
+        return projects.list_all()
+
+    def create_project(self, name: str, color: str | None = None) -> dict:
+        proj = projects.create(name, color)
+        return {"project": proj, "projects": self.list_projects()}
+
+    def delete_project(self, project_id: str) -> dict:
+        projects.delete(project_id)
+        return {"projects": self.list_projects()}
+
+    def rename_project(self, project_id: str, name: str) -> dict:
+        proj = projects.rename(project_id, name)
+        return {"project": proj, "projects": self.list_projects()}
+
+    def add_chat_to_project(self, project_id: str, chat_id: str) -> dict:
+        proj = projects.add_chat(project_id, chat_id)
+        # Also update the session's project_id
+        data = sessions.load(chat_id)
+        if data:
+            data["project_id"] = project_id
+            sessions.save(data)
+        # If this is the current chat, apply project config
+        if self.session.get("id") == chat_id:
+            if proj:
+                self.engine.project_system_prompt = proj.get("system_prompt", "")
+                self.engine.project_context = proj.get("context", "")
+            self.engine.refresh_system_prompt()
+        return {"project": proj, "projects": self.list_projects(), "chats": self.list_chats()}
+
+    def remove_chat_from_project(self, project_id: str, chat_id: str) -> dict:
+        proj = projects.remove_chat(project_id, chat_id)
+        data = sessions.load(chat_id)
+        if data and data.get("project_id") == project_id:
+            data["project_id"] = ""
+            sessions.save(data)
+        # If this is the current chat, clear project config
+        if self.session.get("id") == chat_id:
+            self.engine.project_system_prompt = ""
+            self.engine.project_context = ""
+            self.engine.refresh_system_prompt()
+        return {"project": proj, "projects": self.list_projects(), "chats": self.list_chats()}
+
+    def update_project_config(self, project_id: str, system_prompt: str, context: str) -> dict:
+        proj = projects.update_config(project_id, system_prompt, context)
+        # If the current chat belongs to this project, refresh the system prompt
+        if self.session.get("project_id") == project_id:
+            self.engine.project_system_prompt = system_prompt
+            self.engine.project_context = context
+            self.engine.refresh_system_prompt()
+        return {"project": proj, "projects": self.list_projects()}
 
     # -- settings -----------------------------------------------------------
 
@@ -341,6 +417,7 @@ class Gateway:
             "chats": self.list_chats(),
             "current": self.current_chat(),
             "settings": self.get_settings(),
+            "projects": self.list_projects(),
         }
 
     # -- a chat turn --------------------------------------------------------
@@ -374,6 +451,14 @@ class _Handler(BaseHTTPRequestHandler):
 
     def log_message(self, *args) -> None:
         pass
+
+    def handle_one_request(self) -> None:
+        try:
+            super().handle_one_request()
+        except (ConnectionAbortedError, ConnectionResetError, BrokenPipeError):
+            # Windows often aborts connections when the browser navigates away
+            # or cancels a request.  Silently ignore rather than printing a traceback.
+            pass
 
     def _gw(self) -> Gateway:
         return self.server.gateway  # type: ignore[attr-defined]
@@ -412,6 +497,8 @@ class _Handler(BaseHTTPRequestHandler):
             self._json(self._gw().bootstrap())
         elif path == "/api/settings":
             self._json(self._gw().get_settings())
+        elif path == "/api/projects":
+            self._json(self._gw().list_projects())
         else:
             self._send(b"not found", "text/plain", status=404)
 
@@ -444,6 +531,29 @@ class _Handler(BaseHTTPRequestHandler):
             return
         if path == "/api/model":
             self._json(gw.set_model(str(self._body().get("model", ""))))
+            return
+        if path == "/api/projects/create":
+            b = self._body()
+            self._json(gw.create_project(str(b.get("name", "")), b.get("color")))
+            return
+        if path == "/api/projects/delete":
+            self._json(gw.delete_project(str(self._body().get("id", ""))))
+            return
+        if path == "/api/projects/rename":
+            b = self._body()
+            self._json(gw.rename_project(str(b.get("id", "")), str(b.get("name", ""))))
+            return
+        if path == "/api/projects/add_chat":
+            b = self._body()
+            self._json(gw.add_chat_to_project(str(b.get("project_id", "")), str(b.get("chat_id", ""))))
+            return
+        if path == "/api/projects/remove_chat":
+            b = self._body()
+            self._json(gw.remove_chat_from_project(str(b.get("project_id", "")), str(b.get("chat_id", ""))))
+            return
+        if path == "/api/projects/config":
+            b = self._body()
+            self._json(gw.update_project_config(str(b.get("id", "")), b.get("system_prompt", ""), b.get("context", "")))
             return
         self._send(b"not found", "text/plain", status=404)
 
@@ -478,14 +588,14 @@ class _Handler(BaseHTTPRequestHandler):
 
 
 # ---------------------------------------------------------------- the page --
-# J.A.R.V.I.S. — Just A Rather Very Intelligent System
-# Full holographic HUD interface for Cagentic.
+# Cagentic — AI Assistant
+# Full HUD interface for Cagentic.
 _HTML = """<!doctype html>
 <html lang="en">
 <head>
 <meta charset="utf-8" />
 <meta name="viewport" content="width=device-width, initial-scale=1" />
-<title>J.A.R.V.I.S.</title>
+<title>Cagentic</title>
 <link rel="stylesheet" href="/app.css" />
 </head>
 <body>
@@ -495,12 +605,12 @@ _HTML = """<!doctype html>
 
   <header class="hud-header">
     <div class="hdr-left">
-      <span class="jl">J</span><span class="jd">.</span><span class="jl">A</span><span class="jd">.</span><span class="jl">R</span><span class="jd">.</span><span class="jl">V</span><span class="jd">.</span><span class="jl">I</span><span class="jd">.</span><span class="jl">S</span><span class="jd">.</span>
-      <span class="j-sub">JUST A RATHER VERY INTELLIGENT SYSTEM</span>
+      <span class="jl">C</span><span class="jd">.</span><span class="jl">A</span><span class="jd">.</span><span class="jl">G</span><span class="jd">.</span><span class="jl">E</span><span class="jd">.</span><span class="jl">N</span><span class="jd">.</span><span class="jl">T</span><span class="jd">.</span><span class="jl">I</span><span class="jd">.</span><span class="jl">C</span><span class="jd">.</span>
+      <span class="j-sub">COGNITIVE AGENT NETWORK FOR INTELLIGENT COMPUTING</span>
     </div>
     <div class="hdr-center">
-      <span class="badge b-on">&#9679; ONLINE</span>
-      <span class="badge b-enc">&#9679; ENCRYPTED</span>
+      <span class="badge b-on">&#9679; Connected</span>
+      <span class="badge b-enc">&#9679; Secured</span>
       <div class="model-switch" id="modelSwitch" title="Switch model">
         <span class="ms-dot">&#9679;</span>
         <span class="ms-name" id="msName">---</span>
@@ -515,12 +625,12 @@ _HTML = """<!doctype html>
   </header>
 
   <div class="nav-bar">
-    <button class="nav-btn" id="logsBtn">[ MISSION LOGS ]</button>
-    <button class="nav-btn" id="newMissionBtn">[ + NEW MISSION ]</button>
+    <button class="nav-btn" id="logsBtn">[ Chats ]</button>
+    <button class="nav-btn" id="newMissionBtn">[ + New Chat ]</button>
     <div class="nav-divider"></div>
     <span class="nav-meta">SESSION <span id="jSession">--------</span></span>
     <div class="nav-spacer"></div>
-    <button class="nav-btn toggle-btn" id="voiceOutBtn" title="Read replies aloud">[ &#128264; VOICE OUT: OFF ]</button>
+    <button class="nav-btn toggle-btn" id="voiceOutBtn" title="Read replies aloud">[ &#128264; Voice: OFF ]</button>
     <button class="nav-btn" id="viewportBtn" title="Toggle viewport">[ &#9707; VIEWPORT ]</button>
     <div class="nav-divider"></div>
     <button class="nav-btn" id="configBtn">[ CONFIG ]</button>
@@ -534,18 +644,18 @@ _HTML = """<!doctype html>
           <div class="ring r1"></div><div class="ring r2"></div>
           <div class="ring r3"></div><div class="ring r4"></div>
         </div>
-        <div class="orb-label" id="orbLabel">AWAITING DIRECTIVE</div>
+        <div class="orb-label" id="orbLabel">New Chat</div>
       </div>
       <div id="log" class="chat-log"></div>
     </div>
 
     <aside class="viewport-panel" id="viewportPanel">
       <div class="vp-head">
-        <span class="panel-hdr">&#123; VIEWPORT &#125;</span>
+        <span class="panel-hdr">&#123; Viewport &#125;</span>
         <button class="icon-btn" id="vpClearBtn" title="Clear viewport">&#10005;</button>
       </div>
       <div class="vp-body" id="vpBody">
-        <div class="vp-empty">NO ACTIVE DISPLAY<br/><span>PANELS SUMMONED BY J.A.R.V.I.S. APPEAR HERE</span></div>
+        <div class="vp-empty">No active display<br/><span>Panels appear here</span></div>
       </div>
     </aside>
   </div>
@@ -553,14 +663,14 @@ _HTML = """<!doctype html>
   <div class="cmd-area">
     <div class="cmd-box" id="cmdBox">
       <span class="cmd-prompt">&gt;_</span>
-      <textarea id="input" rows="1" placeholder="ENTER COMMAND&#8230;"></textarea>
+      <textarea id="input" rows="1" placeholder="Type a message&#8230;"></textarea>
       <button id="micBtn" class="mic-btn" title="Voice input">&#127908;</button>
       <button id="send" class="exec-btn">EXECUTE</button>
     </div>
     <div class="cmd-footer">
       <span>CAGENTIC v<span id="versionSpan">--</span></span>
-      <span id="hintText">ENTER TO SEND &bull; SHIFT+ENTER NEWLINE &bull; CTRL+K NEW MISSION</span>
-      <span id="busyLabel" class="busy-label hidden">&#9679; PROCESSING</span>
+      <span id="hintText">Enter to send &bull; Shift+Enter for newline &bull; Ctrl+K New Chat</span>
+      <span id="busyLabel" class="busy-label hidden">&#9679; Thinking&#8230;</span>
     </div>
   </div>
 </div>
@@ -568,10 +678,10 @@ _HTML = """<!doctype html>
 <!-- Sessions drawer -->
 <div id="sessionsPanel" class="sessions-panel">
   <div class="sessions-head">
-    <span class="panel-hdr">&#123; MISSION LOGS &#125;</span>
+    <span class="panel-hdr">&#123; Sessions &#125;</span>
     <button id="closeSessionsBtn" class="icon-btn">&#10005;</button>
   </div>
-  <div id="chatList" class="chat-list-j"></div>
+  <div id="sessionList" class="session-list"></div>
 </div>
 
 <div id="backdrop" class="backdrop hidden"></div>
@@ -580,7 +690,7 @@ _HTML = """<!doctype html>
 <div id="settingsModal" class="modal hidden">
   <div class="modal-card">
     <div class="modal-head">
-      <span class="panel-hdr">&#123; SYSTEM CONFIGURATION &#125;</span>
+      <span class="panel-hdr">&#123; Settings &#125;</span>
       <button id="closeSettings" class="icon-btn">&#10005;</button>
     </div>
     <div class="modal-body">
@@ -590,30 +700,128 @@ _HTML = """<!doctype html>
       </div>
       <div class="field">
         <span class="field-label">OPERATOR NAME</span>
-        <input id="setName" type="text" placeholder="IDENTIFY YOURSELF" />
+        <input id="setName" type="text" placeholder="Your name" />
       </div>
       <div class="field">
         <span class="field-label">TEMPERATURE &nbsp;<em id="tempVal">0.40</em></span>
         <input id="setTemp" type="range" min="0" max="1.5" step="0.05" />
       </div>
       <div class="field">
-        <span class="field-label">VOICE (TEXT-TO-SPEECH)</span>
+        <span class="field-label">Voice (TTS)</span>
         <select id="setVoice"></select>
       </div>
       <div class="field row">
-        <span class="field-label">STREAM RESPONSES</span>
+        <span class="field-label">Stream responses</span>
         <label class="toggle"><input id="setStream" type="checkbox" /><span></span></label>
       </div>
       <div class="field row">
-        <span class="field-label">AUTO-APPROVE TOOLS</span>
+        <span class="field-label">Auto-approve tools</span>
         <label class="toggle"><input id="setYolo" type="checkbox" /><span></span></label>
       </div>
     </div>
     <div class="modal-foot">
-      <button id="cancelSettings" class="btn-ghost">CANCEL</button>
-      <button id="saveSettings"   class="btn-primary">SAVE CONFIG</button>
+      <button id="cancelSettings" class="btn-ghost">Cancel</button>
+      <button id="saveSettings"   class="btn-primary">Save</button>
     </div>
   </div>
+</div>
+<!-- Confirm modal -->
+<div id="confirmModal" class="modal hidden">
+  <div class="modal-card" style="width:340px">
+    <div class="modal-head">
+      <span id="confirmTitle" style="font-size:13px;color:var(--text)">Confirm</span>
+      <button id="confirmClose" class="icon-btn">&#10005;</button>
+    </div>
+    <div class="modal-body">
+      <p id="confirmMsg" style="color:var(--text-2);font-size:13px;margin:0"></p>
+    </div>
+    <div class="modal-foot">
+      <button id="confirmCancel" class="btn-ghost">Cancel</button>
+      <button id="confirmOk" class="btn-primary">Delete</button>
+    </div>
+  </div>
+</div>
+
+<!-- Rename modal -->
+<div id="renameModal" class="modal hidden">
+  <div class="modal-card" style="width:380px">
+    <div class="modal-head">
+      <span style="font-size:13px;color:var(--text)">Rename</span>
+      <button id="renameClose" class="icon-btn">&#10005;</button>
+    </div>
+    <div class="modal-body">
+      <input id="renameInput" type="text" style="width:100%;background:rgba(34,27,42,.8);border:1px solid var(--border-h);color:var(--text);padding:8px 10px;font-size:13px" />
+    </div>
+    <div class="modal-foot">
+      <button id="renameCancel" class="btn-ghost">Cancel</button>
+      <button id="renameOk" class="btn-primary">Rename</button>
+    </div>
+  </div>
+</div>
+
+<!-- New project modal -->
+<div id="newProjectModal" class="modal hidden">
+  <div class="modal-card" style="width:380px">
+    <div class="modal-head">
+      <span style="font-size:13px;color:var(--text)">New Project</span>
+      <button id="newProjectModalClose" class="icon-btn">&#10005;</button>
+    </div>
+    <div class="modal-body">
+      <input id="newProjectInput" type="text" placeholder="Project name" style="width:100%;background:rgba(34,27,42,.8);border:1px solid var(--border-h);color:var(--text);padding:8px 10px;font-size:13px" />
+    </div>
+    <div class="modal-foot">
+      <button id="newProjectCancel" class="btn-ghost">Cancel</button>
+      <button id="newProjectOk" class="btn-primary">Create</button>
+    </div>
+  </div>
+</div>
+
+<!-- Add to project modal -->
+<div id="projectModal" class="modal hidden">
+  <div class="modal-card" style="width:380px">
+    <div class="modal-head">
+      <span style="font-size:13px;color:var(--text)">Add to Project</span>
+      <button id="projectModalClose" class="icon-btn">&#10005;</button>
+    </div>
+    <div class="modal-body" id="projectModalBody">
+    </div>
+    <div class="modal-foot">
+      <button id="projectModalNewBtn" class="btn-ghost">+ New Project</button>
+      <button id="projectModalCancel" class="btn-ghost">Cancel</button>
+    </div>
+  </div>
+</div>
+
+<!-- Project config modal -->
+<div id="projConfigModal" class="modal hidden">
+  <div class="modal-card" style="width:480px">
+    <div class="modal-head">
+      <span style="font-size:13px;color:var(--text)">Project Config</span>
+      <button id="projConfigClose" class="icon-btn">&#10005;</button>
+    </div>
+    <div class="modal-body">
+      <div class="field">
+        <span class="field-label">SYSTEM PROMPT</span>
+        <textarea id="projConfigPrompt" rows="5" style="background:rgba(34,27,42,.9);border:1px solid var(--border);color:var(--text);padding:8px 11px;font:11.5px var(--mono);letter-spacing:.04em;resize:vertical;width:100%;box-sizing:border-box" placeholder="Custom instructions for this project's chats&#10;(appended after the base system prompt)"></textarea>
+      </div>
+      <div class="field">
+        <span class="field-label">CONTEXT / NOTES</span>
+        <textarea id="projConfigContext" rows="5" style="background:rgba(34,27,42,.9);border:1px solid var(--border);color:var(--text);padding:8px 11px;font:11.5px var(--mono);letter-spacing:.04em;resize:vertical;width:100%;box-sizing:border-box" placeholder="Reference material always included in this project's chats&#10;(e.g. coding standards, project background, key contacts)"></textarea>
+      </div>
+    </div>
+    <div class="modal-foot">
+      <button id="projConfigCancel" class="btn-ghost">Cancel</button>
+      <button id="projConfigSave" class="btn-primary">Save</button>
+    </div>
+  </div>
+</div>
+
+<!-- Context menu (floating) -->
+<div id="ctxMenu" class="ctx-menu hidden">
+  <div class="ctx-item" data-action="rename">&#9998; Rename</div>
+  <div class="ctx-item" data-action="project">&#128193; Add to Project</div>
+  <div class="ctx-sep"></div>
+  <div class="ctx-item ctx-danger" data-action="delete">&#128465; Delete</div>
 </div>
 
 <script src="/app.js"></script>
@@ -622,22 +830,22 @@ _HTML = """<!doctype html>
 """
 
 _CSS = """
-/* ===== J.A.R.V.I.S. — Neural Interface ===================================== */
+/* ===== Cagentic ===================================== */
 :root {
-  --bg:       #030e1c;
-  --cyan:     #00d4ff;
-  --cyan-dim: rgba(0,212,255,.1);
-  --cyan-glow:rgba(0,212,255,.35);
-  --text:     #90e0ff;
-  --text-2:   #5599bb;
-  --text-dim: #224466;
-  --ok:       #00ff99;
-  --warn:     #ffaa00;
-  --hot:      #ff4422;
-  --border:   rgba(0,212,255,.2);
-  --border-h: rgba(0,212,255,.5);
-  --panel-bg: rgba(0,14,32,.88);
-  --grid:     rgba(0,212,255,.03);
+  --bg:       #161118;
+  --accent:   #f0a87a;
+  --accent-dim:rgba(240,168,122,.1);
+  --accent-glow:rgba(240,168,122,.35);
+  --text:     #ece7f0;
+  --text-2:   #b0a6ba;
+  --text-dim: #7d7388;
+  --ok:       #8ecf95;
+  --warn:     #e6c073;
+  --hot:      #e5928f;
+  --border:   rgba(236,231,240,.08);
+  --border-h: rgba(236,231,240,.14);
+  --panel-bg: rgba(34,27,42,.88);
+  --grid:     rgba(240,168,122,.03);
   --mono: "Courier New", Consolas, monospace;
 }
 * { box-sizing: border-box; margin: 0; padding: 0; }
@@ -650,7 +858,7 @@ body {
     linear-gradient(90deg, var(--grid) 1px, transparent 1px);
   background-size: 44px 44px;
 }
-::selection { background: rgba(0,212,255,.22); }
+::selection { background: rgba(240,168,122,.22); }
 .hidden { display: none !important; }
 
 .scanlines {
@@ -660,7 +868,7 @@ body {
 }
 .vignette {
   position: fixed; inset: 0; pointer-events: none; z-index: 9998;
-  background: radial-gradient(ellipse at center, transparent 50%, rgba(0,5,20,.8) 100%);
+  background: radial-gradient(ellipse at center, transparent 50%, rgba(22,17,24,.8) 100%);
 }
 #app { display: flex; flex-direction: column; height: 100vh; height: 100dvh; }
 
@@ -668,11 +876,11 @@ body {
 .hud-header {
   display: flex; align-items: center; justify-content: space-between;
   padding: 8px 20px 7px; border-bottom: 1px solid var(--border);
-  background: rgba(0,8,20,.75); flex-shrink: 0; gap: 16px;
+  background: rgba(22,17,24,.75); flex-shrink: 0; gap: 16px;
 }
 .hdr-left { display: flex; align-items: baseline; gap: 0; flex-shrink: 0; }
-.jl { font-size: 20px; color: #fff; text-shadow: 0 0 16px var(--cyan); letter-spacing: .18em; }
-.jd { font-size: 20px; color: var(--cyan); letter-spacing: .18em; }
+.jl { font-size: 20px; color: #fff; text-shadow: 0 0 16px var(--accent); letter-spacing: .18em; }
+.jd { font-size: 20px; color: var(--accent); letter-spacing: .18em; }
 .j-sub {
   font-size: 8px; color: var(--text-2); letter-spacing: .14em;
   margin-left: 18px; align-self: flex-end; padding-bottom: 3px; text-transform: uppercase;
@@ -682,8 +890,8 @@ body {
   font-size: 9px; padding: 3px 9px; border: 1px solid;
   letter-spacing: .1em; text-transform: uppercase; white-space: nowrap;
 }
-.b-on  { color: var(--ok);  border-color: rgba(0,255,153,.35); background: rgba(0,255,153,.05); }
-.b-enc { color: var(--cyan); border-color: var(--border); background: var(--cyan-dim); }
+.b-on  { color: var(--ok);  border-color: rgba(142,207,149,.35); background: rgba(142,207,149,.05); }
+.b-enc { color: var(--accent); border-color: var(--border); background: var(--accent-dim); }
 
 /* model switcher */
 .model-switch {
@@ -699,35 +907,35 @@ body {
 .model-menu {
   position: absolute; top: 100%; left: 0; margin-top: 4px; z-index: 400;
   min-width: 200px; max-height: 320px; overflow-y: auto;
-  background: #04121f; border: 1px solid var(--border-h);
-  box-shadow: 0 0 30px rgba(0,212,255,.18);
+  background: #1e1728; border: 1px solid var(--border-h);
+  box-shadow: 0 0 30px rgba(240,168,122,.18);
 }
 .mm-item {
   padding: 8px 11px; font-size: 10px; color: var(--text-2);
-  cursor: pointer; letter-spacing: .05em; border-bottom: 1px solid rgba(0,212,255,.06);
+  cursor: pointer; letter-spacing: .05em; border-bottom: 1px solid rgba(240,168,122,.06);
   white-space: nowrap; display: flex; align-items: center; gap: 7px;
 }
-.mm-item:hover  { background: rgba(0,212,255,.08); color: var(--text); }
-.mm-item.active { color: var(--cyan); }
-.mm-item .mm-tick { color: var(--cyan); width: 8px; }
+.mm-item:hover  { background: rgba(240,168,122,.08); color: var(--text); }
+.mm-item.active { color: var(--accent); }
+.mm-item .mm-tick { color: var(--accent); width: 8px; }
 
 .hdr-right { text-align: right; flex-shrink: 0; }
-.j-clock { font-size: 22px; color: #fff; letter-spacing: .12em; text-shadow: 0 0 18px var(--cyan-glow); }
+.j-clock { font-size: 22px; color: #fff; letter-spacing: .12em; text-shadow: 0 0 18px var(--accent-glow); }
 .j-date { font-size: 9px; color: var(--text-2); letter-spacing: .1em; margin-top: 2px; }
 
 /* ---- NAV BAR --------------------------------------------------------------- */
 .nav-bar {
   display: flex; align-items: center; gap: 10px; padding: 5px 20px;
-  border-bottom: 1px solid var(--border); background: rgba(0,6,16,.6); flex-shrink: 0;
+  border-bottom: 1px solid var(--border); background: rgba(22,17,24,.6); flex-shrink: 0;
 }
 .nav-btn {
-  background: var(--cyan-dim); border: 1px solid var(--border);
-  color: var(--cyan); font: 9px var(--mono); cursor: pointer;
+  background: var(--accent-dim); border: 1px solid var(--border);
+  color: var(--accent); font: 9px var(--mono); cursor: pointer;
   padding: 4px 11px; letter-spacing: .12em; text-transform: uppercase;
   transition: background .15s, border-color .15s; white-space: nowrap;
 }
-.nav-btn:hover { background: rgba(0,212,255,.22); border-color: var(--border-h); }
-.nav-btn.active { background: rgba(0,212,255,.28); border-color: var(--cyan); color: #fff; }
+.nav-btn:hover { background: rgba(240,168,122,.22); border-color: var(--border-h); }
+.nav-btn.active { background: rgba(240,168,122,.28); border-color: var(--accent); color: #fff; }
 .nav-divider { width: 1px; height: 16px; background: var(--border); }
 .nav-spacer { flex: 1; }
 .nav-meta { font-size: 9px; color: var(--text-dim); letter-spacing: .08em; white-space: nowrap; }
@@ -741,7 +949,7 @@ body {
   position: relative; flex-shrink: 0; height: 300px;
   display: flex; align-items: center; justify-content: center;
   background: radial-gradient(ellipse 70% 80% at 50% 55%,
-    rgba(0,60,120,.35) 0%, rgba(0,20,50,.15) 60%, transparent 100%);
+    rgba(120,60,40,.35) 0%, rgba(40,20,30,.15) 60%, transparent 100%);
   border-bottom: 1px solid var(--border); overflow: hidden;
   transition: height .3s ease;
 }
@@ -749,10 +957,10 @@ body {
 #orbCanvas { position: absolute; inset: 0; width: 100%; height: 100%; }
 .orb-rings { position: absolute; top: 50%; left: 50%; pointer-events: none; }
 .ring { position: absolute; border-radius: 50%; border: 1px solid; }
-.r1 { width: 320px; height: 320px; margin: -160px 0 0 -160px; border-color: rgba(0,212,255,.1);  animation: spin1 28s linear infinite; }
-.r2 { width: 250px; height: 250px; margin: -125px 0 0 -125px; border-color: rgba(0,212,255,.18); border-style: dashed; animation: spin2 18s linear infinite; }
-.r3 { width: 185px; height: 185px; margin: -92px  0 0 -92px;  border-color: rgba(0,212,255,.28); animation: spin1 13s linear infinite; }
-.r4 { width: 120px; height: 120px; margin: -60px  0 0 -60px;  border-color: rgba(0,212,255,.42); animation: spin2 8s  linear infinite; }
+.r1 { width: 320px; height: 320px; margin: -160px 0 0 -160px; border-color: rgba(240,168,122,.1);  animation: spin1 28s linear infinite; }
+.r2 { width: 250px; height: 250px; margin: -125px 0 0 -125px; border-color: rgba(240,168,122,.18); border-style: dashed; animation: spin2 18s linear infinite; }
+.r3 { width: 185px; height: 185px; margin: -92px  0 0 -92px;  border-color: rgba(240,168,122,.28); animation: spin1 13s linear infinite; }
+.r4 { width: 120px; height: 120px; margin: -60px  0 0 -60px;  border-color: rgba(240,168,122,.42); animation: spin2 8s  linear infinite; }
 @keyframes spin1 { to { transform: rotate(360deg);  } }
 @keyframes spin2 { to { transform: rotate(-360deg); } }
 .orb-label {
@@ -761,7 +969,7 @@ body {
   text-transform: uppercase; white-space: nowrap; pointer-events: none;
 }
 .orb-zone.listening .orb-label { color: var(--ok); }
-.orb-zone.speaking  .orb-label { color: var(--cyan); }
+.orb-zone.speaking  .orb-label { color: var(--accent); }
 
 /* ---- CHAT LOG -------------------------------------------------------------- */
 .chat-log { flex: 1; overflow-y: auto; padding: 16px 0; min-height: 0; }
@@ -774,12 +982,12 @@ body {
 .quick-cards { display: grid; grid-template-columns: repeat(3, 1fr); gap: 10px; }
 .qcard {
   padding: 14px 16px; border: 1px solid var(--border);
-  background: rgba(0,212,255,.03); cursor: pointer;
+  background: rgba(240,168,122,.03); cursor: pointer;
   transition: background .15s, border-color .15s; text-align: left;
 }
-.qcard:hover { background: rgba(0,212,255,.08); border-color: var(--border-h); }
+.qcard:hover { background: rgba(240,168,122,.08); border-color: var(--border-h); }
 .qcard-icon { font-size: 18px; margin-bottom: 7px; display: block; }
-.qcard-title { font-size: 11px; color: #c8eeff; letter-spacing: .05em; display: block; margin-bottom: 3px; }
+.qcard-title { font-size: 11px; color: #d8c8e0; letter-spacing: .05em; display: block; margin-bottom: 3px; }
 .qcard-sub   { font-size: 9px;  color: var(--text-2); letter-spacing: .04em; line-height: 1.5; display: block; }
 
 /* messages */
@@ -787,47 +995,47 @@ body {
 @keyframes fadeIn { from { opacity: 0; transform: translateY(5px); } }
 .msg-row.user { display: flex; justify-content: flex-end; }
 .msg-row.user .bubble {
-  background: rgba(0,80,160,.28); border: 1px solid rgba(0,160,255,.3);
-  padding: 9px 14px; max-width: 78%; font-size: 12px; color: #c5eaff;
+  background: rgba(142,100,120,.28); border: 1px solid rgba(240,168,122,.3);
+  padding: 9px 14px; max-width: 78%; font-size: 12px; color: #d8c8e0;
   line-height: 1.55; letter-spacing: .02em;
 }
-.msg-row.user .bubble::before { content: "> "; color: var(--cyan); }
+.msg-row.user .bubble::before { content: "> "; color: var(--accent); }
 .msg-row.assistant { display: flex; gap: 12px; align-items: flex-start; }
 .j-avatar {
   width: 26px; height: 26px; flex-shrink: 0; margin-top: 1px;
-  border: 1px solid var(--cyan); display: flex; align-items: center;
-  justify-content: center; color: var(--cyan); font-size: 11px;
-  box-shadow: 0 0 10px var(--cyan-glow); background: rgba(0,212,255,.05);
+  border: 1px solid var(--accent); display: flex; align-items: center;
+  justify-content: center; color: var(--accent); font-size: 11px;
+  box-shadow: 0 0 10px var(--accent-glow); background: rgba(240,168,122,.05);
 }
 .msg-body { flex: 1; min-width: 0; font-size: 12px; color: var(--text); line-height: 1.65; }
 .msg-body p { margin: 0 0 9px; }
 .msg-body p:last-child { margin: 0; }
 .msg-body h3 { font-size: 13px; color: #fff; margin: 12px 0 5px; }
-.msg-body code { color: var(--cyan); background: rgba(0,212,255,.07); padding: 1px 5px; font-size: 11px; }
+.msg-body code { color: var(--accent); background: rgba(240,168,122,.07); padding: 1px 5px; font-size: 11px; }
 .msg-body strong { color: #fff; }
-.msg-body a { color: var(--cyan); text-decoration: none; }
+.msg-body a { color: var(--accent); text-decoration: none; }
 .msg-body a:hover { text-decoration: underline; }
 .msg-body ul { padding-left: 18px; margin: 6px 0; }
-.msg-body li::marker { color: var(--cyan); }
-.cursor::after { content: '█'; color: var(--cyan); animation: blink .9s steps(2) infinite; }
+.msg-body li::marker { color: var(--accent); }
+.cursor::after { content: '█'; color: var(--accent); animation: blink .9s steps(2) infinite; }
 @keyframes blink { 50% { opacity: 0; } }
 
 /* code blocks */
-.codeblock { margin: 9px 0; border: 1px solid var(--border); background: rgba(0,5,18,.95); }
-.cb-head { display: flex; justify-content: space-between; padding: 5px 10px; background: rgba(0,212,255,.05); border-bottom: 1px solid var(--border); }
-.cb-lang { font-size: 9px; color: var(--cyan); letter-spacing: .1em; text-transform: uppercase; }
+.codeblock { margin: 9px 0; border: 1px solid var(--border); background: rgba(22,17,24,.95); }
+.cb-head { display: flex; justify-content: space-between; padding: 5px 10px; background: rgba(240,168,122,.05); border-bottom: 1px solid var(--border); }
+.cb-lang { font-size: 9px; color: var(--accent); letter-spacing: .1em; text-transform: uppercase; }
 .cb-copy { background: transparent; border: 0; color: var(--text-2); cursor: pointer; font: 9px var(--mono); letter-spacing: .1em; }
-.cb-copy:hover { color: var(--cyan); }
+.cb-copy:hover { color: var(--accent); }
 .codeblock pre { margin: 0; padding: 10px 12px; overflow-x: auto; }
-.codeblock code { font: 11.5px/1.6 var(--mono); color: #aadcf5; background: none; }
+.codeblock code { font: 11.5px/1.6 var(--mono); color: #c9b8d4; background: none; }
 
 /* tool rows */
 .tool-row {
   display: flex; align-items: center; gap: 8px; padding: 6px 9px;
   margin: 5px 0; font-size: 10px; border: 1px solid var(--border);
-  background: rgba(0,18,38,.7); letter-spacing: .04em;
+  background: rgba(34,27,42,.7); letter-spacing: .04em;
 }
-.tool-row .tname { color: #c8eeff; }
+.tool-row .tname { color: #d8c8e0; }
 .tool-row .tsum  { color: var(--text-2); flex: 1; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
 .tool-row .tres  { margin-left: auto; }
 .tool-row.ok  .tres { color: var(--ok); }
@@ -838,7 +1046,7 @@ body {
 /* thinking */
 .thinking-row { display: flex; align-items: center; gap: 10px; padding: 5px 0; font-size: 10px; color: var(--text-dim); letter-spacing: .14em; }
 .thinking-dots { display: flex; gap: 5px; }
-.thinking-dots span { width: 6px; height: 6px; background: var(--cyan); border-radius: 50%; animation: bob 1s ease-in-out infinite; }
+.thinking-dots span { width: 6px; height: 6px; background: var(--accent); border-radius: 50%; animation: bob 1s ease-in-out infinite; }
 .thinking-dots span:nth-child(2) { animation-delay: .18s; }
 .thinking-dots span:nth-child(3) { animation-delay: .36s; }
 @keyframes bob { 0%,100%{opacity:.15;transform:translateY(0)} 50%{opacity:1;transform:translateY(-4px)} }
@@ -855,8 +1063,8 @@ body {
 .perm-box code { color: var(--warn); background: rgba(255,170,0,.08); padding: 1px 5px; }
 .perm-btns { display: flex; gap: 8px; }
 .perm-btns button { border: 1px solid; padding: 6px 12px; cursor: pointer; font: 9px var(--mono); letter-spacing: .1em; text-transform: uppercase; }
-.perm-btns .yes    { background: rgba(0,255,153,.07);  color: var(--ok);  border-color: rgba(0,255,153,.4); }
-.perm-btns .yes:hover { background: rgba(0,255,153,.18); }
+.perm-btns .yes    { background: rgba(142,207,149,.07);  color: var(--ok);  border-color: rgba(142,207,149,.4); }
+.perm-btns .yes:hover { background: rgba(142,207,149,.18); }
 .perm-btns .always { background: rgba(255,170,0,.07);  color: var(--warn); border-color: rgba(255,170,0,.4); }
 .perm-btns .no     { background: transparent; color: var(--text-2); border-color: var(--border); }
 .perm-decided      { font-size: 10px; color: var(--text-dim); }
@@ -864,7 +1072,7 @@ body {
 /* ---- VIEWPORT PANEL -------------------------------------------------------- */
 .viewport-panel {
   width: 340px; flex-shrink: 0; border-left: 1px solid var(--border);
-  background: rgba(0,8,20,.55); display: flex; flex-direction: column;
+  background: rgba(22,17,24,.55); display: flex; flex-direction: column;
   transition: width .3s ease, margin-right .3s ease;
 }
 .viewport-panel.collapsed { width: 0; margin-right: -1px; overflow: hidden; border-left: 0; }
@@ -879,79 +1087,79 @@ body {
   padding: 11px 13px; position: relative; animation: vpIn .35s ease;
 }
 @keyframes vpIn { from { opacity: 0; transform: translateX(12px); } }
-.vpanel::before { content: ''; position: absolute; top: -1px; left: 12px; right: 12px; height: 1px; background: linear-gradient(90deg, transparent, var(--cyan), transparent); }
-.vpanel-title { font-size: 9px; color: var(--cyan); letter-spacing: .14em; text-transform: uppercase; margin-bottom: 9px; text-shadow: 0 0 8px var(--cyan-glow); }
-.vp-stat-row { display: flex; justify-content: space-between; align-items: center; padding: 4px 0; border-bottom: 1px solid rgba(0,212,255,.06); font-size: 10px; }
+.vpanel::before { content: ''; position: absolute; top: -1px; left: 12px; right: 12px; height: 1px; background: linear-gradient(90deg, transparent, var(--accent), transparent); }
+.vpanel-title { font-size: 9px; color: var(--accent); letter-spacing: .14em; text-transform: uppercase; margin-bottom: 9px; text-shadow: 0 0 8px var(--accent-glow); }
+.vp-stat-row { display: flex; justify-content: space-between; align-items: center; padding: 4px 0; border-bottom: 1px solid rgba(240,168,122,.06); font-size: 10px; }
 .vp-stat-row .l { color: var(--text-2); letter-spacing: .05em; }
 .vp-stat-row .v { color: #fff; }
 .vp-stat-row .v.ok { color: var(--ok); } .vp-stat-row .v.warn { color: var(--warn); } .vp-stat-row .v.hot { color: var(--hot); }
 .vp-metric { text-align: center; padding: 6px 0; }
-.vp-metric .big { font-size: 38px; color: #fff; text-shadow: 0 0 22px var(--cyan-glow); line-height: 1; }
-.vp-metric .big .unit { font-size: 16px; color: var(--cyan); margin-left: 3px; }
+.vp-metric .big { font-size: 38px; color: #fff; text-shadow: 0 0 22px var(--accent-glow); line-height: 1; }
+.vp-metric .big .unit { font-size: 16px; color: var(--accent); margin-left: 3px; }
 .vp-metric .sub { font-size: 9px; color: var(--text-2); margin-top: 6px; letter-spacing: .08em; }
 .vp-metric .trend { font-size: 11px; margin-top: 4px; }
 .vp-metric .trend.up { color: var(--ok); } .vp-metric .trend.down { color: var(--hot); } .vp-metric .trend.flat { color: var(--text-2); }
 .vp-list { list-style: none; }
-.vp-list li { font-size: 10px; color: var(--text); padding: 4px 0 4px 14px; position: relative; border-bottom: 1px solid rgba(0,212,255,.05); line-height: 1.5; }
-.vp-list li::before { content: '▸'; color: var(--cyan); position: absolute; left: 0; }
+.vp-list li { font-size: 10px; color: var(--text); padding: 4px 0 4px 14px; position: relative; border-bottom: 1px solid rgba(240,168,122,.05); line-height: 1.5; }
+.vp-list li::before { content: '▸'; color: var(--accent); position: absolute; left: 0; }
 .vp-table { width: 100%; border-collapse: collapse; font-size: 9.5px; }
-.vp-table th { color: var(--cyan); text-align: left; padding: 4px 6px; border-bottom: 1px solid var(--border); letter-spacing: .05em; text-transform: uppercase; }
-.vp-table td { color: var(--text); padding: 4px 6px; border-bottom: 1px solid rgba(0,212,255,.05); }
+.vp-table th { color: var(--accent); text-align: left; padding: 4px 6px; border-bottom: 1px solid var(--border); letter-spacing: .05em; text-transform: uppercase; }
+.vp-table td { color: var(--text); padding: 4px 6px; border-bottom: 1px solid rgba(240,168,122,.05); }
 .vp-image img { width: 100%; border: 1px solid var(--border); display: block; }
 .vp-image .cap { font-size: 9px; color: var(--text-2); margin-top: 6px; letter-spacing: .04em; }
-.vp-web-item { padding: 7px 0; border-bottom: 1px solid rgba(0,212,255,.06); }
-.vp-web-item a { color: var(--cyan); font-size: 10px; text-decoration: none; display: block; letter-spacing: .03em; }
+.vp-web-item { padding: 7px 0; border-bottom: 1px solid rgba(240,168,122,.06); }
+.vp-web-item a { color: var(--accent); font-size: 10px; text-decoration: none; display: block; letter-spacing: .03em; }
 .vp-web-item a:hover { text-decoration: underline; }
 .vp-web-item .url { font-size: 8.5px; color: var(--ok); margin: 2px 0; word-break: break-all; }
 .vp-web-item .snip { font-size: 9px; color: var(--text-2); line-height: 1.5; }
 .vp-alert { padding: 10px 12px; border-left: 2px solid; }
-.vp-alert.info { border-color: var(--cyan); background: rgba(0,212,255,.05); }
+.vp-alert.info { border-color: var(--accent); background: rgba(240,168,122,.05); }
 .vp-alert.warn { border-color: var(--warn); background: rgba(255,170,0,.05); }
 .vp-alert.critical { border-color: var(--hot); background: rgba(255,68,34,.07); }
 .vp-alert .at { font-size: 10px; color: #fff; margin-bottom: 4px; letter-spacing: .06em; }
 .vp-alert .ax { font-size: 9.5px; color: var(--text-2); line-height: 1.5; }
 .vp-prog-row { margin: 7px 0; }
 .vp-prog-row .pl { display: flex; justify-content: space-between; font-size: 9px; color: var(--text-2); margin-bottom: 3px; }
-.vp-prog-bar { height: 6px; background: rgba(0,212,255,.07); border: 1px solid rgba(0,212,255,.15); }
-.vp-prog-fill { height: 100%; background: var(--cyan); box-shadow: 0 0 6px var(--cyan-glow); transition: width .6s ease; }
+.vp-prog-bar { height: 6px; background: rgba(240,168,122,.07); border: 1px solid rgba(240,168,122,.15); }
+.vp-prog-fill { height: 100%; background: var(--accent); box-shadow: 0 0 6px var(--accent-glow); transition: width .6s ease; }
 .vp-map { position: relative; height: 150px; border: 1px solid var(--border); overflow: hidden; background:
-  radial-gradient(circle at 50% 50%, rgba(0,212,255,.08), transparent 70%); }
+  radial-gradient(circle at 50% 50%, rgba(240,168,122,.08), transparent 70%); }
 .vp-map .crosshair { position: absolute; top: 50%; left: 50%; width: 16px; height: 16px; margin: -8px 0 0 -8px; }
 .vp-map .crosshair::before, .vp-map .crosshair::after { content: ''; position: absolute; background: var(--ok); box-shadow: 0 0 8px var(--ok); }
 .vp-map .crosshair::before { left: 7px; top: 0; width: 2px; height: 16px; }
 .vp-map .crosshair::after { top: 7px; left: 0; height: 2px; width: 16px; }
 .vp-map .mgrid { position: absolute; inset: 0; background-image:
-  linear-gradient(rgba(0,212,255,.08) 1px, transparent 1px),
-  linear-gradient(90deg, rgba(0,212,255,.08) 1px, transparent 1px); background-size: 22px 22px; }
+  linear-gradient(rgba(240,168,122,.08) 1px, transparent 1px),
+  linear-gradient(90deg, rgba(240,168,122,.08) 1px, transparent 1px); background-size: 22px 22px; }
 .vp-map .mlabel { position: absolute; bottom: 6px; left: 8px; font-size: 8.5px; color: var(--ok); letter-spacing: .06em; }
 
 /* ---- CMD AREA -------------------------------------------------------------- */
-.cmd-area { flex-shrink: 0; padding: 10px 20px 12px; border-top: 1px solid var(--border); background: rgba(0,6,16,.7); }
+.cmd-area { flex-shrink: 0; padding: 10px 20px 12px; border-top: 1px solid var(--border); background: rgba(22,17,24,.7); }
 .cmd-box {
   display: flex; align-items: flex-end; gap: 10px;
-  border: 1px solid var(--border-h); padding: 9px 12px; background: rgba(0,20,45,.8);
-  box-shadow: 0 0 30px rgba(0,212,255,.07), inset 0 0 25px rgba(0,0,0,.5);
+  border: 1px solid var(--border-h); padding: 9px 12px; background: rgba(34,27,42,.8);
+  box-shadow: 0 0 30px rgba(240,168,122,.07), inset 0 0 25px rgba(0,0,0,.5);
   max-width: 1000px; margin: 0 auto;
 }
-.cmd-box:focus-within { border-color: var(--cyan); box-shadow: 0 0 40px rgba(0,212,255,.18), inset 0 0 25px rgba(0,0,0,.5); }
-.cmd-box.listening { border-color: var(--ok); box-shadow: 0 0 40px rgba(0,255,153,.25), inset 0 0 25px rgba(0,0,0,.5); }
-.cmd-prompt { color: var(--cyan); font-size: 15px; flex-shrink: 0; padding-bottom: 1px; }
-.cmd-box textarea { flex: 1; background: transparent; border: 0; outline: 0; color: #d8f4ff; font: 13px/1.55 var(--mono); resize: none; max-height: 130px; letter-spacing: .03em; }
+.cmd-box:focus-within { border-color: var(--accent); box-shadow: 0 0 40px rgba(240,168,122,.18), inset 0 0 25px rgba(0,0,0,.5); }
+.cmd-box.listening { border-color: var(--ok); box-shadow: 0 0 40px rgba(142,207,149,.25), inset 0 0 25px rgba(0,0,0,.5); }
+.cmd-prompt { color: var(--accent); font-size: 15px; flex-shrink: 0; padding-bottom: 1px; }
+.cmd-box textarea { flex: 1; background: transparent; border: 0; outline: 0; color: #ece7f0; font: 13px/1.55 var(--mono); resize: none; max-height: 130px; letter-spacing: .03em; }
 .cmd-box textarea::placeholder { color: var(--text-dim); }
 .mic-btn {
   flex-shrink: 0; width: 34px; height: 32px; border: 1px solid var(--border);
-  background: var(--cyan-dim); color: var(--cyan); font-size: 15px; cursor: pointer;
+  background: var(--accent-dim); color: var(--accent); font-size: 15px; cursor: pointer;
   transition: background .15s, border-color .15s;
 }
-.mic-btn:hover { background: rgba(0,212,255,.22); }
-.mic-btn.listening { border-color: var(--ok); color: var(--ok); background: rgba(0,255,153,.12); animation: micPulse 1.1s ease infinite; }
-@keyframes micPulse { 50% { box-shadow: 0 0 14px rgba(0,255,153,.5); } }
+.mic-btn:hover { background: rgba(240,168,122,.22); }
+.mic-btn.listening { border-color: var(--ok); color: var(--ok); background: rgba(142,207,149,.12); animation: micPulse 1.1s ease infinite; }
+@keyframes micPulse { 50% { box-shadow: 0 0 14px rgba(142,207,149,.5); } }
 .exec-btn {
-  flex-shrink: 0; padding: 7px 18px; border: 1px solid var(--cyan);
-  background: rgba(0,212,255,.1); color: var(--cyan); font: 10px var(--mono);
+  flex-shrink: 0; padding: 7px 18px; border: 1px solid var(--accent);
+  background: rgba(240,168,122,.1); color: var(--accent); font: 10px var(--mono);
   cursor: pointer; letter-spacing: .16em; text-transform: uppercase; transition: background .15s;
 }
-.exec-btn:hover    { background: rgba(0,212,255,.24); }
+.exec-btn:hover    { background: rgba(240,168,122,.24); }
 .exec-btn:disabled { opacity: .28; cursor: default; }
 .cmd-footer { display: flex; justify-content: space-between; align-items: center; max-width: 1000px; margin: 5px auto 0; font-size: 9px; color: var(--text-dim); letter-spacing: .08em; }
 .busy-label { color: var(--ok); animation: pulse 1.2s ease infinite; }
@@ -959,53 +1167,87 @@ body {
 /* ---- SESSIONS DRAWER ------------------------------------------------------- */
 .sessions-panel {
   position: fixed; top: 0; left: 0; bottom: 0; width: 270px;
-  background: rgba(2,10,24,.97); border-right: 1px solid var(--border-h);
+  background: rgba(22,17,24,.97); border-right: 1px solid var(--border-h);
   z-index: 200; padding: 14px; display: flex; flex-direction: column;
   transform: translateX(-100%); transition: transform .22s ease;
 }
-.sessions-panel.open { transform: translateX(0); box-shadow: 0 0 50px rgba(0,212,255,.12); }
+.sessions-panel.open { transform: translateX(0); box-shadow: 0 0 50px rgba(240,168,122,.12); }
 .sessions-head { display: flex; align-items: center; justify-content: space-between; padding-bottom: 10px; border-bottom: 1px solid var(--border); margin-bottom: 10px; }
-.panel-hdr { font-size: 9px; color: var(--cyan); letter-spacing: .16em; text-transform: uppercase; }
+.panel-hdr { font-size: 9px; color: var(--accent); letter-spacing: .16em; text-transform: uppercase; }
 .icon-btn { background: transparent; border: 0; color: var(--text-dim); cursor: pointer; font: 14px var(--mono); padding: 2px 5px; }
-.icon-btn:hover { color: var(--cyan); }
-.chat-list-j { flex: 1; overflow-y: auto; }
-.chat-item-j { display: flex; align-items: center; padding: 8px 8px; cursor: pointer; color: var(--text-2); border-bottom: 1px solid rgba(0,212,255,.06); font-size: 10px; letter-spacing: .05em; gap: 6px; }
-.chat-item-j:hover  { background: rgba(0,212,255,.05); color: var(--text); }
-.chat-item-j.active { background: rgba(0,212,255,.08); color: var(--cyan); }
+.icon-btn:hover { color: var(--accent); }
+.session-list { flex: 1; overflow-y: auto; }
+.sess-group { border-bottom: 1px solid var(--border); }
+.sess-group-head { display: flex; align-items: center; padding: 7px 8px; cursor: pointer; color: var(--text-2); font-size: 10px; letter-spacing: .05em; gap: 6px; user-select: none; }
+.sess-group-head:hover { background: rgba(240,168,122,.05); color: var(--text); }
+.sess-group-head.active { color: var(--accent); }
+.sess-group-head .sg-caret { font-size: 8px; transition: transform .15s; width: 10px; text-align: center; }
+.sess-group-head.open .sg-caret { transform: rotate(90deg); }
+.sess-group-head .sg-dot { width: 8px; height: 8px; border-radius: 50%; flex-shrink: 0; }
+.sess-group-head .sg-name { flex: 1; min-width: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.sess-group-head .sg-count { color: var(--text-dim); font-size: 9px; }
+.sess-group-head .sg-menu { background: transparent; border: 0; color: var(--text-dim); cursor: pointer; font-size: 12px; padding: 0 3px; line-height: 1; }
+.sess-group-head .sg-menu:hover { color: var(--accent); }
+.sess-group-head .sg-add { background: transparent; border: 0; color: var(--text-dim); cursor: pointer; font-size: 13px; padding: 0 3px; line-height: 1; font-weight: bold; }
+.sess-group-head .sg-add:hover { color: var(--accent); }
+.sess-group-chats { display: none; }
+.sess-group-chats.open { display: block; }
+.chat-item-j { display: flex; align-items: center; padding: 6px 8px 6px 22px; cursor: pointer; color: var(--text-2); border-bottom: 1px solid rgba(240,168,122,.04); font-size: 10px; letter-spacing: .05em; gap: 6px; }
+.chat-item-j:hover  { background: rgba(240,168,122,.05); color: var(--text); }
+.chat-item-j.active { background: rgba(240,168,122,.08); color: var(--accent); }
 .chat-item-j .ci-title { flex: 1; min-width: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.chat-item-j.no-indent { padding-left: 8px; }
 .ci-del-j { background: transparent; border: 0; color: var(--text-dim); cursor: pointer; font-size: 14px; padding: 0 3px; }
 .ci-del-j:hover { color: var(--hot); }
+.ci-menu-btn { background: transparent; border: 0; color: var(--text-dim); cursor: pointer; font-size: 14px; padding: 0 3px; line-height: 1; }
+.ci-menu-btn:hover { color: var(--accent); }
+
+/* ---- CONTEXT MENU ---- */
+.ctx-menu { position: fixed; z-index: 400; background: #1e1828; border: 1px solid var(--border-h); box-shadow: 0 4px 20px rgba(0,0,0,.5); min-width: 160px; }
+.ctx-menu.hidden { display: none; }
+.ctx-item { padding: 8px 14px; font-size: 12px; color: var(--text-2); cursor: pointer; }
+.ctx-item:hover { background: rgba(240,168,122,.08); color: var(--text); }
+.ctx-item.ctx-danger:hover { color: var(--hot); }
+.ctx-sep { border-top: 1px solid var(--border); margin: 4px 0; }
+
+/* ---- PROJECT PICKER MODAL ITEMS ---- */
+.proj-item-j { display: flex; align-items: center; padding: 6px 8px; cursor: pointer; color: var(--text-2); font-size: 10px; letter-spacing: .05em; gap: 6px; }
+.proj-item-j:hover { background: rgba(240,168,122,.05); color: var(--text); }
+.proj-dot { width: 8px; height: 8px; border-radius: 50%; flex-shrink: 0; }
+.proj-name { flex: 1; min-width: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+
+/* ---- SESSION LIST (projects + chats) ---- */
 
 /* ---- SETTINGS MODAL -------------------------------------------------------- */
-.modal { position: fixed; inset: 0; background: rgba(0,4,14,.82); display: flex; align-items: center; justify-content: center; z-index: 300; }
-.modal-card { background: #030e1c; border: 1px solid var(--border-h); width: 440px; max-width: calc(100vw - 28px); box-shadow: 0 0 60px rgba(0,212,255,.15); }
+.modal { position: fixed; inset: 0; background: rgba(22,17,24,.82); display: flex; align-items: center; justify-content: center; z-index: 300; }
+.modal-card { background: #161118; border: 1px solid var(--border-h); width: 440px; max-width: calc(100vw - 28px); box-shadow: 0 0 60px rgba(240,168,122,.15); }
 .modal-head { display: flex; align-items: center; justify-content: space-between; padding: 13px 17px; border-bottom: 1px solid var(--border); }
 .modal-body { padding: 16px 17px; display: flex; flex-direction: column; gap: 15px; max-height: 70vh; overflow-y: auto; }
 .field { display: flex; flex-direction: column; gap: 6px; }
 .field.row { flex-direction: row; align-items: center; justify-content: space-between; }
 .field-label { font-size: 9px; color: var(--text-2); letter-spacing: .1em; text-transform: uppercase; }
 .field-label em { color: var(--text-dim); font-style: normal; }
-.field select, .field input[type=text] { background: rgba(0,20,45,.9); border: 1px solid var(--border); color: var(--text); padding: 8px 11px; font: 11.5px var(--mono); letter-spacing: .04em; }
-.field select:focus, .field input[type=text]:focus { outline: 0; border-color: var(--cyan); }
-.field input[type=range] { accent-color: var(--cyan); width: 100%; }
+.field select, .field input[type=text] { background: rgba(34,27,42,.9); border: 1px solid var(--border); color: var(--text); padding: 8px 11px; font: 11.5px var(--mono); letter-spacing: .04em; }
+.field select:focus, .field input[type=text]:focus { outline: 0; border-color: var(--accent); }
+.field input[type=range] { accent-color: var(--accent); width: 100%; }
 .toggle { position: relative; width: 38px; height: 20px; flex-shrink: 0; }
 .toggle input { position: absolute; opacity: 0; }
-.toggle span { position: absolute; inset: 0; cursor: pointer; background: rgba(0,212,255,.07); border: 1px solid var(--border); transition: background .15s; }
+.toggle span { position: absolute; inset: 0; cursor: pointer; background: rgba(240,168,122,.07); border: 1px solid var(--border); transition: background .15s; }
 .toggle span::after { content: ''; position: absolute; width: 14px; height: 14px; background: var(--text-dim); top: 2px; left: 2px; transition: transform .15s; }
-.toggle input:checked + span { background: rgba(0,212,255,.22); border-color: var(--cyan); }
-.toggle input:checked + span::after { transform: translateX(18px); background: var(--cyan); }
+.toggle input:checked + span { background: rgba(240,168,122,.22); border-color: var(--accent); }
+.toggle input:checked + span::after { transform: translateX(18px); background: var(--accent); }
 .modal-foot { padding: 12px 17px; border-top: 1px solid var(--border); display: flex; justify-content: flex-end; gap: 8px; }
-.btn-primary { background: rgba(0,212,255,.14); color: var(--cyan); border: 1px solid var(--cyan); padding: 7px 16px; font: 9px var(--mono); cursor: pointer; letter-spacing: .14em; text-transform: uppercase; }
-.btn-primary:hover { background: rgba(0,212,255,.28); }
+.btn-primary { background: rgba(240,168,122,.14); color: var(--accent); border: 1px solid var(--accent); padding: 7px 16px; font: 9px var(--mono); cursor: pointer; letter-spacing: .14em; text-transform: uppercase; }
+.btn-primary:hover { background: rgba(240,168,122,.28); }
 .btn-ghost { background: transparent; color: var(--text-2); border: 1px solid var(--border); padding: 7px 14px; font: 9px var(--mono); cursor: pointer; letter-spacing: .1em; text-transform: uppercase; }
 .btn-ghost:hover { border-color: var(--text-2); }
 
 /* ---- BACKDROP + SCROLLBARS ------------------------------------------------- */
-.backdrop { position: fixed; inset: 0; z-index: 150; background: rgba(0,4,14,.6); }
+.backdrop { position: fixed; inset: 0; z-index: 150; background: rgba(22,17,24,.6); }
 ::-webkit-scrollbar { width: 4px; }
 ::-webkit-scrollbar-track { background: transparent; }
-::-webkit-scrollbar-thumb { background: rgba(0,212,255,.18); }
-::-webkit-scrollbar-thumb:hover { background: rgba(0,212,255,.38); }
+::-webkit-scrollbar-thumb { background: rgba(240,168,122,.18); }
+::-webkit-scrollbar-thumb:hover { background: rgba(240,168,122,.38); }
 
 @media (max-width: 900px) {
   .viewport-panel { position: fixed; right: 0; top: 0; bottom: 0; z-index: 180; box-shadow: 0 0 40px rgba(0,0,0,.6); }
@@ -1015,12 +1257,14 @@ body {
 """
 
 _JS = r"""
-// J.A.R.V.I.S. — Neural Interface
+// Cagentic
 const $ = s => document.querySelector(s);
 const log = $('#log'), input = $('#input'), sendBtn = $('#send');
 let state = {
   chats: [], currentId: null, settings: {}, busy: false,
   voiceOut: false, voiceName: '', renderedPanels: new Set(),
+  projects: [], activeProjectId: null,
+  _openProjects: new Set(), _openUnaffiliated: true, _openProjectsRoot: true,
 };
 
 // ---- CLOCK ------------------------------------------------------------------
@@ -1064,26 +1308,26 @@ setInterval(updateClock, 1000); updateClock();
     t += sp;
     for(let r=120;r>=12;r-=18) {
       const g=ctx.createRadialGradient(cx,cy,r*0.4,cx,cy,r);
-      g.addColorStop(0,`rgba(0,180,255,${0.022+(120-r)*0.0006})`); g.addColorStop(1,'rgba(0,0,0,0)');
+      g.addColorStop(0,`rgba(200,120,60,${0.022+(120-r)*0.0006})`); g.addColorStop(1,'rgba(0,0,0,0)');
       ctx.beginPath(); ctx.arc(cx,cy,r,0,Math.PI*2); ctx.fillStyle=g; ctx.fill();
     }
     const mg=ctx.createRadialGradient(cx,cy,0,cx,cy,65);
-    mg.addColorStop(0,'rgba(190,240,255,0.88)'); mg.addColorStop(0.22,'rgba(0,190,255,0.58)');
-    mg.addColorStop(0.6,'rgba(0,80,200,0.22)'); mg.addColorStop(1,'rgba(0,0,0,0)');
+    mg.addColorStop(0,'rgba(255,220,190,0.88)'); mg.addColorStop(0.22,'rgba(240,168,122,0.58)');
+    mg.addColorStop(0.6,'rgba(160,80,60,0.22)'); mg.addColorStop(1,'rgba(0,0,0,0)');
     ctx.beginPath(); ctx.arc(cx,cy,65,0,Math.PI*2); ctx.fillStyle=mg; ctx.fill();
     const ic=ctx.createRadialGradient(cx,cy,0,cx,cy,20);
-    ic.addColorStop(0,'rgba(255,255,255,1)'); ic.addColorStop(0.5,'rgba(150,225,255,0.75)'); ic.addColorStop(1,'rgba(0,150,255,0)');
+    ic.addColorStop(0,'rgba(255,255,255,1)'); ic.addColorStop(0.5,'rgba(255,200,170,0.75)'); ic.addColorStop(1,'rgba(240,168,122,0)');
     ctx.beginPath(); ctx.arc(cx,cy,20,0,Math.PI*2); ctx.fillStyle=ic; ctx.fill();
     particles.forEach(p=>{
       p.x+=p.vx; p.y+=p.vy; p.life-=p.decay; if(p.life<=0) resetPart(p);
       const a=Math.max(0,p.life)*p.alpha, br=0.5+p.z*0.5;
       ctx.beginPath(); ctx.arc(p.x,p.y,p.size,0,Math.PI*2);
-      ctx.fillStyle=`rgba(${Math.round(80+br*175)},${Math.round(175+br*80)},255,${a})`; ctx.fill();
+      ctx.fillStyle=`rgba(${Math.round(200+br*55)},${Math.round(120+br*48)},${Math.round(60+br*62)},${a})`; ctx.fill();
     });
     ORBS.forEach(o=>{
       const a=t*o.s+o.ph, ox=cx+o.r*Math.cos(a), oy=cy+o.r*0.38*Math.sin(a);
       ctx.beginPath(); ctx.arc(ox,oy,o.sz,0,Math.PI*2);
-      ctx.fillStyle='rgba(0,220,255,0.9)'; ctx.shadowColor='#00d4ff'; ctx.shadowBlur=12; ctx.fill(); ctx.shadowBlur=0;
+      ctx.fillStyle='rgba(240,168,122,0.9)'; ctx.shadowColor='#f0a87a'; ctx.shadowBlur=12; ctx.fill(); ctx.shadowBlur=0;
     });
     requestAnimationFrame(draw);
   }
@@ -1123,10 +1367,10 @@ function scrollDown(){ log.scrollTop=log.scrollHeight; }
 function getThread(){ let t=log.querySelector('.j-thread'); if(!t){t=document.createElement('div');t.className='j-thread';log.appendChild(t);} return t; }
 function clearLog(){ log.innerHTML=''; }
 function avatarHTML(){ return '<div class="j-avatar">J</div>'; }
-function setOrbLabel(text){ const l=$('#orbLabel'); if(l) l.textContent=(text||'AWAITING DIRECTIVE').toUpperCase(); }
+function setOrbLabel(text){ const l=$('#orbLabel'); if(l) l.textContent=(text||'New Chat'); }
 function compactOrb(on){ const z=$('#orbZone'); if(z) z.classList.toggle('compact', on); }
 
-// ---- HUD DIRECTIVES ---------------------------------------------------------
+// ---- HUD --------------------------------------------------------------------
 const HUD_RX = /```hud\s*\n?([\s\S]*?)```/g;
 function extractHud(text){
   const out=[]; let m;
@@ -1200,20 +1444,20 @@ function buildPanel(p){
         '<div class="mlabel">'+esc(p.label||((p.lat??'?')+', '+(p.lon??'?')))+'</div></div>';
       break;
     case 'bar':{ const vals=(p.values||[]).map(Number); const labs=p.labels||vals.map((_,i)=>String(i+1));
-      const maxV=Math.max(...vals,1); const col=p.color||'#00d4ff';
+      const maxV=Math.max(...vals,1); const col=p.color||'#f0a87a';
       const W2=300,H2=140,pad=30,bw=Math.max(8,Math.floor((W2-pad*2)/Math.max(vals.length,1)*0.65));
       const gap=Math.floor((W2-pad*2)/Math.max(vals.length,1));
       let bars=''; vals.forEach((v,i)=>{
         const bh=Math.round((v/maxV)*(H2-45)); const x=pad+i*gap+(gap-bw)/2; const y=H2-20-bh;
         bars+=`<rect x="${x}" y="${y}" width="${bw}" height="${bh}" fill="${esc(col)}" rx="2" opacity="0.85"/>`;
-        bars+=`<text x="${x+bw/2}" y="${H2-4}" text-anchor="middle" font-size="9" fill="#7a90a4">${esc(String(labs[i]||''))}</text>`;
+        bars+=`<text x="${x+bw/2}" y="${H2-4}" text-anchor="middle" font-size="9" fill="#b0a6ba">${esc(String(labs[i]||''))}</text>`;
         bars+=`<text x="${x+bw/2}" y="${y-3}" text-anchor="middle" font-size="8" fill="${esc(col)}">${esc(String(v))}</text>`;
       });
       inner=`<svg viewBox="0 0 ${W2} ${H2}" style="width:100%;height:auto">${bars}</svg>`; break; }
-    case 'line':{ const ds=(p.datasets||[{values:p.values||[],label:'',color:'#00d4ff'}]);
+    case 'line':{ const ds=(p.datasets||[{values:p.values||[],label:'',color:'#f0a87a'}]);
       const labs=p.labels||[];  const maxAll=Math.max(...ds.flatMap(d=>d.values||[]).map(Number),1);
       const W2=300,H2=140,pad=30;
-      let lines=''; const colors=['#00d4ff','#00ff99','#e3a978','#c97fd4','#ff6b6b'];
+      let lines=''; const colors=['#f0a87a','#8ecf95','#e3a978','#c97fd4','#e5928f'];
       ds.forEach((d,di)=>{ const vals=(d.values||[]).map(Number); const col=d.color||colors[di%colors.length];
         if(!vals.length) return;
         const pts=vals.map((v,i)=>{const x=pad+i*(W2-pad*2)/Math.max(vals.length-1,1); const y=H2-20-Math.round((v/maxAll)*(H2-40)); return `${x},${y}`;});
@@ -1223,11 +1467,11 @@ function buildPanel(p){
         if(d.label) lines+=`<text x="${W2-4}" y="${pts[pts.length-1].split(',')[1]}" text-anchor="end" font-size="8" fill="${esc(col)}">${esc(d.label)}</text>`;
       });
       labs.forEach((l,i)=>{ const x=pad+i*(W2-pad*2)/Math.max(labs.length-1,1);
-        lines+=`<text x="${x}" y="${H2-4}" text-anchor="middle" font-size="9" fill="#7a90a4">${esc(String(l))}</text>`; });
+        lines+=`<text x="${x}" y="${H2-4}" text-anchor="middle" font-size="9" fill="#b0a6ba">${esc(String(l))}</text>`; });
       inner=`<svg viewBox="0 0 ${W2} ${H2}" style="width:100%;height:auto">${lines}</svg>`; break; }
     case 'pie':{ const vals=(p.values||[]).map(Number); const labs=p.labels||vals.map((_,i)=>String(i+1));
       const total=vals.reduce((a,b)=>a+b,0)||1;
-      const colors=['#00d4ff','#00ff99','#e3a978','#c97fd4','#ff6b6b','#7a90a4'];
+      const colors=['#f0a87a','#8ecf95','#e3a978','#c97fd4','#e5928f','#b0a6ba'];
       const cx=90,cy=70,r=55,ri=28; let angle=-Math.PI/2; let slices=''; let legend='';
       vals.forEach((v,i)=>{ const sweep=2*Math.PI*(v/total); const col=colors[i%colors.length];
         const x1=cx+r*Math.cos(angle),y1=cy+r*Math.sin(angle);
@@ -1258,7 +1502,7 @@ function toggleViewport(){
 }
 function clearViewport(){
   state.renderedPanels.clear();
-  $('#vpBody').innerHTML='<div class="vp-empty">NO ACTIVE DISPLAY<br/><span>PANELS SUMMONED BY J.A.R.V.I.S. APPEAR HERE</span></div>';
+  $('#vpBody').innerHTML='<div class="vp-empty">No active display<br/><span>Panels appear here</span></div>';
 }
 
 // ---- EMPTY STATE ------------------------------------------------------------
@@ -1274,7 +1518,7 @@ const QUICK = [
 function showEmpty() {
   clearLog();
   const wrap=document.createElement('div'); wrap.className='j-empty';
-  wrap.innerHTML='<div class="j-empty-title">SELECT A MISSION OR ENTER A COMMAND</div><div class="quick-cards">'+
+   wrap.innerHTML='<div class="j-empty-title">Select a chat or type a message</div><div class="quick-cards">'+
     QUICK.map(q=>`<div class="qcard" data-prompt="${esc(q.prompt)}"><span class="qcard-icon">${q.icon}</span>`+
       `<span class="qcard-title">${esc(q.title)}</span><span class="qcard-sub">${esc(q.sub)}</span></div>`).join('')+'</div>';
   log.appendChild(wrap);
@@ -1295,8 +1539,29 @@ function addAssistant(html, tools){
   scrollDown(); return r.querySelector('.msg-body');
 }
 function addToolRow(t, done){
+  // Collapse same-name tool calls, skipping over non-tool-row elements
+  // (info notes, assistant text, etc.) so that calls across iterations
+  // of the tool loop still collapse into one row.
+  const thread=getThread();
+  let prev=null;
+  for(let el=thread.lastElementChild; el; el=el.previousElementSibling){
+    if(el.classList.contains('tool-row')){ prev=el; break; }
+  }
+  if(prev && prev.dataset.name===t.name){
+    let cnt=prev.dataset.cnt ? parseInt(prev.dataset.cnt)+1 : 2;
+    prev.dataset.cnt=cnt;
+    const nameEl=prev.querySelector('.tname');
+    if(nameEl) nameEl.textContent=t.name+' \u00d7'+cnt;
+    if(t.summary){
+      const sumEl=prev.querySelector('.tsum');
+      if(sumEl) sumEl.textContent=t.summary;
+    }
+    if(!done){ prev.classList.remove('ok','bad'); prev.classList.add('pending'); }
+    scrollDown(); return prev;
+  }
   const row=document.createElement('div'); row.className='tool-row'+(done?'':' pending');
-  row.innerHTML='<span style="color:var(--cyan);font-size:13px">&#9889;</span>'+
+  row.dataset.name=t.name||'';
+  row.innerHTML='<span style="color:var(--accent);font-size:13px">&#9889;</span>'+
     '<span class="tname">'+esc(t.name||'')+'</span>'+
     (t.summary?'<span class="tsum">'+esc(t.summary)+'</span>':'')+
     (done?'':'<span class="tres">EXECUTING&#8230;</span>');
@@ -1324,7 +1589,7 @@ function showPermission(d){
 let live={body:null,raw:'',toolRow:null,thinking:null};
 function showThinking(){
   const t=document.createElement('div'); t.className='thinking-row';
-  t.innerHTML=avatarHTML()+'<span>PROCESSING</span><div class="thinking-dots"><span></span><span></span><span></span></div>';
+  t.innerHTML=avatarHTML()+'<span>Thinking\u2026</span><div class="thinking-dots"><span></span><span></span><span></span></div>';
   getThread().appendChild(t); scrollDown(); live.thinking=t;
 }
 function clearThinking(){ if(live.thinking){live.thinking.remove();live.thinking=null;} }
@@ -1345,7 +1610,7 @@ function handle(ev){
     if(state.voiceOut){ const p=plain(txt); if(p) speak(p); }
   } else if(k==='plan'){
     const p=document.createElement('div'); p.className='plan-box';
-    p.innerHTML='<div class="ph">&#9658; EXECUTION PLAN</div><ol>'+(d.steps||[]).map(s=>'<li>'+esc(s)+'</li>').join('')+'</ol>';
+    p.innerHTML='<div class="ph">&#9658; Plan</div><ol>'+(d.steps||[]).map(s=>'<li>'+esc(s)+'</li>').join('')+'</ol>';
     getThread().appendChild(p); live.body=null; scrollDown();
   } else if(k==='tool_call'){
     live.body=null; live.toolRow=addToolRow({name:d.name,summary:d.summary},false);
@@ -1376,7 +1641,7 @@ if(window.speechSynthesis){ speechSynthesis.onvoiceschanged=loadVoices; loadVoic
 function pickVoice(){
   if(!voices.length) return null;
   if(state.voiceName){ const v=voices.find(v=>v.name===state.voiceName); if(v) return v; }
-  // prefer a deep/UK English voice for that JARVIS feel
+  // prefer a deep/UK English voice
   return voices.find(v=>/en-GB/i.test(v.lang)&&/male|daniel|arthur/i.test(v.name))
       || voices.find(v=>/en-GB/i.test(v.lang)) || voices.find(v=>/^en/i.test(v.lang)) || voices[0];
 }
@@ -1392,7 +1657,7 @@ function speak(text){
 }
 function populateVoiceSelect(){
   const sel=$('#setVoice'); if(!sel) return;
-  sel.innerHTML='<option value="">AUTO (JARVIS DEFAULT)</option>'+
+  sel.innerHTML='<option value="">Auto</option>'+
     voices.filter(v=>/^en/i.test(v.lang)).map(v=>'<option value="'+esc(v.name)+'">'+esc(v.name+' — '+v.lang)+'</option>').join('');
   sel.value=state.voiceName||'';
 }
@@ -1418,24 +1683,234 @@ function toggleMic(){
   if(recognizing){ recog.stop(); } else { try{ recog.start(); }catch(e){} }
 }
 
-// ---- SESSIONS ---------------------------------------------------------------
-function currentTitle(){ const c=state.chats.find(c=>c.id===state.currentId); return c?c.title:'AWAITING DIRECTIVE'; }
-function renderChats(){
-  const list=$('#chatList'); list.innerHTML='';
-  if(!state.chats.length){ list.innerHTML='<div style="color:var(--text-dim);font-size:9px;padding:10px 6px">NO MISSION LOGS</div>'; return; }
-  state.chats.forEach(c=>{
-    const item=document.createElement('div'); item.className='chat-item-j'+(c.id===state.currentId?' active':'');
-    item.innerHTML='<span style="color:var(--cyan);font-size:10px">&#9658;</span><span class="ci-title">'+esc(c.title)+
-      '</span><button class="ci-del-j" title="Delete">&times;</button>';
-    item.querySelector('.ci-title').onclick=()=>loadChat(c.id);
-    item.querySelector('.ci-del-j').onclick=e=>{ e.stopPropagation(); if(confirm('DELETE "'+c.title+'"?')) deleteChat(c.id); };
-    list.appendChild(item);
+// ---- CONFIRM DIALOG ---------------------------------------------------------
+let _confirmCb=null;
+function showConfirm(msg,cb){
+  _confirmCb=cb;
+  $('#confirmMsg').textContent=msg;
+  $('#confirmModal').classList.remove('hidden');
+}
+$('#confirmOk').onclick=()=>{ $('#confirmModal').classList.add('hidden'); if(_confirmCb) _confirmCb(); _confirmCb=null; };
+$('#confirmCancel').onclick=()=>{ $('#confirmModal').classList.add('hidden'); _confirmCb=null; };
+$('#confirmClose').onclick=()=>{ $('#confirmModal').classList.add('hidden'); _confirmCb=null; };
+$('#confirmModal').addEventListener('click',e=>{ if(e.target.id==='confirmModal'){ $('#confirmModal').classList.add('hidden'); _confirmCb=null; } });
+
+// ---- CONTEXT MENU (⋮) -------------------------------------------------------
+let _ctxChatId=null, _projCtxId=null, _ctxMode='chat';
+function showCtx(e,chatId){
+  _ctxChatId=chatId; _ctxMode='chat';
+  const m=$('#ctxMenu');
+  m.innerHTML='<div class="ctx-item" data-action="rename">&#9998; Rename</div>'+
+    '<div class="ctx-item" data-action="project">&#128193; Add to Project</div>'+
+    '<div class="ctx-sep"></div>'+
+    '<div class="ctx-item ctx-danger" data-action="delete">&#128465; Delete</div>';
+  m.classList.remove('hidden');
+  m.style.left=Math.min(e.clientX,window.innerWidth-170)+'px';
+  m.style.top=Math.min(e.clientY,window.innerHeight-120)+'px';
+}
+function showNewProjectModal(){
+  $('#newProjectInput').value='';
+  $('#newProjectModal').classList.remove('hidden');
+  setTimeout(()=>$('#newProjectInput').focus(),50);
+}
+function closeNewProjectModal(){ $('#newProjectModal').classList.add('hidden'); }
+
+function showProjectCtx(e,projectId){
+  _projCtxId=projectId; _ctxMode='project';
+  const m=$('#ctxMenu');
+  m.innerHTML='<div class="ctx-item" data-action="proj-config">&#9881; Config</div>'+
+    '<div class="ctx-item" data-action="proj-rename">&#9998; Rename</div>'+
+    '<div class="ctx-item ctx-danger" data-action="proj-delete">&#128465; Delete</div>';
+  m.classList.remove('hidden');
+  m.style.left=Math.min(e.clientX,window.innerWidth-170)+'px';
+  m.style.top=Math.min(e.clientY,window.innerHeight-120)+'px';
+}
+function hideCtx(){ $('#ctxMenu').classList.add('hidden'); _ctxChatId=null; _projCtxId=null; }
+document.addEventListener('click',e=>{
+  const m=$('#ctxMenu');
+  if(m.contains(e.target)){
+    e.stopPropagation();
+    const action=e.target.dataset.action; if(!action) return;
+    const chatId=_ctxChatId, projId=_projCtxId;
+    hideCtx();
+    if(action==='delete'){ showConfirm('Delete this chat?',()=>deleteChat(chatId)); }
+    else if(action==='rename'){ showRename(chatId); }
+    else if(action==='project'){ showProjectPicker(chatId); }
+    else if(action==='proj-rename'){ showRenameProject(projId); }
+    else if(action==='proj-delete'){
+      showConfirm('Delete this project?',async()=>{
+        const r=await api('/api/projects/delete',{id:projId});
+        state.projects=r.projects; state.activeProjectId=null; renderSessions();
+      });
+    }
+    else if(action==='proj-config'){ showProjectConfig(projId); }
+  } else { hideCtx(); }
+});
+
+// ---- RENAME MODAL -----------------------------------------------------------
+let _renameId=null;
+let _renameMode='chat'; // 'chat' or 'project'
+function showRename(chatId){
+  _renameId=chatId; _renameMode='chat';
+  const c=state.chats.find(c=>c.id===chatId);
+  $('#renameInput').value=c?c.title:'';
+  $('#renameModal').classList.remove('hidden');
+  setTimeout(()=>$('#renameInput').focus(),50);
+}
+function showRenameProject(projectId){
+  _renameId=projectId; _renameMode='project';
+  const p=state.projects.find(p=>p.id===projectId);
+  $('#renameInput').value=p?p.name:'';
+  $('#renameModal').classList.remove('hidden');
+  setTimeout(()=>$('#renameInput').focus(),50);
+}
+function closeRename(){ $('#renameModal').classList.add('hidden'); _renameId=null; _renameMode='chat'; }
+$('#renameClose').onclick=closeRename;
+$('#renameCancel').onclick=closeRename;
+$('#renameOk').onclick=async()=>{
+  const val=$('#renameInput').value.trim(); if(!val||!_renameId) return;
+  if(_renameMode==='project'){
+    const r=await api('/api/projects/rename',{id:_renameId,name:val});
+    state.projects=r.projects; renderSessions(); closeRename();
+  } else {
+    const r=await api('/api/chats/rename',{id:_renameId,title:val});
+    state.chats=r.chats; renderSessions(); closeRename();
+  }
+};
+$('#renameInput').addEventListener('keydown',e=>{ if(e.key==='Enter') $('#renameOk').click(); });
+$('#renameModal').addEventListener('click',e=>{ if(e.target.id==='renameModal') closeRename(); });
+$('#newProjectModal').addEventListener('click',e=>{ if(e.target.id==='newProjectModal') closeNewProjectModal(); });
+
+// ---- PROJECT PICKER MODAL ---------------------------------------------------
+let _projPickChatId=null;
+async function showProjectPicker(chatId){
+  _projPickChatId=chatId;
+  const body=$('#projectModalBody'); body.innerHTML='';
+  if(!state.projects.length){
+    body.innerHTML='<div style="color:var(--text-dim);font-size:12px;padding:8px">No projects yet. Create one below.</div>';
+  } else {
+    state.projects.forEach(p=>{
+      const d=document.createElement('div');
+      d.className='proj-item-j';
+      d.innerHTML='<span class="proj-dot" style="background:'+esc(p.color)+'"></span><span class="proj-name">'+esc(p.name)+'</span>';
+      d.onclick=async()=>{
+        const r=await api('/api/projects/add_chat',{project_id:p.id,chat_id:_projPickChatId});
+        state.projects=r.projects; state.chats=r.chats; renderSessions();
+        closeProjectPicker();
+      };
+      body.appendChild(d);
+    });
+  }
+  $('#projectModal').classList.remove('hidden');
+}
+function closeProjectPicker(){ $('#projectModal').classList.add('hidden'); _projPickChatId=null; }
+$('#projectModalClose').onclick=closeProjectPicker;
+$('#projectModalCancel').onclick=closeProjectPicker;
+$('#projectModal').addEventListener('click',e=>{ if(e.target.id==='projectModal') closeProjectPicker(); });
+$('#projectModalNewBtn').onclick=()=>{
+  closeProjectPicker();
+  showNewProjectModal();
+  // After creating, the new project modal handler will refresh
+};
+
+// ---- PROJECT CONFIG MODAL ---------------------------------------------------
+let _projConfigId=null;
+function showProjectConfig(projectId){
+  _projConfigId=projectId;
+  const p=state.projects.find(p=>p.id===projectId);
+  $('#projConfigPrompt').value=p?(p.system_prompt||''):'';
+  $('#projConfigContext').value=p?(p.context||''):'';
+  $('#projConfigModal').classList.remove('hidden');
+  setTimeout(()=>$('#projConfigPrompt').focus(),50);
+}
+function closeProjectConfig(){ $('#projConfigModal').classList.add('hidden'); _projConfigId=null; }
+$('#projConfigClose').onclick=closeProjectConfig;
+$('#projConfigCancel').onclick=closeProjectConfig;
+$('#projConfigModal').addEventListener('click',e=>{ if(e.target.id==='projConfigModal') closeProjectConfig(); });
+$('#projConfigSave').onclick=async()=>{
+  if(!_projConfigId) return;
+  const r=await api('/api/projects/config',{
+    id:_projConfigId,
+    system_prompt:$('#projConfigPrompt').value,
+    context:$('#projConfigContext').value
   });
+  state.projects=r.projects; closeProjectConfig();
+};
+
+// ---- SESSIONS ---------------------------------------------------------------
+function currentTitle(){ const c=state.chats.find(c=>c.id===state.currentId); return c?c.title:'New Chat'; }
+function renderSessions(){
+  const list=$('#sessionList'); if(!list) return; list.innerHTML='';
+  // Build a map of project_id -> chat list
+  const projChats={};
+  state.projects.forEach(p=>{ projChats[p.id]=state.chats.filter(c=>c.project_id===p.id); });
+  const unaffiliated=state.chats.filter(c=>!c.project_id);
+  // --- Projects expandable group ---
+  const projGrp=document.createElement('div'); projGrp.className='sess-group';
+  const projHead=document.createElement('div'); projHead.className='sess-group-head'+(state._openProjectsRoot?' open':'');
+  projHead.innerHTML='<span class="sg-caret">&#9654;</span><span class="sg-dot" style="background:var(--accent)"></span><span class="sg-name">Projects</span><span class="sg-count">'+state.projects.length+'</span><button class="sg-add" title="New Project">+</button>';
+  projHead.querySelector('.sg-add').onclick=e=>{ e.stopPropagation(); showNewProjectModal(); };
+  projHead.onclick=e=>{
+    if(e.target.closest('.sg-add')) return;
+    state._openProjectsRoot=!state._openProjectsRoot;
+    renderSessions();
+  };
+  projGrp.appendChild(projHead);
+  const projBody=document.createElement('div'); projBody.className='sess-group-chats'+(state._openProjectsRoot?' open':'');
+  if(!state.projects.length){
+    projBody.innerHTML='<div style="color:var(--text-dim);font-size:9px;padding:6px 22px">No projects yet</div>';
+  } else {
+    state.projects.forEach(p=>{
+      const chats=projChats[p.id]||[];
+      const isOpen=state._openProjects.has(p.id);
+      const pGrp=document.createElement('div'); pGrp.className='sess-group';
+      const pHead=document.createElement('div'); pHead.className='sess-group-head'+(isOpen?' open':'');
+      pHead.innerHTML='<span class="sg-caret">&#9654;</span><span class="sg-dot" style="background:'+esc(p.color)+'"></span><span class="sg-name">'+esc(p.name)+'</span><span class="sg-count">'+chats.length+'</span><button class="sg-menu" title="Menu">&#8942;</button>';
+      pHead.querySelector('.sg-menu').onclick=e=>{ e.stopPropagation(); showProjectCtx(e,p.id); };
+      pHead.onclick=e=>{
+        if(e.target.closest('.sg-menu')) return;
+        if(state._openProjects.has(p.id)) state._openProjects.delete(p.id); else state._openProjects.add(p.id);
+        renderSessions();
+      };
+      pGrp.appendChild(pHead);
+      const pBody=document.createElement('div'); pBody.className='sess-group-chats'+(isOpen?' open':'');
+      chats.forEach(c=>{ pBody.appendChild(makeChatItem(c)); });
+      if(!chats.length) pBody.innerHTML='<div style="color:var(--text-dim);font-size:9px;padding:6px 22px">No chats</div>';
+      pGrp.appendChild(pBody);
+      projBody.appendChild(pGrp);
+    });
+  }
+  projGrp.appendChild(projBody);
+  list.appendChild(projGrp);
+  // --- Chats expandable group ---
+  const chatGrp=document.createElement('div'); chatGrp.className='sess-group';
+  const chatHead=document.createElement('div'); chatHead.className='sess-group-head'+(state._openUnaffiliated!==false?' open':'');
+  chatHead.innerHTML='<span class="sg-caret">&#9654;</span><span class="sg-dot" style="background:var(--text-dim)"></span><span class="sg-name">Chats</span><span class="sg-count">'+unaffiliated.length+'</span>';
+  chatHead.onclick=()=>{
+    state._openUnaffiliated=state._openUnaffiliated===false?true:false;
+    renderSessions();
+  };
+  chatGrp.appendChild(chatHead);
+  const chatBody=document.createElement('div'); chatBody.className='sess-group-chats'+(state._openUnaffiliated!==false?' open':'');
+  if(!unaffiliated.length){
+    chatBody.innerHTML='<div style="color:var(--text-dim);font-size:9px;padding:6px 22px">No chats yet</div>';
+  } else {
+    unaffiliated.forEach(c=>{ chatBody.appendChild(makeChatItem(c)); });
+  }
+  chatGrp.appendChild(chatBody);
+  list.appendChild(chatGrp);
+}
+function makeChatItem(c){
+  const item=document.createElement('div'); item.className='chat-item-j'+(c.id===state.currentId?' active':'');
+  item.innerHTML='<span style="color:var(--accent);font-size:10px">&#9658;</span><span class="ci-title">'+esc(c.title)+'</span><button class="ci-menu-btn" title="Menu">&#8942;</button>';
+  item.querySelector('.ci-title').onclick=()=>loadChat(c.id);
+  item.querySelector('.ci-menu-btn').onclick=e=>{ e.stopPropagation(); showCtx(e,c.id); };
+  return item;
 }
 function setCurrent(cur){
   state.currentId=cur.id;
   const s=$('#jSession'); if(s) s.textContent=(cur.id||'--------').slice(0,8).toUpperCase();
-  setOrbLabel(cur.title||'AWAITING DIRECTIVE');
+  setOrbLabel(cur.title||'New Chat');
   clearLog();
   if(!cur.messages||!cur.messages.length){ showEmpty(); compactOrb(false); return; }
   compactOrb(true);
@@ -1454,24 +1929,24 @@ async function api(path,body){
 function setModelBadge(m){ const n=$('#msName'); if(n) n.textContent=(m||'').toUpperCase(); }
 async function boot(){
   const b=await api('/api/bootstrap');
-  state.chats=b.chats; state.settings=b.settings;
+  state.chats=b.chats; state.settings=b.settings; state.projects=b.projects||[];
   setModelBadge(b.model);
   const vs=$('#versionSpan'); if(vs) vs.textContent=b.version||'--';
   renderModelMenu();
-  renderChats(); setCurrent(b.current);
+  renderSessions(); setCurrent(b.current);
 }
 async function newChat(){
-  const r=await api('/api/chats/new',{}); state.chats=r.chats; renderChats(); setCurrent(r.current);
+  const r=await api('/api/chats/new',{}); state.chats=r.chats; renderSessions(); setCurrent(r.current);
   clearViewport(); closeSessions(); input.focus();
 }
 async function loadChat(id){
-  const r=await api('/api/chats/load',{id}); state.chats=r.chats; clearViewport(); renderChats(); setCurrent(r.current); closeSessions();
+  const r=await api('/api/chats/load',{id}); state.chats=r.chats; clearViewport(); renderSessions(); setCurrent(r.current); closeSessions();
 }
 async function deleteChat(id){
-  const r=await api('/api/chats/delete',{id}); state.chats=r.chats; renderChats(); setCurrent(r.current);
+  const r=await api('/api/chats/delete',{id}); state.chats=r.chats; state.projects=r.projects||state.projects; renderSessions(); setCurrent(r.current);
 }
 async function refreshChats(){
-  const b=await api('/api/bootstrap'); state.chats=b.chats; renderChats(); setOrbLabel(b.current.title||'AWAITING DIRECTIVE');
+  const b=await api('/api/bootstrap'); state.chats=b.chats; state.projects=b.projects||[]; renderSessions(); setOrbLabel(b.current.title||'New Chat');
 }
 
 // ---- MODEL SWITCHER ---------------------------------------------------------
@@ -1510,7 +1985,7 @@ function openSettings(){
 function closeSettings(){ $('#settingsModal').classList.add('hidden'); }
 async function saveSettings(){
   state.voiceName=$('#setVoice').value||'';
-  try{ localStorage.setItem('jarvis_voice',state.voiceName); }catch(e){}
+  try{ localStorage.setItem('cagentic_voice',state.voiceName); }catch(e){}
   state.settings=await api('/api/settings',{
     model:$('#setModel').value, user_name:$('#setName').value, temperature:parseFloat($('#setTemp').value),
     stream:$('#setStream').checked, yolo:$('#setYolo').checked });
@@ -1521,9 +1996,9 @@ async function saveSettings(){
 function toggleVoiceOut(){
   state.voiceOut=!state.voiceOut;
   $('#voiceOutBtn').classList.toggle('active', state.voiceOut);
-  $('#voiceOutBtn').innerHTML='[ &#128264; VOICE OUT: '+(state.voiceOut?'ON':'OFF')+' ]';
+  $('#voiceOutBtn').innerHTML='[ &#128264; Voice: '+(state.voiceOut?'ON':'OFF')+' ]';
   if(!state.voiceOut && window.speechSynthesis) speechSynthesis.cancel();
-  try{ localStorage.setItem('jarvis_voiceout', state.voiceOut?'1':'0'); }catch(e){}
+  try{ localStorage.setItem('cagentic_voiceout', state.voiceOut?'1':'0'); }catch(e){}
 }
 
 // ---- SEND -------------------------------------------------------------------
@@ -1535,7 +2010,7 @@ async function send(text){
   if(log.querySelector('.j-empty')) clearLog();
   addUser(text);
   live={body:null,raw:'',toolRow:null,thinking:null};
-  showThinking(); setOrbLabel('PROCESSING');
+  showThinking(); setOrbLabel('Thinking\u2026');
   let res;
   try{ res=await fetch('/api/chat',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({message:text})}); }
   catch(e){ clearThinking(); addNote('CONNECTION FAILURE',true); finishTurn(); return; }
@@ -1564,6 +2039,15 @@ $('#voiceOutBtn').onclick=toggleVoiceOut;
 $('#viewportBtn').onclick=toggleViewport;
 $('#vpClearBtn').onclick=clearViewport;
 $('#closeSessionsBtn').onclick=closeSessions;
+$('#newProjectModalClose').onclick=closeNewProjectModal;
+$('#newProjectCancel').onclick=closeNewProjectModal;
+$('#newProjectOk').onclick=async()=>{
+  const name=$('#newProjectInput').value.trim(); if(!name) return;
+  closeNewProjectModal();
+  const r=await api('/api/projects/create',{name});
+  state.projects=r.projects; state._openProjectsRoot=true; state._openProjects.add(r.projects[r.projects.length-1].id); renderSessions();
+};
+$('#newProjectInput').addEventListener('keydown',e=>{ if(e.key==='Enter') $('#newProjectOk').click(); });
 $('#backdrop').onclick=()=>{closeSessions();};
 $('#closeSettings').onclick=closeSettings;
 $('#cancelSettings').onclick=closeSettings;
@@ -1574,7 +2058,12 @@ document.addEventListener('keydown',e=>{
   if((e.ctrlKey||e.metaKey)&&e.key==='k'){ e.preventDefault(); newChat(); return; }
   if((e.ctrlKey||e.metaKey)&&e.key==='m'){ e.preventDefault(); toggleMic(); return; }
   if(e.key==='Escape'){
-    if(!$('#settingsModal').classList.contains('hidden')) closeSettings();
+    if(!$('#confirmModal').classList.contains('hidden')){ $('#confirmModal').classList.add('hidden'); _confirmCb=null; }
+    else if(!$('#newProjectModal').classList.contains('hidden')) closeNewProjectModal();
+    else if(!$('#renameModal').classList.contains('hidden')) closeRename();
+    else if(!$('#projectModal').classList.contains('hidden')) closeProjectPicker();
+    else if(!$('#projConfigModal').classList.contains('hidden')) closeProjectConfig();
+    else if(!$('#settingsModal').classList.contains('hidden')) closeSettings();
     else if($('#sessionsPanel').classList.contains('open')) closeSessions();
     else $('#modelMenu').classList.add('hidden');
   }
@@ -1583,8 +2072,8 @@ document.addEventListener('keydown',e=>{
 // start collapsed viewport; restore persisted prefs
 $('#viewportPanel').classList.add('collapsed');
 try{
-  state.voiceName=localStorage.getItem('jarvis_voice')||'';
-  if(localStorage.getItem('jarvis_voiceout')==='1') toggleVoiceOut();
+  state.voiceName=localStorage.getItem('cagentic_voice')||'';
+  if(localStorage.getItem('cagentic_voiceout')==='1') toggleVoiceOut();
 }catch(e){}
 
 boot();

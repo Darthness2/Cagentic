@@ -571,6 +571,10 @@ class QueryEngine:
         # Optional extra instructions appended to the system prompt (e.g. the
         # gateway teaches the model to drive its HUD). Empty for the REPL.
         self.system_suffix: str = ""
+        # Project-specific system prompt and context, set when loading a chat
+        # that belongs to a project.
+        self.project_system_prompt: str = ""
+        self.project_context: str = ""
         self.messages: list[dict] = [{"role": "system", "content": self._system_content()}]
         self._recent_calls: list[tuple[str, str]] = []
         self._recent_results: list[tuple[str, str]] = []
@@ -581,6 +585,10 @@ class QueryEngine:
 
     def _system_content(self) -> str:
         prompt = fetch_system_prompt_parts(self.state)
+        if self.project_system_prompt:
+            prompt += "\n\n=== PROJECT INSTRUCTIONS ===\n" + self.project_system_prompt
+        if self.project_context:
+            prompt += "\n\n=== PROJECT CONTEXT ===\n" + self.project_context
         if self.system_suffix:
             prompt += "\n\n" + self.system_suffix
         return prompt
