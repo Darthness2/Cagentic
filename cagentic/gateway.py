@@ -458,7 +458,7 @@ class _Handler(BaseHTTPRequestHandler):
         except (ConnectionAbortedError, ConnectionResetError, BrokenPipeError):
             # Windows often aborts connections when the browser navigates away
             # or cancels a request.  Silently ignore rather than printing a traceback.
-            pass
+            self.close_connection = True
 
     def _gw(self) -> Gateway:
         return self.server.gateway  # type: ignore[attr-defined]

@@ -204,6 +204,14 @@ class _Handler(BaseHTTPRequestHandler):
     def log_message(self, *args) -> None:  # noqa: D102
         pass
 
+    def handle_one_request(self) -> None:
+        try:
+            super().handle_one_request()
+        except (ConnectionAbortedError, ConnectionResetError, BrokenPipeError):
+            # Windows often aborts connections when the browser navigates away
+            # or cancels a request.  Silently ignore rather than printing a traceback.
+            self.close_connection = True
+
     def _bridge(self) -> BrowserBridge:
         return self.server.bridge  # type: ignore[attr-defined]
 
