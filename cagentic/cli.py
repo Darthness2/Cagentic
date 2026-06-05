@@ -11,6 +11,7 @@ from . import diff as _diff
 from .agent import Agent
 from .ollama_client import OllamaClient, OllamaError, _is_apple_silicon
 from .prompt import Prompt
+from .providers import build_client as _build_client, parse_model as _parse_model_provider
 
 
 def parse_args(argv: list[str]) -> argparse.Namespace:
@@ -52,8 +53,10 @@ Slash commands:
   /config                show current config (tokens redacted)
   /set <key> <value>     set a config value (e.g. user_name Alex)
   /name <your name>      tell the assistant what to call you
-  /login github <token>  save a GitHub PAT
-  /logout github         remove the saved token
+  /login github <token>   save a GitHub PAT
+  /login openai <key>     save OpenAI API key
+  /login anthropic <key>  save Anthropic API key
+  /logout github|openai|anthropic  remove a saved key
   /whoami                show authenticated GitHub user
   /clear                 reset conversation history
   /diff [N]              show file edits this session
@@ -554,20 +557,24 @@ def repl(agent: Agent, cfg: dict, gateway_holder: dict | None = None) -> int:
                 ui.info(f"tools:    {'native' if agent.tools_enabled else 'text-protocol fallback'}")
                 ui.info(f"groups:   {', '.join(sorted(groups))}")
                 ui.info(f"stream:   {'on' if agent.engine.stream else 'off'}")
-                ui.info(f"num_ctx:  {agent.client.num_ctx}")
-                status = agent.client.model_vram_status(agent.model)
-                mac = _is_apple_silicon()
-                label = "memory" if mac else "vram"
-                if status is None:
-                    ui.info(f"{label}:    model not currently loaded")
-                elif status["fully_gpu"]:
-                    place = "in Metal buffer (unified)" if mac else "fully on GPU ✓"
-                    ui.info(f"{label}:    {status['size_vram'] / (1024**3):.1f} GB · {place}")
+                if isinstance(agent.client, OllamaClient):
+                    ui.info(f"num_ctx:  {agent.client.num_ctx}")
+                    status = agent.client.model_vram_status(agent.model)
+                    mac = _is_apple_silicon()
+                    label = "memory" if mac else "vram"
+                    if status is None:
+                        ui.info(f"{label}:    model not currently loaded")
+                    elif status["fully_gpu"]:
+                        place = "in Metal buffer (unified)" if mac else "fully on GPU ✓"
+                        ui.info(f"{label}:    {status['size_vram'] / (1024**3):.1f} GB · {place}")
+                    else:
+                        size_gb = status["size"] / (1024**3)
+                        cpu_gb = status["cpu_bytes"] / (1024**3)
+                        pct = status["cpu_percent"]
+                        ui.warn(f"{label}:    {cpu_gb:.1f}/{size_gb:.1f} GB on CPU ({pct:.0f}% offloaded — slow)")
                 else:
-                    size_gb = status["size"] / (1024**3)
-                    cpu_gb = status["cpu_bytes"] / (1024**3)
-                    pct = status["cpu_percent"]
-                    ui.warn(f"{label}:    {cpu_gb:.1f}/{size_gb:.1f} GB on CPU ({pct:.0f}% offloaded — slow)")
+                    provider_name = type(agent.client).__name__.replace("Client", "")
+                    ui.info(f"provider: {provider_name} (cloud — no local VRAM info)")
                 mcp_servers = list(((cfg.get("mcp") or {}).get("servers") or {}).keys())
                 ui.info(f"mcp:      {len(mcp_servers)} configured ({', '.join(mcp_servers) or 'none'})")
                 notes_n = len(_notes.list_all())
@@ -590,10 +597,21 @@ def repl(agent: Agent, cfg: dict, gateway_holder: dict | None = None) -> int:
                 if not arg1:
                     ui.info(f"current model: {agent.model}")
                 else:
-                    agent.model = arg1
-                    cfg["model"] = arg1
+                    new_provider, new_model = _parse_model_provider(arg1)
+                    if new_provider != "ollama":
+                        # Switch to a cloud provider
+                        try:
+                            new_client = _build_client(cfg, new_provider)
+                            agent.client = new_client
+                            agent.engine.client = new_client
+                        except RuntimeError as _e:
+                            ui.error(str(_e))
+                            continue
+                    agent.model = new_model
+                    agent.engine.model = new_model
+                    cfg["model"] = arg1  # save full provider:model
                     config.save(cfg)
-                    supported = config.get_value(cfg, f"models.{arg1}.tools_supported", True)
+                    supported = config.get_value(cfg, f"models.{new_model}.tools_supported", True)
                     agent.tools_enabled = bool(supported)
                     agent.engine.refresh_system_prompt()
                     ui.info(f"switched to {arg1} (saved)")
@@ -655,22 +673,49 @@ def repl(agent: Agent, cfg: dict, gateway_holder: dict | None = None) -> int:
                 ui.info(f"got it — I'll call you {full}.")
                 continue
             if cmd == "login":
-                if arg1.lower() != "github" or not arg2:
-                    ui.warn("usage: /login github <token>")
-                    continue
-                config.set_value(cfg, "github.token", arg2)
-                config.save(cfg)
-                _apply_to_agent(agent, cfg)
-                ui.info("GitHub token saved.")
+                svc = arg1.lower() if arg1 else ""
+                if svc == "github":
+                    if not arg2:
+                        ui.warn("usage: /login github <token>")
+                        continue
+                    config.set_value(cfg, "github.token", arg2)
+                    config.save(cfg)
+                    _apply_to_agent(agent, cfg)
+                    ui.info("GitHub token saved.")
+                elif svc == "openai":
+                    if not arg2:
+                        ui.warn("usage: /login openai <api-key>")
+                        continue
+                    config.set_value(cfg, "providers.openai.api_key", arg2)
+                    config.save(cfg)
+                    ui.info("OpenAI API key saved. Use 'openai:<model>' to switch (e.g. /model openai:gpt-4o).")
+                elif svc == "anthropic":
+                    if not arg2:
+                        ui.warn("usage: /login anthropic <api-key>")
+                        continue
+                    config.set_value(cfg, "providers.anthropic.api_key", arg2)
+                    config.save(cfg)
+                    ui.info("Anthropic API key saved. Use 'anthropic:<model>' to switch (e.g. /model anthropic:claude-opus-4-8).")
+                else:
+                    ui.warn("usage: /login github|openai|anthropic <key>")
                 continue
             if cmd == "logout":
-                if arg1.lower() != "github":
-                    ui.warn("usage: /logout github")
-                    continue
-                config.set_value(cfg, "github.token", None)
-                config.save(cfg)
-                _apply_to_agent(agent, cfg)
-                ui.info("GitHub token removed.")
+                svc = arg1.lower() if arg1 else ""
+                if svc == "github":
+                    config.set_value(cfg, "github.token", None)
+                    config.save(cfg)
+                    _apply_to_agent(agent, cfg)
+                    ui.info("GitHub token removed.")
+                elif svc == "openai":
+                    config.set_value(cfg, "providers.openai.api_key", None)
+                    config.save(cfg)
+                    ui.info("OpenAI API key removed.")
+                elif svc == "anthropic":
+                    config.set_value(cfg, "providers.anthropic.api_key", None)
+                    config.save(cfg)
+                    ui.info("Anthropic API key removed.")
+                else:
+                    ui.warn("usage: /logout github|openai|anthropic")
                 continue
             if cmd == "whoami":
                 from .github import t_gh_whoami
@@ -835,24 +880,31 @@ def main(argv: list[str] | None = None) -> int:
         config.set_value(cfg, "user_name", args.name)
         config.save(cfg)
 
-    raw_host = args.host or os.environ.get("OLLAMA_HOST") or cfg.get("host", "http://localhost:11434")
-    client = OllamaClient(
-        host=raw_host,
-        connect_timeout=float(config.get_value(cfg, "ollama.connect_timeout", 15.0)),
-        read_timeout=float(config.get_value(cfg, "ollama.read_timeout", 1800.0)),
-        nonstream_read_timeout=float(config.get_value(cfg, "ollama.nonstream_read_timeout", 1800.0)),
-        keep_alive=config.get_value(cfg, "ollama.keep_alive", "30m"),
-        num_ctx=config.get_value(cfg, "ollama.num_ctx", 8192),
-        num_predict=config.get_value(cfg, "ollama.num_predict", -1),
-    )
-    # Store the normalized host the client will actually use — so /config and
-    # the next launch show the routable address, not a bind-only 0.0.0.0.
-    cfg["host"] = client.host
-    if "0.0.0.0" in raw_host or raw_host.strip() in ("::", "[::]", "0"):
-        ui.info(f"Ollama host {raw_host!r} is a bind-all address — "
-                f"connecting to {client.host} instead.")
+    if args.host:
+        cfg["host"] = args.host
 
-    model = args.model or os.environ.get("CAGENTIC_MODEL") or cfg.get("model")
+    model_raw = args.model or os.environ.get("CAGENTIC_MODEL") or cfg.get("model")
+    provider = "ollama"
+
+    if model_raw:
+        provider, model_raw = _parse_model_provider(model_raw)
+
+    # Build initial client (Ollama by default; cloud if model has prefix).
+    try:
+        client = _build_client(cfg, provider)
+    except RuntimeError as e:
+        ui.error(str(e))
+        return 1
+
+    # Normalize the Ollama host so /config shows the routable address.
+    if isinstance(client, OllamaClient):
+        raw_host = args.host or os.environ.get("OLLAMA_HOST") or cfg.get("host", "http://localhost:11434")
+        cfg["host"] = client.host
+        if "0.0.0.0" in raw_host or raw_host.strip() in ("::", "[::]", "0"):
+            ui.info(f"Ollama host {raw_host!r} is a bind-all address — "
+                    f"connecting to {client.host} instead.")
+
+    model = model_raw
     if not model:
         chosen = _pick_model_interactive(client)
         if not chosen:
@@ -879,11 +931,15 @@ def main(argv: list[str] | None = None) -> int:
         models = client.list_models()
     except OllamaError as e:
         ui.error(str(e))
-        ui.warn("Is `ollama serve` running?")
+        if isinstance(client, OllamaClient):
+            ui.warn("Is `ollama serve` running?")
         return 1
     if model not in models and models:
-        ui.warn(f"model '{model}' not installed locally. Available: {', '.join(models[:8])}")
-        ui.warn(f"Pull it with:  ollama pull {model}")
+        if isinstance(client, OllamaClient):
+            ui.warn(f"model '{model}' not installed locally. Available: {', '.join(models[:8])}")
+            ui.warn(f"Pull it with:  ollama pull {model}")
+        else:
+            ui.warn(f"model '{model}' not found in provider list. Available: {', '.join(m.split(':',1)[-1] for m in models[:8])}")
 
     temperature = args.temperature if args.temperature is not None else float(cfg.get("temperature", 0.4))
     yolo = args.yolo or bool(cfg.get("yolo", False))

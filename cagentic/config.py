@@ -33,6 +33,18 @@ _DEFAULTS: dict[str, Any] = {
         "keep_alive": "30m",
         "stream": True,
     },
+    # Cloud provider API keys and settings.
+    # Models are addressed as "openai:<model>" or "anthropic:<model>".
+    # Keys can also be set via OPENAI_API_KEY / ANTHROPIC_API_KEY env vars.
+    "providers": {
+        "openai": {
+            "api_key": None,
+            "base_url": "https://api.openai.com/v1",
+        },
+        "anthropic": {
+            "api_key": None,
+        },
+    },
     "github": {"token": None},
     "mcp": {"servers": {}},      # {name: {"command": [...], "env": {...}, "enabled": bool}}
     "browser": {"enabled": True, "port": 8765},   # companion Chrome extension bridge

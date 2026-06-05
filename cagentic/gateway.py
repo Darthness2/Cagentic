@@ -18,6 +18,7 @@ from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 
 from . import config as _config
 from . import sessions
+from .providers import build_client as _build_client, parse_model as _parse_model, list_all_models as _all_models
 
 
 class _ClientGone(Exception):
@@ -46,7 +47,7 @@ You are speaking through a holographic heads-up display. Besides your normal
 reply, you MAY render visual panels into the viewport by emitting one or more
 fenced code blocks with the language tag `hud`, each containing a single JSON
 object. Use them when a visual would help — comparisons, status, search hits,
-images, locations, key numbers. Keep prose short when you show a panel.
+images, locations, key numbers, charts. Keep prose short when you show a panel.
 
 Panel schemas (pick the type that fits; all fields optional except shown):
   {"panel":"stats","title":"...","items":[{"label":"...","value":"...","accent":"ok|warn|hot"}]}
@@ -58,12 +59,17 @@ Panel schemas (pick the type that fits; all fields optional except shown):
   {"panel":"alert","level":"info|warn|critical","title":"...","text":"..."}
   {"panel":"progress","title":"...","items":[{"label":"...","pct":75}]}
   {"panel":"map","title":"...","lat":34.05,"lon":-118.24,"label":"..."}
+  {"panel":"bar","title":"...","labels":["Jan","Feb"],"values":[42,87],"color":"#00d4ff"}
+  {"panel":"line","title":"...","labels":["Mon","Tue"],"datasets":[{"label":"CPU","values":[30,80],"color":"#00d4ff"}]}
+  {"panel":"pie","title":"...","labels":["A","B","C"],"values":[40,35,25]}
+  {"panel":"clear"}   ← clears all current viewport panels when you want a fresh display
 
 Rules:
 - Emit `hud` blocks ONLY for things worth visualizing. Don't wrap every reply.
 - Each block = exactly one JSON object, valid JSON, double quotes.
-- After tool calls that return structured data (search, files, status), a
-  matching panel is a nice touch.
+- Use charts (bar/line/pie) for numeric comparisons, trends, and distributions.
+- Emit {"panel":"clear"} before new panels when replacing the previous display.
+- After tool calls that return structured data, a matching panel is a nice touch.
 - Still write a brief natural-language reply alongside the panels.
 """
 
@@ -253,12 +259,15 @@ class Gateway:
     # -- settings -----------------------------------------------------------
 
     def get_settings(self) -> dict:
-        try:
-            models = self.agent.client.list_models()
-        except Exception:
-            models = []
+        # Collect models from all configured providers, flattened to one list.
+        all_provider_models = _all_models(self.config)
+        models: list[str] = []
+        for provider, mlist in all_provider_models.items():
+            models.extend(mlist)
+        # Current model shown with provider prefix if cloud.
+        current = self.agent.model
         return {
-            "model": self.agent.model,
+            "model": current,
             "models": models,
             "temperature": self.engine.temperature,
             "user_name": self.agent.state.user_name or "",
@@ -297,17 +306,32 @@ class Gateway:
         return self.get_settings()
 
     def set_model(self, model: str) -> dict:
-        """Switch the active model instantly (used by the header dropdown)."""
+        """Switch the active model instantly (used by the header dropdown).
+
+        Accepts plain model names (Ollama) or 'provider:model' strings
+        (e.g. 'openai:gpt-4o', 'anthropic:claude-opus-4-8').
+        """
         model = (model or "").strip()
-        if model:
-            self.agent.model = model
-            self.engine.model = model
-            self.config["model"] = model
+        if not model:
+            return {"model": self.agent.model}
+
+        provider, model_name = _parse_model(model)
+        if provider != "ollama":
             try:
-                _config.save(self.config)
-            except Exception:
-                pass
-        return {"model": self.agent.model}
+                new_client = _build_client(self.config, provider)
+                self.agent.client = new_client
+                self.engine.client = new_client
+            except RuntimeError as e:
+                return {"error": str(e), "model": self.agent.model}
+
+        self.agent.model = model_name
+        self.engine.model = model_name
+        self.config["model"] = model  # persist provider:model
+        try:
+            _config.save(self.config)
+        except Exception:
+            pass
+        return {"model": model}
 
     def bootstrap(self) -> dict:
         return {
@@ -1117,9 +1141,13 @@ function stripHud(text){ return (text||'').replace(HUD_RX,'').trim(); }
 function renderHudPanels(text){
   const found=extractHud(text);
   if(!found.length) return;
+  // Handle clear directives first
+  found.forEach(({obj})=>{ if((obj.panel||'').toLowerCase()==='clear') clearViewport(); });
+  const nonClear=found.filter(({obj})=>(obj.panel||'').toLowerCase()!=='clear');
+  if(!nonClear.length) return;
   ensureViewportOpen();
   const body=$('#vpBody'); const empty=body.querySelector('.vp-empty'); if(empty) empty.remove();
-  found.forEach(({raw,obj})=>{
+  nonClear.forEach(({raw,obj})=>{
     if(state.renderedPanels.has(raw)) return;     // dedupe across stream/final
     state.renderedPanels.add(raw);
     const el=buildPanel(obj); if(el){ body.appendChild(el); body.scrollTop=body.scrollHeight; }
@@ -1171,6 +1199,48 @@ function buildPanel(p){
       inner='<div class="vp-map"><div class="mgrid"></div><div class="crosshair"></div>'+
         '<div class="mlabel">'+esc(p.label||((p.lat??'?')+', '+(p.lon??'?')))+'</div></div>';
       break;
+    case 'bar':{ const vals=(p.values||[]).map(Number); const labs=p.labels||vals.map((_,i)=>String(i+1));
+      const maxV=Math.max(...vals,1); const col=p.color||'#00d4ff';
+      const W2=300,H2=140,pad=30,bw=Math.max(8,Math.floor((W2-pad*2)/Math.max(vals.length,1)*0.65));
+      const gap=Math.floor((W2-pad*2)/Math.max(vals.length,1));
+      let bars=''; vals.forEach((v,i)=>{
+        const bh=Math.round((v/maxV)*(H2-45)); const x=pad+i*gap+(gap-bw)/2; const y=H2-20-bh;
+        bars+=`<rect x="${x}" y="${y}" width="${bw}" height="${bh}" fill="${esc(col)}" rx="2" opacity="0.85"/>`;
+        bars+=`<text x="${x+bw/2}" y="${H2-4}" text-anchor="middle" font-size="9" fill="#7a90a4">${esc(String(labs[i]||''))}</text>`;
+        bars+=`<text x="${x+bw/2}" y="${y-3}" text-anchor="middle" font-size="8" fill="${esc(col)}">${esc(String(v))}</text>`;
+      });
+      inner=`<svg viewBox="0 0 ${W2} ${H2}" style="width:100%;height:auto">${bars}</svg>`; break; }
+    case 'line':{ const ds=(p.datasets||[{values:p.values||[],label:'',color:'#00d4ff'}]);
+      const labs=p.labels||[];  const maxAll=Math.max(...ds.flatMap(d=>d.values||[]).map(Number),1);
+      const W2=300,H2=140,pad=30;
+      let lines=''; const colors=['#00d4ff','#00ff99','#e3a978','#c97fd4','#ff6b6b'];
+      ds.forEach((d,di)=>{ const vals=(d.values||[]).map(Number); const col=d.color||colors[di%colors.length];
+        if(!vals.length) return;
+        const pts=vals.map((v,i)=>{const x=pad+i*(W2-pad*2)/Math.max(vals.length-1,1); const y=H2-20-Math.round((v/maxAll)*(H2-40)); return `${x},${y}`;});
+        lines+=`<polyline points="${pts.join(' ')}" fill="none" stroke="${esc(col)}" stroke-width="2" opacity="0.9"/>`;
+        pts.forEach((pt,i)=>{ const[x,y]=pt.split(',');
+          lines+=`<circle cx="${x}" cy="${y}" r="3" fill="${esc(col)}"/>`; });
+        if(d.label) lines+=`<text x="${W2-4}" y="${pts[pts.length-1].split(',')[1]}" text-anchor="end" font-size="8" fill="${esc(col)}">${esc(d.label)}</text>`;
+      });
+      labs.forEach((l,i)=>{ const x=pad+i*(W2-pad*2)/Math.max(labs.length-1,1);
+        lines+=`<text x="${x}" y="${H2-4}" text-anchor="middle" font-size="9" fill="#7a90a4">${esc(String(l))}</text>`; });
+      inner=`<svg viewBox="0 0 ${W2} ${H2}" style="width:100%;height:auto">${lines}</svg>`; break; }
+    case 'pie':{ const vals=(p.values||[]).map(Number); const labs=p.labels||vals.map((_,i)=>String(i+1));
+      const total=vals.reduce((a,b)=>a+b,0)||1;
+      const colors=['#00d4ff','#00ff99','#e3a978','#c97fd4','#ff6b6b','#7a90a4'];
+      const cx=90,cy=70,r=55,ri=28; let angle=-Math.PI/2; let slices=''; let legend='';
+      vals.forEach((v,i)=>{ const sweep=2*Math.PI*(v/total); const col=colors[i%colors.length];
+        const x1=cx+r*Math.cos(angle),y1=cy+r*Math.sin(angle);
+        const x2=cx+r*Math.cos(angle+sweep),y2=cy+r*Math.sin(angle+sweep);
+        const xi1=cx+ri*Math.cos(angle),yi1=cy+ri*Math.sin(angle);
+        const xi2=cx+ri*Math.cos(angle+sweep),yi2=cy+ri*Math.sin(angle+sweep);
+        const lg=sweep>Math.PI?1:0;
+        slices+=`<path d="M${xi1} ${yi1} L${x1} ${y1} A${r} ${r} 0 ${lg} 1 ${x2} ${y2} L${xi2} ${yi2} A${ri} ${ri} 0 ${lg} 0 ${xi1} ${yi1}" fill="${col}" opacity="0.85"/>`;
+        const pct=Math.round(v/total*100);
+        legend+=`<rect x="188" y="${8+i*16}" width="8" height="8" fill="${col}"/>`;
+        legend+=`<text x="200" y="${16+i*16}" font-size="9" fill="#cdbbd8">${esc(String(labs[i]))} ${pct}%</text>`;
+        angle+=sweep; });
+      inner=`<svg viewBox="0 0 300 145" style="width:100%;height:auto">${slices}${legend}</svg>`; break; }
     default: return null;
   }
   wrap.innerHTML=title+inner; return wrap;
@@ -1196,6 +1266,7 @@ const QUICK = [
   {icon:'🌐', title:'Search the web',  sub:'Find and summarise anything online', prompt:'Search the web for '},
   {icon:'📋', title:'Read my screen',  sub:'Summarise what\'s in my browser tab', prompt:'Read my screen and summarise what you see'},
   {icon:'📊', title:'Show me stats',   sub:'Render live data into the viewport',  prompt:'Show me a status panel of my system'},
+  {icon:'📈', title:'Draw a chart',    sub:'Bar, line, or pie — visualise data',   prompt:'Show me a bar chart comparing '},
   {icon:'📝', title:'Take a note',     sub:'Remember something for later',        prompt:'Take a note: '},
   {icon:'🔔', title:'Set a reminder',  sub:'Add something to my reminder list',   prompt:'Add a reminder: '},
   {icon:'📁', title:'Browse files',    sub:'List or read files on your machine',  prompt:'List files in my current directory'},
