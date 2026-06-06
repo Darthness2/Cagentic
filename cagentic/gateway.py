@@ -27,8 +27,8 @@ class _ClientGone(Exception):
     """Raised when the browser hangs up mid-stream."""
 
 
-_THINK_RX = re.compile(r"<think(?:ing)?>.*?</think(?:ing)?>", re.DOTALL | re.IGNORECASE)
-_PLAN_RX = re.compile(r"<plan>.*?</plan>", re.DOTALL | re.IGNORECASE)
+from .engine import _THINK_RX, _PLAN_RX
+
 _STEP_RX = re.compile(r"<step\s+\d+(?:\s*/\s*\d+)?\s*>", re.IGNORECASE)
 
 
@@ -196,6 +196,8 @@ class Gateway:
         out: list[dict] = []
         for m in messages:
             role = m.get("role")
+            if role == "system":
+                continue
             content = (m.get("content") or "").strip()
             if role == "user":
                 if content.startswith((
@@ -219,9 +221,7 @@ class Gateway:
             "id": self.session["id"],
             "title": self.session.get("title") or "New chat",
             "model": self.agent.model,
-            "messages": self.render_messages(
-                [m for m in self.engine.messages if m.get("role") != "system"]
-            ),
+            "messages": self.render_messages(self.engine.messages),
         }
 
     def new_chat(self) -> dict:
@@ -613,7 +613,8 @@ class _Handler(BaseHTTPRequestHandler):
             return
         self._send(b"not found", "text/plain", status=404)
 
-    def _stream_chat(self, message: str) -> None:
+    def _begin_sse(self):
+        """Set up SSE response headers and return an emit callback."""
         self.send_response(200)
         self.send_header("Content-Type", "text/event-stream")
         self.send_header("Cache-Control", "no-cache")
@@ -626,10 +627,11 @@ class _Handler(BaseHTTPRequestHandler):
                 self.wfile.write(f"data: {payload}\n\n".encode("utf-8"))
                 self.wfile.flush()
             except OSError:
-                # Any socket-write failure (BrokenPipe, ConnectionReset,
-                # ConnectionAborted on Windows, etc.) means the client hung up.
                 raise _ClientGone()
+        return emit
 
+    def _stream_chat(self, message: str) -> None:
+        emit = self._begin_sse()
         if not message:
             try:
                 emit("error", {"text": "empty message"})
@@ -643,20 +645,7 @@ class _Handler(BaseHTTPRequestHandler):
             return
 
     def _stream_chat_edit(self, index: int, message: str) -> None:
-        self.send_response(200)
-        self.send_header("Content-Type", "text/event-stream")
-        self.send_header("Cache-Control", "no-cache")
-        self.send_header("Connection", "close")
-        self.end_headers()
-
-        def emit(kind: str, data: dict) -> None:
-            payload = json.dumps({"kind": kind, "data": data})
-            try:
-                self.wfile.write(f"data: {payload}\n\n".encode("utf-8"))
-                self.wfile.flush()
-            except OSError:
-                raise _ClientGone()
-
+        emit = self._begin_sse()
         if not message:
             try:
                 emit("error", {"text": "empty message"})
@@ -688,7 +677,7 @@ _HTML = """<!doctype html>
 
   <header class="hud-header">
     <div class="hdr-left">
-      <span class="jl">C</span><span class="jd">·</span><span class="jl">A</span><span class="jd">·</span><span class="jl">G</span><span class="jd">·</span><span class="jl">E</span><span class="jd">·</span><span class="jl">N</span><span class="jd">·</span><span class="jl">T</span><span class="jd">·</span><span class="jl">I</span><span class="jd">·</span><span class="jl">C</span>
+        <span class="jl">C</span><span class="jd">&middot;</span><span class="jl">A</span><span class="jd">&middot;</span><span class="jl">G</span><span class="jd">&middot;</span><span class="jl">E</span><span class="jd">&middot;</span><span class="jl">N</span><span class="jd">&middot;</span><span class="jl">T</span><span class="jd">&middot;</span><span class="jl">I</span><span class="jd">&middot;</span><span class="jl">C</span>
       <span class="j-sub">COGNITIVE AGENT NETWORK FOR INTELLIGENT COMPUTING</span>
     </div>
     <div class="hdr-right">
@@ -799,13 +788,12 @@ _HTML = """<!doctype html>
 </div>
 <!-- Confirm modal -->
 <div id="confirmModal" class="modal hidden">
-  <div class="modal-card" style="width:340px">
-    <div class="modal-head">
-      <span id="confirmTitle" style="font-size:13px;color:var(--text)">Confirm</span>
+  <div class="modal-card sm">
+      <span id="confirmTitle" class="modal-title">Confirm</span>
       <button id="confirmClose" class="icon-btn">&#10005;</button>
     </div>
     <div class="modal-body">
-      <p id="confirmMsg" style="color:var(--text-2);font-size:13px;margin:0"></p>
+      <p id="confirmMsg" class="modal-msg"></p>
     </div>
     <div class="modal-foot">
       <button id="confirmCancel" class="btn-ghost">Cancel</button>
@@ -816,13 +804,13 @@ _HTML = """<!doctype html>
 
 <!-- Rename modal -->
 <div id="renameModal" class="modal hidden">
-  <div class="modal-card" style="width:380px">
+  <div class="modal-card md">
     <div class="modal-head">
-      <span style="font-size:13px;color:var(--text)">Rename</span>
+      <span class="modal-title">Rename</span>
       <button id="renameClose" class="icon-btn">&#10005;</button>
     </div>
     <div class="modal-body">
-      <input id="renameInput" type="text" style="width:100%;background:rgba(34,27,42,.8);border:1px solid var(--border-h);color:var(--text);padding:8px 10px;font-size:13px" />
+      <input id="renameInput" type="text" class="modal-input" />
     </div>
     <div class="modal-foot">
       <button id="renameCancel" class="btn-ghost">Cancel</button>
@@ -833,13 +821,13 @@ _HTML = """<!doctype html>
 
 <!-- New project modal -->
 <div id="newProjectModal" class="modal hidden">
-  <div class="modal-card" style="width:380px">
+  <div class="modal-card md">
     <div class="modal-head">
-      <span style="font-size:13px;color:var(--text)">New Project</span>
+      <span class="modal-title">New Project</span>
       <button id="newProjectModalClose" class="icon-btn">&#10005;</button>
     </div>
     <div class="modal-body">
-      <input id="newProjectInput" type="text" placeholder="Project name" style="width:100%;background:rgba(34,27,42,.8);border:1px solid var(--border-h);color:var(--text);padding:8px 10px;font-size:13px" />
+      <input id="newProjectInput" type="text" placeholder="Project name" class="modal-input" />
     </div>
     <div class="modal-foot">
       <button id="newProjectCancel" class="btn-ghost">Cancel</button>
@@ -850,9 +838,9 @@ _HTML = """<!doctype html>
 
 <!-- Add to project modal -->
 <div id="projectModal" class="modal hidden">
-  <div class="modal-card" style="width:380px">
+  <div class="modal-card md">
     <div class="modal-head">
-      <span style="font-size:13px;color:var(--text)">Add to Project</span>
+      <span class="modal-title">Add to Project</span>
       <button id="projectModalClose" class="icon-btn">&#10005;</button>
     </div>
     <div class="modal-body" id="projectModalBody">
@@ -866,19 +854,19 @@ _HTML = """<!doctype html>
 
 <!-- Project config modal -->
 <div id="projConfigModal" class="modal hidden">
-  <div class="modal-card" style="width:480px">
+  <div class="modal-card lg">
     <div class="modal-head">
-      <span style="font-size:13px;color:var(--text)">Project Config</span>
+      <span class="modal-title">Project Config</span>
       <button id="projConfigClose" class="icon-btn">&#10005;</button>
     </div>
     <div class="modal-body">
       <div class="field">
         <span class="field-label">SYSTEM PROMPT</span>
-        <textarea id="projConfigPrompt" rows="5" style="background:rgba(34,27,42,.9);border:1px solid var(--border);color:var(--text);padding:8px 11px;font:11.5px var(--mono);letter-spacing:.04em;resize:vertical;width:100%;box-sizing:border-box" placeholder="Custom instructions for this project's chats&#10;(appended after the base system prompt)"></textarea>
+        <textarea id="projConfigPrompt" rows="5" class="modal-textarea" placeholder="Custom instructions for this project's chats&#10;(appended after the base system prompt)"></textarea>
       </div>
       <div class="field">
         <span class="field-label">CONTEXT / NOTES</span>
-        <textarea id="projConfigContext" rows="5" style="background:rgba(34,27,42,.9);border:1px solid var(--border);color:var(--text);padding:8px 11px;font:11.5px var(--mono);letter-spacing:.04em;resize:vertical;width:100%;box-sizing:border-box" placeholder="Reference material always included in this project's chats&#10;(e.g. coding standards, project background, key contacts)"></textarea>
+        <textarea id="projConfigContext" rows="5" class="modal-textarea" placeholder="Reference material always included in this project's chats&#10;(e.g. coding standards, project background, key contacts)"></textarea>
       </div>
     </div>
     <div class="modal-foot">
@@ -1053,9 +1041,9 @@ body {
 .qcard {
   padding: 14px 16px; border: 1px solid var(--border);
   background: rgba(240,168,122,.03); cursor: pointer;
-  transition: background .15s, border-color .15s; text-align: left;
+  transition: background .15s, border-color .15s, transform .15s; text-align: left;
 }
-.qcard:hover { background: rgba(240,168,122,.08); border-color: var(--border-h); }
+.qcard:hover { background: rgba(240,168,122,.08); border-color: var(--border-h); transform: translateY(-2px); }
 .qcard-icon { font-size: 18px; margin-bottom: 7px; display: block; }
 .qcard-title { font-size: 11px; color: #d8c8e0; letter-spacing: .05em; display: block; margin-bottom: 3px; }
 .qcard-sub   { font-size: 9px;  color: var(--text-2); letter-spacing: .04em; line-height: 1.5; display: block; }
@@ -1106,14 +1094,12 @@ body {
 .msg-body a:hover { text-decoration: underline; }
 .msg-body ul { padding-left: 18px; margin: 6px 0; }
 .msg-body li::marker { color: var(--accent); }
-.cursor::after { content: '█'; color: var(--accent); animation: blink .9s steps(2) infinite; }
-@keyframes blink { 50% { opacity: 0; } }
-
+.cursor::after { content: '\2588'; color: var(--accent); animation: blink .9s steps(2) infinite; }
 /* code blocks */
-.codeblock { margin: 9px 0; border: 1px solid var(--border); background: rgba(22,17,24,.95); }
+.codeblock { margin: 9px 0; border: 1px solid var(--border); background: rgba(22,17,24,.95); border-left: 2px solid var(--accent); }
 .cb-head { display: flex; justify-content: space-between; padding: 5px 10px; background: rgba(240,168,122,.05); border-bottom: 1px solid var(--border); }
 .cb-lang { font-size: 9px; color: var(--accent); letter-spacing: .1em; text-transform: uppercase; }
-.cb-copy { background: transparent; border: 0; color: var(--text-2); cursor: pointer; font: 9px var(--mono); letter-spacing: .1em; }
+.cb-copy { background: transparent; border: 0; color: var(--text-2); cursor: pointer; font: 9px var(--mono); letter-spacing: .1em; transition: color .15s; }
 .cb-copy:hover { color: var(--accent); }
 .codeblock pre { margin: 0; padding: 10px 12px; overflow-x: auto; }
 .codeblock code { font: 11.5px/1.6 var(--mono); color: #c9b8d4; background: none; }
@@ -1123,14 +1109,18 @@ body {
   display: flex; align-items: center; gap: 8px; padding: 7px 12px;
   margin: 6px 0; font-size: 11px; border: 1px solid var(--border);
   background: rgba(34,27,42,.85); letter-spacing: .04em;
+  border-left: 2px solid var(--text-dim); transition: border-color .2s;
 }
 .tool-row .tname { color: #d8c8e0; font-weight: 600; }
 .tool-row .tsum  { color: var(--text-2); flex: 1; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; font-family: var(--mono); font-size: 10px; }
 .tool-row .tres  { margin-left: auto; }
 .tool-row.ok  .tres { color: var(--ok); }
+.tool-row.ok  { border-left-color: var(--ok); }
 .tool-row.bad .tres { color: var(--hot); }
+.tool-row.bad { border-left-color: var(--hot); }
 .tool-row.pending .tres { color: var(--warn); animation: pulse 1s ease infinite; }
-.tool-row.pending { border-color: rgba(255,170,0,.3); background: rgba(255,170,0,.04); }
+.tool-row.pending { border-color: rgba(255,170,0,.3); border-left-color: var(--warn); background: rgba(255,170,0,.04); }
+@keyframes pulse { 50% { opacity: .3; } }
 @keyframes pulse { 50% { opacity: .3; } }
 
 /* thinking */
@@ -1223,7 +1213,7 @@ body {
 .vp-metric .trend.up { color: var(--ok); } .vp-metric .trend.down { color: var(--hot); } .vp-metric .trend.flat { color: var(--text-2); }
 .vp-list { list-style: none; }
 .vp-list li { font-size: 10px; color: var(--text); padding: 4px 0 4px 14px; position: relative; border-bottom: 1px solid rgba(240,168,122,.05); line-height: 1.5; }
-.vp-list li::before { content: '▸'; color: var(--accent); position: absolute; left: 0; }
+.vp-list li::before { content: '\25B8'; color: var(--accent); position: absolute; left: 0; }
 .vp-table { width: 100%; border-collapse: collapse; font-size: 9.5px; }
 .vp-table th { color: var(--accent); text-align: left; padding: 4px 6px; border-bottom: 1px solid var(--border); letter-spacing: .05em; text-transform: uppercase; }
 .vp-table td { color: var(--text); padding: 4px 6px; border-bottom: 1px solid rgba(240,168,122,.05); }
@@ -1314,7 +1304,7 @@ body {
 .sess-group-head .sg-add:hover { color: var(--accent); }
 .sess-group-chats { display: none; }
 .sess-group-chats.open { display: block; }
-.chat-item-j { display: flex; align-items: center; padding: 6px 8px 6px 22px; cursor: pointer; color: var(--text-2); border-bottom: 1px solid rgba(240,168,122,.04); font-size: 10px; letter-spacing: .05em; gap: 6px; }
+.chat-item-j { display: flex; align-items: center; padding: 6px 8px 6px 22px; cursor: pointer; color: var(--text-2); border-bottom: 1px solid rgba(240,168,122,.04); font-size: 10px; letter-spacing: .05em; gap: 6px; transition: background .15s, color .15s; }
 .chat-item-j:hover  { background: rgba(240,168,122,.05); color: var(--text); }
 .chat-item-j.active { background: rgba(240,168,122,.08); color: var(--accent); }
 .chat-item-j .ci-title { flex: 1; min-width: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
@@ -1342,7 +1332,21 @@ body {
 
 /* ---- SETTINGS MODAL -------------------------------------------------------- */
 .modal { position: fixed; inset: 0; background: rgba(22,17,24,.82); display: flex; align-items: center; justify-content: center; z-index: 300; }
-.modal-card { background: #161118; border: 1px solid var(--border-h); width: 440px; max-width: calc(100vw - 28px); box-shadow: 0 0 60px rgba(240,168,122,.15); }
+.modal-card { background: #161118; border: 1px solid var(--border-h); width: 440px; max-width: calc(100vw - 28px); box-shadow: 0 0 60px rgba(240,168,122,.15); animation: modalIn .2s ease; }
+@keyframes modalIn { from { opacity: 0; transform: scale(.96) translateY(8px); } }
+.modal-card.sm { width: 340px; }
+.modal-card.md { width: 380px; }
+.modal-card.lg { width: 480px; }
+.modal-input { width: 100%; background: rgba(34,27,42,.8); border: 1px solid var(--border-h); color: var(--text); padding: 8px 10px; font-size: 13px; font-family: var(--mono); }
+.modal-input:focus { outline: 0; border-color: var(--accent); }
+.modal-textarea { width: 100%; background: rgba(34,27,42,.9); border: 1px solid var(--border); color: var(--text); padding: 8px 11px; font: 11.5px var(--mono); letter-spacing: .04em; resize: vertical; box-sizing: border-box; }
+.modal-textarea:focus { outline: 0; border-color: var(--accent); }
+.modal-title { font-size: 13px; color: var(--text); }
+.modal-msg { color: var(--text-2); font-size: 13px; margin: 0; }
+.empty-hint { color: var(--text-dim); font-size: 9px; padding: 6px 22px; }
+.empty-hint.md { font-size: 12px; padding: 8px; }
+.tool-icon { font-size: 13px; }
+.ci-arrow { color: var(--accent); font-size: 10px; }
 .modal-head { display: flex; align-items: center; justify-content: space-between; padding: 13px 17px; border-bottom: 1px solid var(--border); }
 .modal-body { padding: 16px 17px; display: flex; flex-direction: column; gap: 15px; max-height: 70vh; overflow-y: auto; }
 .field { display: flex; flex-direction: column; gap: 6px; }
@@ -1363,14 +1367,14 @@ body {
 .btn-primary:hover { background: rgba(240,168,122,.28); }
 .btn-ghost { background: transparent; color: var(--text-2); border: 1px solid var(--border); padding: 7px 14px; font: 9px var(--mono); cursor: pointer; letter-spacing: .1em; text-transform: uppercase; }
 .btn-ghost:hover { border-color: var(--text-2); }
-
 /* ---- BACKDROP + SCROLLBARS ------------------------------------------------- */
-.backdrop { position: fixed; inset: 0; z-index: 150; background: rgba(22,17,24,.6); }
+.backdrop { position: fixed; inset: 0; z-index: 150; background: rgba(22,17,24,.6); backdrop-filter: blur(2px); }
 ::-webkit-scrollbar { width: 4px; }
 ::-webkit-scrollbar-track { background: transparent; }
-::-webkit-scrollbar-thumb { background: rgba(240,168,122,.18); }
+::-webkit-scrollbar-thumb { background: rgba(240,168,122,.18); border-radius: 2px; }
 ::-webkit-scrollbar-thumb:hover { background: rgba(240,168,122,.38); }
-
+/* Firefox scrollbar */
+* { scrollbar-width: thin; scrollbar-color: rgba(240,168,122,.18) transparent; }
 @media (max-width: 900px) {
   .hud-window { max-width: 90vw; }
   .j-sub { display: none; }
@@ -1741,12 +1745,14 @@ $('#windowLayer').addEventListener('mousedown',e=>{
 
 // ---- EMPTY STATE ------------------------------------------------------------
 const QUICK = [
-  {icon:'🌐', title:'Search the web',  sub:'Find and summarise anything online', prompt:'Search the web for '},
-  {icon:'📋', title:'Read my screen',  sub:'Summarise what\'s in my browser tab', prompt:'Read my screen and summarise what you see'},
+  {icon:'🔍', title:'Search the web',  sub:'Find and summarise anything online', prompt:'Search the web for '},
+  {icon:'🖥️', title:'Read my screen',  sub:'Summarise what\'s in my browser tab', prompt:'Read my screen and summarise what you see'},
   {icon:'📊', title:'Show me stats',   sub:'Render live data as floating panels',  prompt:'Show me a status panel of my system'},
-  {icon:'📈', title:'Draw a chart',    sub:'Bar, line, or pie — visualise data',   prompt:'Show me a bar chart comparing '},
+  {icon:'📈', title:'Draw a chart',    sub:'Bar, line, or pie - visualise data',   prompt:'Show me a bar chart comparing '},
   {icon:'📝', title:'Take a note',     sub:'Remember something for later',        prompt:'Take a note: '},
-  {icon:'🔔', title:'Set a reminder',  sub:'Add something to my reminder list',   prompt:'Add a reminder: '},
+  {icon:'⏰', title:'Set a reminder',  sub:'Add something to my reminder list',   prompt:'Add a reminder: '},
+  {icon:'📂', title:'Browse files',    sub:'List or read files on your machine',  prompt:'List files in my current directory'},
+];
   {icon:'📁', title:'Browse files',    sub:'List or read files on your machine',  prompt:'List files in my current directory'},
 ];
 function showEmpty() {
@@ -1770,19 +1776,24 @@ function addUser(text){
   r.querySelector('[data-act="delete"]').onclick=()=>deleteMsg(idx,r);
   getThread().appendChild(r); scrollDown();
 }
+// ---- DOM HELPERS (shared) ---------------------------------------------------
+function truncateAfter(row, includeSelf){
+  // Remove all DOM siblings after (and optionally including) the given row.
+  const thread=getThread();
+  const toRemove=[];
+  let cutting=false;
+  for(const ch of thread.children){
+    if(ch===row){ cutting=true; if(includeSelf) toRemove.push(ch); continue; }
+    if(cutting) toRemove.push(ch);
+  }
+  toRemove.forEach(ch=>ch.remove());
+}
+
 function resendMsg(idx,row){
   if(state.busy) return;
   const bubble=row.querySelector('.bubble');
   const text=bubble.textContent||'';
-  // Truncate DOM after this user message
-  const thread=getThread();
-  let cutting=false;
-  const toRemove=[];
-  for(const ch of thread.children){
-    if(ch===row){ cutting=true; continue; }
-    if(cutting) toRemove.push(ch);
-  }
-  toRemove.forEach(ch=>ch.remove());
+  truncateAfter(row, false);
   streamEdit(idx,text);
 }
 function streamEdit(idx,text){
@@ -1790,29 +1801,14 @@ function streamEdit(idx,text){
   live={body:null,raw:'',toolRow:null,thinking:null,turnStart:null};
   showThinking(); setOrbLabel('Thinking\u2026');
   fetch('/api/chat/edit',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({index:idx,message:text})})
-  .then(r=>{ const reader=r.body.getReader(),dec=new TextDecoder(); let buf='';
-    function pump(){ return reader.read().then(ch=>{
-      if(ch.done){clearThinking();if(state.busy)finishTurn();return;}
-      buf+=dec.decode(ch.value,{stream:true}); let i;
-      while((i=buf.indexOf('\n\n'))>=0){ const line=buf.slice(0,i); buf=buf.slice(i+2);
-        if(line.startsWith('data: ')){ try{handle(JSON.parse(line.slice(6)));}catch(e){} } }
-      return pump();
-    });}
-    return pump();
-  }).catch(()=>{clearThinking();addNote('CONNECTION FAILURE',true);finishTurn();});
+  .then(r=>readSSE(r,handle))
+  .then(()=>{clearThinking();if(state.busy)finishTurn();})
+  .catch(()=>{clearThinking();addNote('CONNECTION FAILURE',true);finishTurn();});
 }
 
 function deleteMsg(idx,row){
   if(state.busy) return;
-  // Truncate DOM from this user message onward
-  const thread=getThread();
-  const toRemove=[];
-  let cutting=false;
-  for(const ch of thread.children){
-    if(ch===row){ cutting=true; }
-    if(cutting) toRemove.push(ch);
-  }
-  toRemove.forEach(ch=>ch.remove());
+  truncateAfter(row, true);
   // If no messages left, show empty state
   if(!thread.children.length) showEmpty();
   // Tell backend to truncate history
@@ -1836,15 +1832,7 @@ function editMsg(idx,row,origText){
   const save=()=>{
     const newText=ta.value.trim(); if(!newText){cancel();return;}
     row.classList.remove('editing');
-    // Truncate DOM after this user message
-    const thread=getThread();
-    const toRemove=[];
-    let cutting=false;
-    for(const ch of thread.children){
-      if(ch===row){ cutting=true; continue; }
-      if(cutting) toRemove.push(ch);
-    }
-    toRemove.forEach(ch=>ch.remove());
+    truncateAfter(row, false);
     // Update the bubble with new text
     bubble.innerHTML=esc(newText);
     streamEdit(idx,newText);
@@ -1895,9 +1883,9 @@ function addToolRow(t, done){
   const row=document.createElement('div'); row.className='tool-row'+(done?'':' pending');
   row.dataset.name=t.name||'';
   const isCmd=(t.name||'').startsWith('run_')||(t.name||'').startsWith('bash');
-  const icon=isCmd?'&#9656;':'&#9889;';
   const iconColor=isCmd?'var(--warn)':'var(--accent)';
-  row.innerHTML='<span style="color:'+iconColor+';font-size:13px">'+icon+'</span>'+
+  row.innerHTML='<span class="tool-icon" style="color:'+iconColor+'">'+icon+'</span>'+
+    '<span class="tname">'+esc(t.name||'')+'</span>'+
     '<span class="tname">'+esc(t.name||'')+'</span>'+
     (t.summary?'<span class="tsum">'+esc(t.summary)+'</span>':'')+
     (done?'':'<span class="tres">RUNNING&#8230;</span>');
@@ -1919,6 +1907,18 @@ function showPermission(d){
     const b=document.createElement('button'); b.className=a; b.textContent=l; b.onclick=()=>answer(a,p); btns.appendChild(b);
   });
   box.appendChild(btns); getThread().appendChild(box); scrollDown();
+}
+
+// ---- SSE STREAM READER (shared) -------------------------------------------
+async function readSSE(response, onEvent){
+  const reader=response.body.getReader(), dec=new TextDecoder(); let buf='';
+  while(true){
+    let chunk; try{chunk=await reader.read();}catch(e){break;}
+    if(chunk.done) break;
+    buf+=dec.decode(chunk.value,{stream:true}); let i;
+    while((i=buf.indexOf('\n\n'))>=0){ const line=buf.slice(0,i); buf=buf.slice(i+2);
+      if(line.startsWith('data: ')){ try{onEvent(JSON.parse(line.slice(6)));}catch(e){} } }
+  }
 }
 
 // ---- LIVE TURN --------------------------------------------------------------
@@ -2144,7 +2144,7 @@ async function showProjectPicker(chatId){
   _projPickChatId=chatId;
   const body=$('#projectModalBody'); body.innerHTML='';
   if(!state.projects.length){
-    body.innerHTML='<div style="color:var(--text-dim);font-size:12px;padding:8px">No projects yet. Create one below.</div>';
+     body.innerHTML='<div class="empty-hint md">No projects yet. Create one below.</div>';
   } else {
     state.projects.forEach(p=>{
       const d=document.createElement('div');
@@ -2215,7 +2215,7 @@ function renderSessions(){
   projGrp.appendChild(projHead);
   const projBody=document.createElement('div'); projBody.className='sess-group-chats'+(state._openProjectsRoot?' open':'');
   if(!state.projects.length){
-    projBody.innerHTML='<div style="color:var(--text-dim);font-size:9px;padding:6px 22px">No projects yet</div>';
+     projBody.innerHTML='<div class="empty-hint">No projects yet</div>';
   } else {
     state.projects.forEach(p=>{
       const chats=projChats[p.id]||[];
@@ -2232,7 +2232,7 @@ function renderSessions(){
       pGrp.appendChild(pHead);
       const pBody=document.createElement('div'); pBody.className='sess-group-chats'+(isOpen?' open':'');
       chats.forEach(c=>{ pBody.appendChild(makeChatItem(c)); });
-      if(!chats.length) pBody.innerHTML='<div style="color:var(--text-dim);font-size:9px;padding:6px 22px">No chats</div>';
+      if(!chats.length) pBody.innerHTML='<div class="empty-hint">No chats</div>';
       pGrp.appendChild(pBody);
       projBody.appendChild(pGrp);
     });
@@ -2250,12 +2250,12 @@ function renderSessions(){
   chatGrp.appendChild(chatHead);
   const chatBody=document.createElement('div'); chatBody.className='sess-group-chats'+(state._openUnaffiliated!==false?' open':'');
   if(!unaffiliated.length){
-    chatBody.innerHTML='<div style="color:var(--text-dim);font-size:9px;padding:6px 22px">No chats yet</div>';
+    chatBody.innerHTML='<div class="empty-hint">No chats yet</div>';
   } else {
     unaffiliated.forEach(c=>{ chatBody.appendChild(makeChatItem(c)); });
   }
   chatGrp.appendChild(chatBody);
-  list.appendChild(chatGrp);
+  item.innerHTML='<span class="ci-arrow">&#9658;</span><span class="ci-title">'+esc(c.title)+'</span><button class="ci-menu-btn" title="Menu">&#8942;</button>';
 }
 function makeChatItem(c){
   const item=document.createElement('div'); item.className='chat-item-j'+(c.id===state.currentId?' active':'');
@@ -2380,14 +2380,7 @@ async function send(text){
   catch(e){ clearThinking(); addNote('CONNECTION FAILURE',true); finishTurn(); return; }
   if(!res||!res.ok||!res.body){ clearThinking(); addNote('REQUEST FAILED: '+(res?res.status:'no response'),true); finishTurn(); return; }
   try{
-    const reader=res.body.getReader(), dec=new TextDecoder(); let buf='';
-    while(true){
-      let chunk; try{chunk=await reader.read();}catch(e){break;}
-      if(chunk.done) break;
-      buf+=dec.decode(chunk.value,{stream:true}); let i;
-      while((i=buf.indexOf('\n\n'))>=0){ const line=buf.slice(0,i); buf=buf.slice(i+2);
-        if(line.startsWith('data: ')){ try{handle(JSON.parse(line.slice(6)));}catch(e){} } }
-    }
+    await readSSE(res, handle);
   }catch(e){ console.error('Stream read error:',e); }
   clearThinking(); if(state.busy) finishTurn();
 }
