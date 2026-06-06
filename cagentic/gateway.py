@@ -1169,13 +1169,28 @@ body {
 }
 .hud-window {
   position: absolute; pointer-events: auto;
-  min-width: 220px; max-width: 420px;
+  min-width: 220px; min-height: 100px;
   background: rgba(22,17,24,.92); border: 1px solid var(--border-h);
   box-shadow: 0 4px 30px rgba(0,0,0,.55), 0 0 20px rgba(240,168,122,.06);
   display: flex; flex-direction: column;
   animation: hudWinIn .3s ease;
   backdrop-filter: blur(6px);
 }
+.hud-win-resize {
+  position: absolute; bottom: 0; right: 0;
+  width: 16px; height: 16px;
+  cursor: nwse-resize;
+  z-index: 2;
+}
+.hud-win-resize::before {
+  content: '';
+  position: absolute; bottom: 4px; right: 4px;
+  width: 8px; height: 8px;
+  border-right: 2px solid var(--text-dim);
+  border-bottom: 2px solid var(--text-dim);
+  opacity: 0.4;
+}
+.hud-window.resizing { opacity: .85; box-shadow: 0 8px 40px rgba(0,0,0,.7), 0 0 30px rgba(240,168,122,.12); }
 @keyframes hudWinIn { from { opacity: 0; transform: scale(.92) translateY(10px); } }
 .hud-win-head {
   display: flex; align-items: center; justify-content: space-between;
@@ -1187,7 +1202,7 @@ body {
 .hud-win-close { background: transparent; border: 0; color: var(--text-dim); cursor: pointer; font: 14px var(--mono); padding: 0 4px; line-height: 1; }
 .hud-win-close:hover { color: var(--accent); }
 .hud-window::before { content: ''; position: absolute; top: -1px; left: 12px; right: 12px; height: 1px; background: linear-gradient(90deg, transparent, var(--accent), transparent); }
-.hud-win-body { overflow-y: auto; padding: 12px; display: flex; flex-direction: column; gap: 8px; max-height: 60vh; }
+.hud-win-body { overflow-y: auto; padding: 12px; display: flex; flex-direction: column; gap: 8px; flex: 1; }
 .hud-window.dragging { opacity: .85; box-shadow: 0 8px 40px rgba(0,0,0,.7), 0 0 30px rgba(240,168,122,.12); }
 
 /* viewport panels (rendered by model directives) */
@@ -1507,10 +1522,12 @@ function renderHudPanels(text){
     const title=obj.title||((obj.panel||'').charAt(0).toUpperCase()+(obj.panel||'').slice(1));
     win.innerHTML='<div class="hud-win-head"><span class="hud-win-title">'+esc(title)+'</span>'+
       '<button class="hud-win-close" title="Close">&times;</button></div>'+
-      '<div class="hud-win-body">'+inner+'</div>';
+      '<div class="hud-win-body">'+inner+'</div>'+
+      '<div class="hud-win-resize"></div>';
     win.querySelector('.hud-win-close').addEventListener('mousedown',e=>{e.stopPropagation();win.remove();});
     layer.appendChild(win);
     _makeDraggable(win);
+    _makeResizable(win);
   });
 }
 function buildPanelInner(p){
@@ -1683,6 +1700,28 @@ function _makeDraggable(win){
     if(!dragging) return; const t=e.touches[0]; move(t.clientX,t.clientY);
   },{passive:true});
   document.addEventListener('touchend',stop);
+}
+function _makeResizable(win){
+  const handle=win.querySelector('.hud-win-resize');
+  if(!handle) return;
+  let resizing=false, rsx,rsy,rsw,rsh;
+  function rstart(cx,cy){
+    resizing=true; rsx=cx; rsy=cy;
+    rsw=win.offsetWidth; rsh=win.offsetHeight;
+    win.classList.add('resizing');
+  }
+  function rmove(cx,cy){
+    if(!resizing) return;
+    win.style.width=Math.max(220,rsw+(cx-rsx))+'px';
+    win.style.height=Math.max(100,rsh+(cy-rsy))+'px';
+  }
+  function rstop(){ if(resizing){ resizing=false; win.classList.remove('resizing'); } }
+  handle.addEventListener('mousedown',e=>{ rstart(e.clientX,e.clientY); e.preventDefault(); e.stopPropagation(); });
+  document.addEventListener('mousemove',e=>rmove(e.clientX,e.clientY));
+  document.addEventListener('mouseup',rstop);
+  handle.addEventListener('touchstart',e=>{ const t=e.touches[0]; rstart(t.clientX,t.clientY); e.preventDefault(); e.stopPropagation(); },{passive:false});
+  document.addEventListener('touchmove',e=>{ if(!resizing) return; const t=e.touches[0]; rmove(t.clientX,t.clientY); },{passive:true});
+  document.addEventListener('touchend',rstop);
 }
 function clearViewport(){
   state.renderedPanels.clear();
