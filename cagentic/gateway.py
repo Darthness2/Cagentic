@@ -5,8 +5,9 @@ and runs the full agent behind it: the same tools, notes, reminders, MCP
 servers, browser control — everything the terminal REPL can do.
 
 The app has a sidebar of saved chats, a settings panel, and streams each
-turn token-by-token. Tools that need approval surface an Approve / Deny
-prompt right in the page. Bound to localhost only.
+turn token-by-token. HUD panels appear as draggable floating windows.
+Tools that need approval surface an Approve / Deny prompt right in the
+page. Bound to localhost only.
 """
 from __future__ import annotations
 
@@ -26,8 +27,8 @@ class _ClientGone(Exception):
     """Raised when the browser hangs up mid-stream."""
 
 
-_THINK_RX = re.compile(r"<think(?:ing)?>.*?</think(?:ing)?>", re.DOTALL | re.IGNORECASE)
-_PLAN_RX = re.compile(r"<plan>.*?</plan>", re.DOTALL | re.IGNORECASE)
+from .engine import _THINK_RX, _PLAN_RX
+
 _STEP_RX = re.compile(r"<step\s+\d+(?:\s*/\s*\d+)?\s*>", re.IGNORECASE)
 
 
@@ -38,14 +39,14 @@ def _clean(text: str) -> str:
     return text.strip()
 
 
-# Taught to the gateway's engine only — lets the model "summon" panels into
-# the viewport by emitting fenced ```hud blocks of JSON. The web
-# UI parses these out of the reply, renders them as holographic cards, and
+# Taught to the gateway's engine only — lets the model "summon" panels as
+# floating windows by emitting fenced ```hud blocks of JSON. The web
+# UI parses these out of the reply, renders them as draggable cards, and
 # strips them from the chat text. Purely optional sugar — plain replies still
 # work — but it makes the interface feel alive.
 _HUD_INSTRUCTIONS = """=== HUD Display ===
 You are speaking through a heads-up display. Besides your normal
-reply, you MAY render visual panels into the viewport by emitting one or more
+reply, you MAY render visual panels as floating windows by emitting one or more
 fenced code blocks with the language tag `hud`, each containing a single JSON
 object. Use them when a visual would help — comparisons, status, search hits,
 images, locations, key numbers, charts. Keep prose short when you show a panel.
@@ -63,7 +64,7 @@ Panel schemas (pick the type that fits; all fields optional except shown):
   {"panel":"bar","title":"...","labels":["Jan","Feb"],"values":[42,87],"color":"#f0a87a"}
   {"panel":"line","title":"...","labels":["Mon","Tue"],"datasets":[{"label":"CPU","values":[30,80],"color":"#f0a87a"}]}
   {"panel":"pie","title":"...","labels":["A","B","C"],"values":[40,35,25]}
-  {"panel":"clear"}   ← clears all current viewport panels when you want a fresh display
+  {"panel":"clear"}   ← closes all floating windows when you want a fresh display
 
 Rules:
 - Emit `hud` blocks ONLY for things worth visualizing. Don't wrap every reply.
@@ -72,6 +73,7 @@ Rules:
 - Emit {"panel":"clear"} before new panels when replacing the previous display.
 - After tool calls that return structured data, a matching panel is a nice touch.
 - Still write a brief natural-language reply alongside the panels.
+- Panels appear as draggable floating windows the user can move around freely.
 """
 
 
@@ -194,6 +196,8 @@ class Gateway:
         out: list[dict] = []
         for m in messages:
             role = m.get("role")
+            if role == "system":
+                continue
             content = (m.get("content") or "").strip()
             if role == "user":
                 if content.startswith((
@@ -217,9 +221,7 @@ class Gateway:
             "id": self.session["id"],
             "title": self.session.get("title") or "New chat",
             "model": self.agent.model,
-            "messages": self.render_messages(
-                [m for m in self.engine.messages if m.get("role") != "system"]
-            ),
+            "messages": self.render_messages(self.engine.messages),
         }
 
     def new_chat(self) -> dict:
@@ -611,7 +613,8 @@ class _Handler(BaseHTTPRequestHandler):
             return
         self._send(b"not found", "text/plain", status=404)
 
-    def _stream_chat(self, message: str) -> None:
+    def _begin_sse(self):
+        """Set up SSE response headers and return an emit callback."""
         self.send_response(200)
         self.send_header("Content-Type", "text/event-stream")
         self.send_header("Cache-Control", "no-cache")
@@ -624,10 +627,11 @@ class _Handler(BaseHTTPRequestHandler):
                 self.wfile.write(f"data: {payload}\n\n".encode("utf-8"))
                 self.wfile.flush()
             except OSError:
-                # Any socket-write failure (BrokenPipe, ConnectionReset,
-                # ConnectionAborted on Windows, etc.) means the client hung up.
                 raise _ClientGone()
+        return emit
 
+    def _stream_chat(self, message: str) -> None:
+        emit = self._begin_sse()
         if not message:
             try:
                 emit("error", {"text": "empty message"})
@@ -641,20 +645,7 @@ class _Handler(BaseHTTPRequestHandler):
             return
 
     def _stream_chat_edit(self, index: int, message: str) -> None:
-        self.send_response(200)
-        self.send_header("Content-Type", "text/event-stream")
-        self.send_header("Cache-Control", "no-cache")
-        self.send_header("Connection", "close")
-        self.end_headers()
-
-        def emit(kind: str, data: dict) -> None:
-            payload = json.dumps({"kind": kind, "data": data})
-            try:
-                self.wfile.write(f"data: {payload}\n\n".encode("utf-8"))
-                self.wfile.flush()
-            except OSError:
-                raise _ClientGone()
-
+        emit = self._begin_sse()
         if not message:
             try:
                 emit("error", {"text": "empty message"})
@@ -686,7 +677,7 @@ _HTML = """<!doctype html>
 
   <header class="hud-header">
     <div class="hdr-left">
-      <span class="jl">C</span><span class="jd">·</span><span class="jl">A</span><span class="jd">·</span><span class="jl">G</span><span class="jd">·</span><span class="jl">E</span><span class="jd">·</span><span class="jl">N</span><span class="jd">·</span><span class="jl">T</span><span class="jd">·</span><span class="jl">I</span><span class="jd">·</span><span class="jl">C</span>
+        <span class="jl">C</span><span class="jd">&middot;</span><span class="jl">A</span><span class="jd">&middot;</span><span class="jl">G</span><span class="jd">&middot;</span><span class="jl">E</span><span class="jd">&middot;</span><span class="jl">N</span><span class="jd">&middot;</span><span class="jl">T</span><span class="jd">&middot;</span><span class="jl">I</span><span class="jd">&middot;</span><span class="jl">C</span>
       <span class="j-sub">COGNITIVE AGENT NETWORK FOR INTELLIGENT COMPUTING</span>
     </div>
     <div class="hdr-right">
@@ -709,7 +700,7 @@ _HTML = """<!doctype html>
     <span class="nav-meta">SESSION <span id="jSession">--------</span></span>
     <div class="nav-spacer"></div>
     <button class="nav-btn toggle-btn" id="voiceOutBtn" title="Read replies aloud">[ &#128264; Voice: OFF ]</button>
-    <button class="nav-btn" id="viewportBtn" title="Toggle viewport">[ &#9707; VIEWPORT ]</button>
+  
     <div class="nav-divider"></div>
     <button class="nav-btn" id="configBtn">[ CONFIG ]</button>
   </div>
@@ -726,17 +717,9 @@ _HTML = """<!doctype html>
       </div>
       <div id="log" class="chat-log"></div>
     </div>
-
-    <aside class="viewport-panel" id="viewportPanel">
-      <div class="vp-head">
-        <span class="panel-hdr">&#123; Viewport &#125;</span>
-        <button class="icon-btn" id="vpClearBtn" title="Clear viewport">&#10005;</button>
-      </div>
-      <div class="vp-body" id="vpBody">
-        <div class="vp-empty">No active display<br/><span>Panels appear here</span></div>
-      </div>
-    </aside>
   </div>
+
+  <div id="windowLayer"></div>
 
   <div class="cmd-area">
     <div class="cmd-box" id="cmdBox">
@@ -805,13 +788,12 @@ _HTML = """<!doctype html>
 </div>
 <!-- Confirm modal -->
 <div id="confirmModal" class="modal hidden">
-  <div class="modal-card" style="width:340px">
-    <div class="modal-head">
-      <span id="confirmTitle" style="font-size:13px;color:var(--text)">Confirm</span>
+  <div class="modal-card sm">
+      <span id="confirmTitle" class="modal-title">Confirm</span>
       <button id="confirmClose" class="icon-btn">&#10005;</button>
     </div>
     <div class="modal-body">
-      <p id="confirmMsg" style="color:var(--text-2);font-size:13px;margin:0"></p>
+      <p id="confirmMsg" class="modal-msg"></p>
     </div>
     <div class="modal-foot">
       <button id="confirmCancel" class="btn-ghost">Cancel</button>
@@ -822,13 +804,13 @@ _HTML = """<!doctype html>
 
 <!-- Rename modal -->
 <div id="renameModal" class="modal hidden">
-  <div class="modal-card" style="width:380px">
+  <div class="modal-card md">
     <div class="modal-head">
-      <span style="font-size:13px;color:var(--text)">Rename</span>
+      <span class="modal-title">Rename</span>
       <button id="renameClose" class="icon-btn">&#10005;</button>
     </div>
     <div class="modal-body">
-      <input id="renameInput" type="text" style="width:100%;background:rgba(34,27,42,.8);border:1px solid var(--border-h);color:var(--text);padding:8px 10px;font-size:13px" />
+      <input id="renameInput" type="text" class="modal-input" />
     </div>
     <div class="modal-foot">
       <button id="renameCancel" class="btn-ghost">Cancel</button>
@@ -839,13 +821,13 @@ _HTML = """<!doctype html>
 
 <!-- New project modal -->
 <div id="newProjectModal" class="modal hidden">
-  <div class="modal-card" style="width:380px">
+  <div class="modal-card md">
     <div class="modal-head">
-      <span style="font-size:13px;color:var(--text)">New Project</span>
+      <span class="modal-title">New Project</span>
       <button id="newProjectModalClose" class="icon-btn">&#10005;</button>
     </div>
     <div class="modal-body">
-      <input id="newProjectInput" type="text" placeholder="Project name" style="width:100%;background:rgba(34,27,42,.8);border:1px solid var(--border-h);color:var(--text);padding:8px 10px;font-size:13px" />
+      <input id="newProjectInput" type="text" placeholder="Project name" class="modal-input" />
     </div>
     <div class="modal-foot">
       <button id="newProjectCancel" class="btn-ghost">Cancel</button>
@@ -856,9 +838,9 @@ _HTML = """<!doctype html>
 
 <!-- Add to project modal -->
 <div id="projectModal" class="modal hidden">
-  <div class="modal-card" style="width:380px">
+  <div class="modal-card md">
     <div class="modal-head">
-      <span style="font-size:13px;color:var(--text)">Add to Project</span>
+      <span class="modal-title">Add to Project</span>
       <button id="projectModalClose" class="icon-btn">&#10005;</button>
     </div>
     <div class="modal-body" id="projectModalBody">
@@ -872,19 +854,19 @@ _HTML = """<!doctype html>
 
 <!-- Project config modal -->
 <div id="projConfigModal" class="modal hidden">
-  <div class="modal-card" style="width:480px">
+  <div class="modal-card lg">
     <div class="modal-head">
-      <span style="font-size:13px;color:var(--text)">Project Config</span>
+      <span class="modal-title">Project Config</span>
       <button id="projConfigClose" class="icon-btn">&#10005;</button>
     </div>
     <div class="modal-body">
       <div class="field">
         <span class="field-label">SYSTEM PROMPT</span>
-        <textarea id="projConfigPrompt" rows="5" style="background:rgba(34,27,42,.9);border:1px solid var(--border);color:var(--text);padding:8px 11px;font:11.5px var(--mono);letter-spacing:.04em;resize:vertical;width:100%;box-sizing:border-box" placeholder="Custom instructions for this project's chats&#10;(appended after the base system prompt)"></textarea>
+        <textarea id="projConfigPrompt" rows="5" class="modal-textarea" placeholder="Custom instructions for this project's chats&#10;(appended after the base system prompt)"></textarea>
       </div>
       <div class="field">
         <span class="field-label">CONTEXT / NOTES</span>
-        <textarea id="projConfigContext" rows="5" style="background:rgba(34,27,42,.9);border:1px solid var(--border);color:var(--text);padding:8px 11px;font:11.5px var(--mono);letter-spacing:.04em;resize:vertical;width:100%;box-sizing:border-box" placeholder="Reference material always included in this project's chats&#10;(e.g. coding standards, project background, key contacts)"></textarea>
+        <textarea id="projConfigContext" rows="5" class="modal-textarea" placeholder="Reference material always included in this project's chats&#10;(e.g. coding standards, project background, key contacts)"></textarea>
       </div>
     </div>
     <div class="modal-foot">
@@ -1059,9 +1041,9 @@ body {
 .qcard {
   padding: 14px 16px; border: 1px solid var(--border);
   background: rgba(240,168,122,.03); cursor: pointer;
-  transition: background .15s, border-color .15s; text-align: left;
+  transition: background .15s, border-color .15s, transform .15s; text-align: left;
 }
-.qcard:hover { background: rgba(240,168,122,.08); border-color: var(--border-h); }
+.qcard:hover { background: rgba(240,168,122,.08); border-color: var(--border-h); transform: translateY(-2px); }
 .qcard-icon { font-size: 18px; margin-bottom: 7px; display: block; }
 .qcard-title { font-size: 11px; color: #d8c8e0; letter-spacing: .05em; display: block; margin-bottom: 3px; }
 .qcard-sub   { font-size: 9px;  color: var(--text-2); letter-spacing: .04em; line-height: 1.5; display: block; }
@@ -1112,14 +1094,12 @@ body {
 .msg-body a:hover { text-decoration: underline; }
 .msg-body ul { padding-left: 18px; margin: 6px 0; }
 .msg-body li::marker { color: var(--accent); }
-.cursor::after { content: '█'; color: var(--accent); animation: blink .9s steps(2) infinite; }
-@keyframes blink { 50% { opacity: 0; } }
-
+.cursor::after { content: '\2588'; color: var(--accent); animation: blink .9s steps(2) infinite; }
 /* code blocks */
-.codeblock { margin: 9px 0; border: 1px solid var(--border); background: rgba(22,17,24,.95); }
+.codeblock { margin: 9px 0; border: 1px solid var(--border); background: rgba(22,17,24,.95); border-left: 2px solid var(--accent); }
 .cb-head { display: flex; justify-content: space-between; padding: 5px 10px; background: rgba(240,168,122,.05); border-bottom: 1px solid var(--border); }
 .cb-lang { font-size: 9px; color: var(--accent); letter-spacing: .1em; text-transform: uppercase; }
-.cb-copy { background: transparent; border: 0; color: var(--text-2); cursor: pointer; font: 9px var(--mono); letter-spacing: .1em; }
+.cb-copy { background: transparent; border: 0; color: var(--text-2); cursor: pointer; font: 9px var(--mono); letter-spacing: .1em; transition: color .15s; }
 .cb-copy:hover { color: var(--accent); }
 .codeblock pre { margin: 0; padding: 10px 12px; overflow-x: auto; }
 .codeblock code { font: 11.5px/1.6 var(--mono); color: #c9b8d4; background: none; }
@@ -1129,14 +1109,18 @@ body {
   display: flex; align-items: center; gap: 8px; padding: 7px 12px;
   margin: 6px 0; font-size: 11px; border: 1px solid var(--border);
   background: rgba(34,27,42,.85); letter-spacing: .04em;
+  border-left: 2px solid var(--text-dim); transition: border-color .2s;
 }
 .tool-row .tname { color: #d8c8e0; font-weight: 600; }
 .tool-row .tsum  { color: var(--text-2); flex: 1; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; font-family: var(--mono); font-size: 10px; }
 .tool-row .tres  { margin-left: auto; }
 .tool-row.ok  .tres { color: var(--ok); }
+.tool-row.ok  { border-left-color: var(--ok); }
 .tool-row.bad .tres { color: var(--hot); }
+.tool-row.bad { border-left-color: var(--hot); }
 .tool-row.pending .tres { color: var(--warn); animation: pulse 1s ease infinite; }
-.tool-row.pending { border-color: rgba(255,170,0,.3); background: rgba(255,170,0,.04); }
+.tool-row.pending { border-color: rgba(255,170,0,.3); border-left-color: var(--warn); background: rgba(255,170,0,.04); }
+@keyframes pulse { 50% { opacity: .3; } }
 @keyframes pulse { 50% { opacity: .3; } }
 
 /* thinking */
@@ -1169,25 +1153,53 @@ body {
 .perm-btns .no     { background: transparent; color: var(--text-2); border-color: var(--border); }
 .perm-decided      { font-size: 10px; color: var(--text-dim); }
 
-/* ---- VIEWPORT PANEL -------------------------------------------------------- */
-.viewport-panel {
-  width: 340px; flex-shrink: 0; border-left: 1px solid var(--border);
-  background: rgba(22,17,24,.55); display: flex; flex-direction: column;
-  transition: width .3s ease, margin-right .3s ease;
+/* ---- FLOATING HUD WINDOWS -------------------------------------------------- */
+#windowLayer {
+  position: fixed; inset: 0; z-index: 170; pointer-events: none;
 }
-.viewport-panel.collapsed { width: 0; margin-right: -1px; overflow: hidden; border-left: 0; }
-.vp-head { display: flex; align-items: center; justify-content: space-between; padding: 9px 14px; border-bottom: 1px solid var(--border); flex-shrink: 0; }
-.vp-body { flex: 1; overflow-y: auto; padding: 12px; display: flex; flex-direction: column; gap: 12px; }
-.vp-empty { color: var(--text-dim); font-size: 9px; letter-spacing: .16em; text-align: center; margin: auto; line-height: 2; text-transform: uppercase; }
-.vp-empty span { color: var(--text-dim); opacity: .6; font-size: 8px; }
+.hud-window {
+  position: absolute; pointer-events: auto;
+  min-width: 220px; min-height: 100px;
+  background: rgba(22,17,24,.92); border: 1px solid var(--border-h);
+  box-shadow: 0 4px 30px rgba(0,0,0,.55), 0 0 20px rgba(240,168,122,.06);
+  display: flex; flex-direction: column;
+  animation: hudWinIn .3s ease;
+  backdrop-filter: blur(6px);
+}
+.hud-win-resize {
+  position: absolute; bottom: 0; right: 0;
+  width: 16px; height: 16px;
+  cursor: nwse-resize;
+  z-index: 2;
+}
+.hud-win-resize::before {
+  content: '';
+  position: absolute; bottom: 4px; right: 4px;
+  width: 8px; height: 8px;
+  border-right: 2px solid var(--text-dim);
+  border-bottom: 2px solid var(--text-dim);
+  opacity: 0.4;
+}
+.hud-window.resizing { opacity: .85; box-shadow: 0 8px 40px rgba(0,0,0,.7), 0 0 30px rgba(240,168,122,.12); }
+@keyframes hudWinIn { from { opacity: 0; transform: scale(.92) translateY(10px); } }
+.hud-win-head {
+  display: flex; align-items: center; justify-content: space-between;
+  padding: 7px 12px; border-bottom: 1px solid var(--border);
+  cursor: grab; user-select: none; flex-shrink: 0;
+}
+.hud-win-head:active { cursor: grabbing; }
+.hud-win-title { font-size: 9px; color: var(--accent); letter-spacing: .14em; text-transform: uppercase; text-shadow: 0 0 8px var(--accent-glow); }
+.hud-win-close { background: transparent; border: 0; color: var(--text-dim); cursor: pointer; font: 14px var(--mono); padding: 0 4px; line-height: 1; }
+.hud-win-close:hover { color: var(--accent); }
+.hud-window::before { content: ''; position: absolute; top: -1px; left: 12px; right: 12px; height: 1px; background: linear-gradient(90deg, transparent, var(--accent), transparent); }
+.hud-win-body { overflow-y: auto; padding: 12px; display: flex; flex-direction: column; gap: 8px; flex: 1; }
+.hud-window.dragging { opacity: .85; box-shadow: 0 8px 40px rgba(0,0,0,.7), 0 0 30px rgba(240,168,122,.12); }
 
 /* viewport panels (rendered by model directives) */
 .vpanel {
-  border: 1px solid var(--border); background: var(--panel-bg);
-  padding: 11px 13px; position: relative; animation: vpIn .35s ease;
+  position: relative;
 }
-@keyframes vpIn { from { opacity: 0; transform: translateX(12px); } }
-.vpanel::before { content: ''; position: absolute; top: -1px; left: 12px; right: 12px; height: 1px; background: linear-gradient(90deg, transparent, var(--accent), transparent); }
+
 .vpanel-title { font-size: 9px; color: var(--accent); letter-spacing: .14em; text-transform: uppercase; margin-bottom: 9px; text-shadow: 0 0 8px var(--accent-glow); }
 .vp-stat-row { display: flex; justify-content: space-between; align-items: center; padding: 4px 0; border-bottom: 1px solid rgba(240,168,122,.06); font-size: 10px; }
 .vp-stat-row .l { color: var(--text-2); letter-spacing: .05em; }
@@ -1201,7 +1213,7 @@ body {
 .vp-metric .trend.up { color: var(--ok); } .vp-metric .trend.down { color: var(--hot); } .vp-metric .trend.flat { color: var(--text-2); }
 .vp-list { list-style: none; }
 .vp-list li { font-size: 10px; color: var(--text); padding: 4px 0 4px 14px; position: relative; border-bottom: 1px solid rgba(240,168,122,.05); line-height: 1.5; }
-.vp-list li::before { content: '▸'; color: var(--accent); position: absolute; left: 0; }
+.vp-list li::before { content: '\25B8'; color: var(--accent); position: absolute; left: 0; }
 .vp-table { width: 100%; border-collapse: collapse; font-size: 9.5px; }
 .vp-table th { color: var(--accent); text-align: left; padding: 4px 6px; border-bottom: 1px solid var(--border); letter-spacing: .05em; text-transform: uppercase; }
 .vp-table td { color: var(--text); padding: 4px 6px; border-bottom: 1px solid rgba(240,168,122,.05); }
@@ -1292,7 +1304,7 @@ body {
 .sess-group-head .sg-add:hover { color: var(--accent); }
 .sess-group-chats { display: none; }
 .sess-group-chats.open { display: block; }
-.chat-item-j { display: flex; align-items: center; padding: 6px 8px 6px 22px; cursor: pointer; color: var(--text-2); border-bottom: 1px solid rgba(240,168,122,.04); font-size: 10px; letter-spacing: .05em; gap: 6px; }
+.chat-item-j { display: flex; align-items: center; padding: 6px 8px 6px 22px; cursor: pointer; color: var(--text-2); border-bottom: 1px solid rgba(240,168,122,.04); font-size: 10px; letter-spacing: .05em; gap: 6px; transition: background .15s, color .15s; }
 .chat-item-j:hover  { background: rgba(240,168,122,.05); color: var(--text); }
 .chat-item-j.active { background: rgba(240,168,122,.08); color: var(--accent); }
 .chat-item-j .ci-title { flex: 1; min-width: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
@@ -1320,7 +1332,21 @@ body {
 
 /* ---- SETTINGS MODAL -------------------------------------------------------- */
 .modal { position: fixed; inset: 0; background: rgba(22,17,24,.82); display: flex; align-items: center; justify-content: center; z-index: 300; }
-.modal-card { background: #161118; border: 1px solid var(--border-h); width: 440px; max-width: calc(100vw - 28px); box-shadow: 0 0 60px rgba(240,168,122,.15); }
+.modal-card { background: #161118; border: 1px solid var(--border-h); width: 440px; max-width: calc(100vw - 28px); box-shadow: 0 0 60px rgba(240,168,122,.15); animation: modalIn .2s ease; }
+@keyframes modalIn { from { opacity: 0; transform: scale(.96) translateY(8px); } }
+.modal-card.sm { width: 340px; }
+.modal-card.md { width: 380px; }
+.modal-card.lg { width: 480px; }
+.modal-input { width: 100%; background: rgba(34,27,42,.8); border: 1px solid var(--border-h); color: var(--text); padding: 8px 10px; font-size: 13px; font-family: var(--mono); }
+.modal-input:focus { outline: 0; border-color: var(--accent); }
+.modal-textarea { width: 100%; background: rgba(34,27,42,.9); border: 1px solid var(--border); color: var(--text); padding: 8px 11px; font: 11.5px var(--mono); letter-spacing: .04em; resize: vertical; box-sizing: border-box; }
+.modal-textarea:focus { outline: 0; border-color: var(--accent); }
+.modal-title { font-size: 13px; color: var(--text); }
+.modal-msg { color: var(--text-2); font-size: 13px; margin: 0; }
+.empty-hint { color: var(--text-dim); font-size: 9px; padding: 6px 22px; }
+.empty-hint.md { font-size: 12px; padding: 8px; }
+.tool-icon { font-size: 13px; }
+.ci-arrow { color: var(--accent); font-size: 10px; }
 .modal-head { display: flex; align-items: center; justify-content: space-between; padding: 13px 17px; border-bottom: 1px solid var(--border); }
 .modal-body { padding: 16px 17px; display: flex; flex-direction: column; gap: 15px; max-height: 70vh; overflow-y: auto; }
 .field { display: flex; flex-direction: column; gap: 6px; }
@@ -1341,16 +1367,16 @@ body {
 .btn-primary:hover { background: rgba(240,168,122,.28); }
 .btn-ghost { background: transparent; color: var(--text-2); border: 1px solid var(--border); padding: 7px 14px; font: 9px var(--mono); cursor: pointer; letter-spacing: .1em; text-transform: uppercase; }
 .btn-ghost:hover { border-color: var(--text-2); }
-
 /* ---- BACKDROP + SCROLLBARS ------------------------------------------------- */
-.backdrop { position: fixed; inset: 0; z-index: 150; background: rgba(22,17,24,.6); }
+.backdrop { position: fixed; inset: 0; z-index: 150; background: rgba(22,17,24,.6); backdrop-filter: blur(2px); }
 ::-webkit-scrollbar { width: 4px; }
 ::-webkit-scrollbar-track { background: transparent; }
-::-webkit-scrollbar-thumb { background: rgba(240,168,122,.18); }
+::-webkit-scrollbar-thumb { background: rgba(240,168,122,.18); border-radius: 2px; }
 ::-webkit-scrollbar-thumb:hover { background: rgba(240,168,122,.38); }
-
+/* Firefox scrollbar */
+* { scrollbar-width: thin; scrollbar-color: rgba(240,168,122,.18) transparent; }
 @media (max-width: 900px) {
-  .viewport-panel { position: fixed; right: 0; top: 0; bottom: 0; z-index: 180; box-shadow: 0 0 40px rgba(0,0,0,.6); }
+  .hud-window { max-width: 90vw; }
   .j-sub { display: none; }
   .quick-cards { grid-template-columns: 1fr 1fr; }
 }
@@ -1489,17 +1515,27 @@ function renderHudPanels(text){
   found.forEach(({obj})=>{ if((obj.panel||'').toLowerCase()==='clear') clearViewport(); });
   const nonClear=found.filter(({obj})=>(obj.panel||'').toLowerCase()!=='clear');
   if(!nonClear.length) return;
-  ensureViewportOpen();
-  const body=$('#vpBody'); const empty=body.querySelector('.vp-empty'); if(empty) empty.remove();
+  const layer=$('#windowLayer');
   nonClear.forEach(({raw,obj})=>{
-    if(state.renderedPanels.has(raw)) return;     // dedupe across stream/final
+    if(state.renderedPanels.has(raw)) return;
     state.renderedPanels.add(raw);
-    const el=buildPanel(obj); if(el){ body.appendChild(el); body.scrollTop=body.scrollHeight; }
+    const inner=buildPanelInner(obj); if(!inner) return;
+    const pos=_nextWinPos();
+    const win=document.createElement('div'); win.className='hud-window';
+    win.style.left=pos.x+'px'; win.style.top=pos.y+'px';
+    const title=obj.title||((obj.panel||'').charAt(0).toUpperCase()+(obj.panel||'').slice(1));
+    win.innerHTML='<div class="hud-win-head"><span class="hud-win-title">'+esc(title)+'</span>'+
+      '<button class="hud-win-close" title="Close">&times;</button></div>'+
+      '<div class="hud-win-body">'+inner+'</div>'+
+      '<div class="hud-win-resize"></div>';
+    win.querySelector('.hud-win-close').addEventListener('mousedown',e=>{e.stopPropagation();win.remove();});
+    layer.appendChild(win);
+    _makeDraggable(win);
+    _makeResizable(win);
   });
 }
-function buildPanel(p){
+function buildPanelInner(p){
   if(!p||typeof p!=='object') return null;
-  const wrap=document.createElement('div'); wrap.className='vpanel';
   const title=p.title?'<div class="vpanel-title">'+esc(p.title)+'</div>':'';
   let inner='';
   switch((p.panel||'').toLowerCase()){
@@ -1532,8 +1568,8 @@ function buildPanel(p){
       break;
     case 'alert':
       const lvl=(p.level||'info').toLowerCase();
-      return assign(wrap,'<div class="vp-alert '+lvl+'"><div class="at">'+esc(p.title||lvl.toUpperCase())+
-        '</div><div class="ax">'+esc(p.text||'')+'</div></div>');
+      return '<div class="vp-alert '+lvl+'"><div class="at">'+esc(p.title||lvl.toUpperCase())+
+        '</div><div class="ax">'+esc(p.text||'')+'</div></div>';
     case 'progress':
       inner=(p.items||[]).map(it=>{const pct=Math.max(0,Math.min(100,+it.pct||0));
         return '<div class="vp-prog-row"><div class="pl"><span>'+esc(it.label||'')+'</span><span>'+pct+'%</span></div>'+
@@ -1545,74 +1581,178 @@ function buildPanel(p){
       break;
     case 'bar':{ const vals=(p.values||[]).map(Number); const labs=p.labels||vals.map((_,i)=>String(i+1));
       const maxV=Math.max(...vals,1); const col=p.color||'#f0a87a';
-      const W2=300,H2=140,pad=30,bw=Math.max(8,Math.floor((W2-pad*2)/Math.max(vals.length,1)*0.65));
-      const gap=Math.floor((W2-pad*2)/Math.max(vals.length,1));
-      let bars=''; vals.forEach((v,i)=>{
-        const bh=Math.round((v/maxV)*(H2-45)); const x=pad+i*gap+(gap-bw)/2; const y=H2-20-bh;
-        bars+=`<rect x="${x}" y="${y}" width="${bw}" height="${bh}" fill="${esc(col)}" rx="2" opacity="0.85"/>`;
+      const W2=320,H2=160,padL=36,padR=10,padT=14,padB=22;
+      const plotW=W2-padL-padR, plotH=H2-padT-padB;
+      const bw=Math.max(10,Math.min(36,Math.floor(plotW/Math.max(vals.length,1)*0.6)));
+      const gap=Math.floor(plotW/Math.max(vals.length,1));
+      // grid lines
+      let grid='';
+      for(let g=0;g<=4;g++){
+        const gy=padT+plotH*(1-g/4);
+        const gv=(maxV*g/4);
+        grid+=`<line x1="${padL}" y1="${gy}" x2="${W2-padR}" y2="${gy}" stroke="#2a2235" stroke-width="1"/>`;
+        grid+=`<text x="${padL-4}" y="${gy+3}" text-anchor="end" font-size="8" fill="#6b5f7a">${gv%1===0?gv:gv.toFixed(1)}</text>`;
+      }
+      // gradient def
+      const gid='bg'+(_winCascade||0);
+      let bars=grid;
+      bars+=`<defs><linearGradient id="${gid}" x1="0" y1="0" x2="0" y2="1"><stop offset="0%" stop-color="${esc(col)}" stop-opacity="1"/><stop offset="100%" stop-color="${esc(col)}" stop-opacity="0.45"/></linearGradient></defs>`;
+      vals.forEach((v,i)=>{
+        const bh=Math.round((v/maxV)*plotH); const x=padL+i*gap+(gap-bw)/2; const y=padT+plotH-bh;
+        bars+=`<rect x="${x}" y="${y}" width="${bw}" height="${bh}" fill="url(#${gid})" rx="3" ry="3"/>`;
         bars+=`<text x="${x+bw/2}" y="${H2-4}" text-anchor="middle" font-size="9" fill="#b0a6ba">${esc(String(labs[i]||''))}</text>`;
-        bars+=`<text x="${x+bw/2}" y="${y-3}" text-anchor="middle" font-size="8" fill="${esc(col)}">${esc(String(v))}</text>`;
+        bars+=`<text x="${x+bw/2}" y="${y-4}" text-anchor="middle" font-size="8" font-weight="600" fill="${esc(col)}">${esc(String(v))}</text>`;
       });
       inner=`<svg viewBox="0 0 ${W2} ${H2}" style="width:100%;height:auto">${bars}</svg>`; break; }
     case 'line':{ const ds=(p.datasets||[{values:p.values||[],label:'',color:'#f0a87a'}]);
       const labs=p.labels||[];  const maxAll=Math.max(...ds.flatMap(d=>d.values||[]).map(Number),1);
-      const W2=300,H2=140,pad=30;
+      const W2=320,H2=160,padL=36,padR=10,padT=14,padB=22;
+      const plotW=W2-padL-padR, plotH=H2-padT-padB;
       let lines=''; const colors=['#f0a87a','#8ecf95','#e3a978','#c97fd4','#e5928f'];
+      // grid
+      for(let g=0;g<=4;g++){
+        const gy=padT+plotH*(1-g/4); const gv=(maxAll*g/4);
+        lines+=`<line x1="${padL}" y1="${gy}" x2="${W2-padR}" y2="${gy}" stroke="#2a2235" stroke-width="1"/>`;
+        lines+=`<text x="${padL-4}" y="${gy+3}" text-anchor="end" font-size="8" fill="#6b5f7a">${gv%1===0?gv:gv.toFixed(1)}</text>`;
+      }
       ds.forEach((d,di)=>{ const vals=(d.values||[]).map(Number); const col=d.color||colors[di%colors.length];
         if(!vals.length) return;
-        const pts=vals.map((v,i)=>{const x=pad+i*(W2-pad*2)/Math.max(vals.length-1,1); const y=H2-20-Math.round((v/maxAll)*(H2-40)); return `${x},${y}`;});
-        lines+=`<polyline points="${pts.join(' ')}" fill="none" stroke="${esc(col)}" stroke-width="2" opacity="0.9"/>`;
+        const pts=vals.map((v,i)=>{const x=padL+i*plotW/Math.max(vals.length-1,1); const y=padT+plotH*(1-v/maxAll); return `${x},${y}`;});
+        // area fill
+        const areaPts=[`${padL},${padT+plotH}`,...pts,`${padL+plotW},${padT+plotH}`].join(' ');
+        const aid='la'+(_winCascade||0)+di;
+        lines+=`<defs><linearGradient id="${aid}" x1="0" y1="0" x2="0" y2="1"><stop offset="0%" stop-color="${esc(col)}" stop-opacity="0.25"/><stop offset="100%" stop-color="${esc(col)}" stop-opacity="0.02"/></linearGradient></defs>`;
+        lines+=`<polygon points="${areaPts}" fill="url(#${aid})"/>`;
+        lines+=`<polyline points="${pts.join(' ')}" fill="none" stroke="${esc(col)}" stroke-width="2.5" stroke-linecap="round" stroke-linejoin="round"/>`;
         pts.forEach((pt,i)=>{ const[x,y]=pt.split(',');
-          lines+=`<circle cx="${x}" cy="${y}" r="3" fill="${esc(col)}"/>`; });
-        if(d.label) lines+=`<text x="${W2-4}" y="${pts[pts.length-1].split(',')[1]}" text-anchor="end" font-size="8" fill="${esc(col)}">${esc(d.label)}</text>`;
+          lines+=`<circle cx="${x}" cy="${y}" r="3.5" fill="#16111c" stroke="${esc(col)}" stroke-width="2"/>`; });
+        if(d.label){ const lastPt=pts[pts.length-1].split(',');
+          lines+=`<text x="${+lastPt[0]+6}" y="${+lastPt[1]+3}" font-size="9" font-weight="600" fill="${esc(col)}">${esc(d.label)}</text>`; }
       });
-      labs.forEach((l,i)=>{ const x=pad+i*(W2-pad*2)/Math.max(labs.length-1,1);
+      labs.forEach((l,i)=>{ const x=padL+i*plotW/Math.max(labs.length-1,1);
         lines+=`<text x="${x}" y="${H2-4}" text-anchor="middle" font-size="9" fill="#b0a6ba">${esc(String(l))}</text>`; });
       inner=`<svg viewBox="0 0 ${W2} ${H2}" style="width:100%;height:auto">${lines}</svg>`; break; }
     case 'pie':{ const vals=(p.values||[]).map(Number); const labs=p.labels||vals.map((_,i)=>String(i+1));
       const total=vals.reduce((a,b)=>a+b,0)||1;
-      const colors=['#f0a87a','#8ecf95','#e3a978','#c97fd4','#e5928f','#b0a6ba'];
-      const cx=90,cy=70,r=55,ri=28; let angle=-Math.PI/2; let slices=''; let legend='';
+      const colors=['#f0a87a','#8ecf95','#e3a978','#c97fd4','#e5928f','#b0a6ba','#7ec8e3','#d4a76a'];
+      const cx=100,cy=80,r=62,ri=32; let angle=-Math.PI/2; let slices=''; let legend='';
+      // shadow ring
+      slices+=`<circle cx="${cx+1}" cy="${cy+2}" r="${r+2}" fill="none" stroke="#0a0810" stroke-width="4" opacity="0.4"/>`;
       vals.forEach((v,i)=>{ const sweep=2*Math.PI*(v/total); const col=colors[i%colors.length];
+        const mid=angle+sweep/2;
         const x1=cx+r*Math.cos(angle),y1=cy+r*Math.sin(angle);
         const x2=cx+r*Math.cos(angle+sweep),y2=cy+r*Math.sin(angle+sweep);
         const xi1=cx+ri*Math.cos(angle),yi1=cy+ri*Math.sin(angle);
         const xi2=cx+ri*Math.cos(angle+sweep),yi2=cy+ri*Math.sin(angle+sweep);
         const lg=sweep>Math.PI?1:0;
-        slices+=`<path d="M${xi1} ${yi1} L${x1} ${y1} A${r} ${r} 0 ${lg} 1 ${x2} ${y2} L${xi2} ${yi2} A${ri} ${ri} 0 ${lg} 0 ${xi1} ${yi1}" fill="${col}" opacity="0.85"/>`;
+        // slight explode for large slices
+        const ex=sweep>0.3?2*Math.cos(mid):0, ey=sweep>0.3?2*Math.sin(mid):0;
+        slices+=`<path d="M${xi1+ex} ${yi1+ey} L${x1+ex} ${y1+ey} A${r} ${r} 0 ${lg} 1 ${x2+ex} ${y2+ey} L${xi2+ex} ${yi2+ey} A${ri} ${ri} 0 ${lg} 0 ${xi1+ex} ${yi1+ey}" fill="${col}" opacity="0.9" stroke="#16111c" stroke-width="1"/>`;
+        // percentage label inside slice
+        if(sweep>0.25){
+          const lr=(r+ri)/2, lx=cx+lr*Math.cos(mid)+ex, ly=cy+lr*Math.sin(mid)+ey;
+          const pct=Math.round(v/total*100);
+          slices+=`<text x="${lx}" y="${ly+3}" text-anchor="middle" font-size="9" font-weight="600" fill="#fff">${pct}%</text>`;
+        }
         const pct=Math.round(v/total*100);
-        legend+=`<rect x="188" y="${8+i*16}" width="8" height="8" fill="${col}"/>`;
-        legend+=`<text x="200" y="${16+i*16}" font-size="9" fill="#cdbbd8">${esc(String(labs[i]))} ${pct}%</text>`;
+        legend+=`<rect x="190" y="${8+i*18}" width="10" height="10" rx="2" fill="${col}"/>`;
+        legend+=`<text x="204" y="${17+i*18}" font-size="10" fill="#cdbbd8">${esc(String(labs[i]))} <tspan fill="#8a7e96">${pct}%</tspan></text>`;
         angle+=sweep; });
-      inner=`<svg viewBox="0 0 300 145" style="width:100%;height:auto">${slices}${legend}</svg>`; break; }
+      // center label
+      slices+=`<circle cx="${cx}" cy="${cy}" r="${ri-4}" fill="#16111c" opacity="0.6"/>`;
+      inner=`<svg viewBox="0 0 320 165" style="width:100%;height:auto">${slices}${legend}</svg>`; break; }
     default: return null;
   }
-  wrap.innerHTML=title+inner; return wrap;
+  return title+inner;
 }
-function assign(wrap,html){ wrap.innerHTML=html; return wrap; }
 
-// ---- VIEWPORT ---------------------------------------------------------------
-function ensureViewportOpen(){
-  const vp=$('#viewportPanel');
-  if(vp.classList.contains('collapsed')){ vp.classList.remove('collapsed'); $('#viewportBtn').classList.add('active'); }
+// ---- FLOATING HUD WINDOWS ----------------------------------------------------
+let _winCascade = 0;
+function _nextWinPos(){
+  const layer=$('#windowLayer');
+  const lw=layer.clientWidth, lh=layer.clientHeight;
+  const off=(_winCascade%8)*30;
+  _winCascade++;
+  return {x: Math.min(lw-260, 40+off), y: Math.min(lh-200, 60+off)};
 }
-function toggleViewport(){
-  const vp=$('#viewportPanel'); vp.classList.toggle('collapsed');
-  $('#viewportBtn').classList.toggle('active', !vp.classList.contains('collapsed'));
+function _makeDraggable(win){
+  const head=win.querySelector('.hud-win-head');
+  let dragging=false, sx,sy,ox,oy;
+  function start(cx,cy){
+    dragging=true; sx=cx; sy=cy;
+    ox=parseInt(win.style.left)||0; oy=parseInt(win.style.top)||0;
+    win.classList.add('dragging');
+  }
+  function move(cx,cy){
+    if(!dragging) return;
+    win.style.left=(ox+cx-sx)+'px';
+    win.style.top=(oy+cy-sy)+'px';
+  }
+  function stop(){ if(dragging){ dragging=false; win.classList.remove('dragging'); } }
+  head.addEventListener('mousedown',e=>{
+    if(e.target.classList.contains('hud-win-close')) return;
+    start(e.clientX,e.clientY); e.preventDefault();
+  });
+  document.addEventListener('mousemove',e=>move(e.clientX,e.clientY));
+  document.addEventListener('mouseup',stop);
+  // touch support
+  head.addEventListener('touchstart',e=>{
+    if(e.target.classList.contains('hud-win-close')) return;
+    const t=e.touches[0]; start(t.clientX,t.clientY); e.preventDefault();
+  },{passive:false});
+  document.addEventListener('touchmove',e=>{
+    if(!dragging) return; const t=e.touches[0]; move(t.clientX,t.clientY);
+  },{passive:true});
+  document.addEventListener('touchend',stop);
+}
+function _makeResizable(win){
+  const handle=win.querySelector('.hud-win-resize');
+  if(!handle) return;
+  let resizing=false, rsx,rsy,rsw,rsh;
+  function rstart(cx,cy){
+    resizing=true; rsx=cx; rsy=cy;
+    rsw=win.offsetWidth; rsh=win.offsetHeight;
+    win.classList.add('resizing');
+  }
+  function rmove(cx,cy){
+    if(!resizing) return;
+    win.style.width=Math.max(220,rsw+(cx-rsx))+'px';
+    win.style.height=Math.max(100,rsh+(cy-rsy))+'px';
+  }
+  function rstop(){ if(resizing){ resizing=false; win.classList.remove('resizing'); } }
+  handle.addEventListener('mousedown',e=>{ rstart(e.clientX,e.clientY); e.preventDefault(); e.stopPropagation(); });
+  document.addEventListener('mousemove',e=>rmove(e.clientX,e.clientY));
+  document.addEventListener('mouseup',rstop);
+  handle.addEventListener('touchstart',e=>{ const t=e.touches[0]; rstart(t.clientX,t.clientY); e.preventDefault(); e.stopPropagation(); },{passive:false});
+  document.addEventListener('touchmove',e=>{ if(!resizing) return; const t=e.touches[0]; rmove(t.clientX,t.clientY); },{passive:true});
+  document.addEventListener('touchend',rstop);
 }
 function clearViewport(){
   state.renderedPanels.clear();
-  $('#vpBody').innerHTML='<div class="vp-empty">No active display<br/><span>Panels appear here</span></div>';
+  _winCascade=0;
+  const layer=$('#windowLayer');
+  if(layer) layer.innerHTML='';
 }
+
+// bring window to front on click
+$('#windowLayer').addEventListener('mousedown',e=>{
+  const win=e.target.closest('.hud-window');
+  if(win && !e.target.classList.contains('hud-win-close')){
+    // move to end of DOM = top of stack
+    e.currentTarget.appendChild(win);
+  }
+});
 
 // ---- EMPTY STATE ------------------------------------------------------------
 const QUICK = [
-  {icon:'🌐', title:'Search the web',  sub:'Find and summarise anything online', prompt:'Search the web for '},
-  {icon:'📋', title:'Read my screen',  sub:'Summarise what\'s in my browser tab', prompt:'Read my screen and summarise what you see'},
-  {icon:'📊', title:'Show me stats',   sub:'Render live data into the viewport',  prompt:'Show me a status panel of my system'},
-  {icon:'📈', title:'Draw a chart',    sub:'Bar, line, or pie — visualise data',   prompt:'Show me a bar chart comparing '},
+  {icon:'🔍', title:'Search the web',  sub:'Find and summarise anything online', prompt:'Search the web for '},
+  {icon:'🖥️', title:'Read my screen',  sub:'Summarise what\'s in my browser tab', prompt:'Read my screen and summarise what you see'},
+  {icon:'📊', title:'Show me stats',   sub:'Render live data as floating panels',  prompt:'Show me a status panel of my system'},
+  {icon:'📈', title:'Draw a chart',    sub:'Bar, line, or pie - visualise data',   prompt:'Show me a bar chart comparing '},
   {icon:'📝', title:'Take a note',     sub:'Remember something for later',        prompt:'Take a note: '},
-  {icon:'🔔', title:'Set a reminder',  sub:'Add something to my reminder list',   prompt:'Add a reminder: '},
+  {icon:'⏰', title:'Set a reminder',  sub:'Add something to my reminder list',   prompt:'Add a reminder: '},
+  {icon:'📂', title:'Browse files',    sub:'List or read files on your machine',  prompt:'List files in my current directory'},
+];
   {icon:'📁', title:'Browse files',    sub:'List or read files on your machine',  prompt:'List files in my current directory'},
 ];
 function showEmpty() {
@@ -1636,19 +1776,24 @@ function addUser(text){
   r.querySelector('[data-act="delete"]').onclick=()=>deleteMsg(idx,r);
   getThread().appendChild(r); scrollDown();
 }
+// ---- DOM HELPERS (shared) ---------------------------------------------------
+function truncateAfter(row, includeSelf){
+  // Remove all DOM siblings after (and optionally including) the given row.
+  const thread=getThread();
+  const toRemove=[];
+  let cutting=false;
+  for(const ch of thread.children){
+    if(ch===row){ cutting=true; if(includeSelf) toRemove.push(ch); continue; }
+    if(cutting) toRemove.push(ch);
+  }
+  toRemove.forEach(ch=>ch.remove());
+}
+
 function resendMsg(idx,row){
   if(state.busy) return;
   const bubble=row.querySelector('.bubble');
   const text=bubble.textContent||'';
-  // Truncate DOM after this user message
-  const thread=getThread();
-  let cutting=false;
-  const toRemove=[];
-  for(const ch of thread.children){
-    if(ch===row){ cutting=true; continue; }
-    if(cutting) toRemove.push(ch);
-  }
-  toRemove.forEach(ch=>ch.remove());
+  truncateAfter(row, false);
   streamEdit(idx,text);
 }
 function streamEdit(idx,text){
@@ -1656,29 +1801,14 @@ function streamEdit(idx,text){
   live={body:null,raw:'',toolRow:null,thinking:null,turnStart:null};
   showThinking(); setOrbLabel('Thinking\u2026');
   fetch('/api/chat/edit',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({index:idx,message:text})})
-  .then(r=>{ const reader=r.body.getReader(),dec=new TextDecoder(); let buf='';
-    function pump(){ return reader.read().then(ch=>{
-      if(ch.done){clearThinking();if(state.busy)finishTurn();return;}
-      buf+=dec.decode(ch.value,{stream:true}); let i;
-      while((i=buf.indexOf('\n\n'))>=0){ const line=buf.slice(0,i); buf=buf.slice(i+2);
-        if(line.startsWith('data: ')){ try{handle(JSON.parse(line.slice(6)));}catch(e){} } }
-      return pump();
-    });}
-    return pump();
-  }).catch(()=>{clearThinking();addNote('CONNECTION FAILURE',true);finishTurn();});
+  .then(r=>readSSE(r,handle))
+  .then(()=>{clearThinking();if(state.busy)finishTurn();})
+  .catch(()=>{clearThinking();addNote('CONNECTION FAILURE',true);finishTurn();});
 }
 
 function deleteMsg(idx,row){
   if(state.busy) return;
-  // Truncate DOM from this user message onward
-  const thread=getThread();
-  const toRemove=[];
-  let cutting=false;
-  for(const ch of thread.children){
-    if(ch===row){ cutting=true; }
-    if(cutting) toRemove.push(ch);
-  }
-  toRemove.forEach(ch=>ch.remove());
+  truncateAfter(row, true);
   // If no messages left, show empty state
   if(!thread.children.length) showEmpty();
   // Tell backend to truncate history
@@ -1702,15 +1832,7 @@ function editMsg(idx,row,origText){
   const save=()=>{
     const newText=ta.value.trim(); if(!newText){cancel();return;}
     row.classList.remove('editing');
-    // Truncate DOM after this user message
-    const thread=getThread();
-    const toRemove=[];
-    let cutting=false;
-    for(const ch of thread.children){
-      if(ch===row){ cutting=true; continue; }
-      if(cutting) toRemove.push(ch);
-    }
-    toRemove.forEach(ch=>ch.remove());
+    truncateAfter(row, false);
     // Update the bubble with new text
     bubble.innerHTML=esc(newText);
     streamEdit(idx,newText);
@@ -1761,9 +1883,9 @@ function addToolRow(t, done){
   const row=document.createElement('div'); row.className='tool-row'+(done?'':' pending');
   row.dataset.name=t.name||'';
   const isCmd=(t.name||'').startsWith('run_')||(t.name||'').startsWith('bash');
-  const icon=isCmd?'&#9656;':'&#9889;';
   const iconColor=isCmd?'var(--warn)':'var(--accent)';
-  row.innerHTML='<span style="color:'+iconColor+';font-size:13px">'+icon+'</span>'+
+  row.innerHTML='<span class="tool-icon" style="color:'+iconColor+'">'+icon+'</span>'+
+    '<span class="tname">'+esc(t.name||'')+'</span>'+
     '<span class="tname">'+esc(t.name||'')+'</span>'+
     (t.summary?'<span class="tsum">'+esc(t.summary)+'</span>':'')+
     (done?'':'<span class="tres">RUNNING&#8230;</span>');
@@ -1785,6 +1907,18 @@ function showPermission(d){
     const b=document.createElement('button'); b.className=a; b.textContent=l; b.onclick=()=>answer(a,p); btns.appendChild(b);
   });
   box.appendChild(btns); getThread().appendChild(box); scrollDown();
+}
+
+// ---- SSE STREAM READER (shared) -------------------------------------------
+async function readSSE(response, onEvent){
+  const reader=response.body.getReader(), dec=new TextDecoder(); let buf='';
+  while(true){
+    let chunk; try{chunk=await reader.read();}catch(e){break;}
+    if(chunk.done) break;
+    buf+=dec.decode(chunk.value,{stream:true}); let i;
+    while((i=buf.indexOf('\n\n'))>=0){ const line=buf.slice(0,i); buf=buf.slice(i+2);
+      if(line.startsWith('data: ')){ try{onEvent(JSON.parse(line.slice(6)));}catch(e){} } }
+  }
 }
 
 // ---- LIVE TURN --------------------------------------------------------------
@@ -2010,7 +2144,7 @@ async function showProjectPicker(chatId){
   _projPickChatId=chatId;
   const body=$('#projectModalBody'); body.innerHTML='';
   if(!state.projects.length){
-    body.innerHTML='<div style="color:var(--text-dim);font-size:12px;padding:8px">No projects yet. Create one below.</div>';
+     body.innerHTML='<div class="empty-hint md">No projects yet. Create one below.</div>';
   } else {
     state.projects.forEach(p=>{
       const d=document.createElement('div');
@@ -2081,7 +2215,7 @@ function renderSessions(){
   projGrp.appendChild(projHead);
   const projBody=document.createElement('div'); projBody.className='sess-group-chats'+(state._openProjectsRoot?' open':'');
   if(!state.projects.length){
-    projBody.innerHTML='<div style="color:var(--text-dim);font-size:9px;padding:6px 22px">No projects yet</div>';
+     projBody.innerHTML='<div class="empty-hint">No projects yet</div>';
   } else {
     state.projects.forEach(p=>{
       const chats=projChats[p.id]||[];
@@ -2098,7 +2232,7 @@ function renderSessions(){
       pGrp.appendChild(pHead);
       const pBody=document.createElement('div'); pBody.className='sess-group-chats'+(isOpen?' open':'');
       chats.forEach(c=>{ pBody.appendChild(makeChatItem(c)); });
-      if(!chats.length) pBody.innerHTML='<div style="color:var(--text-dim);font-size:9px;padding:6px 22px">No chats</div>';
+      if(!chats.length) pBody.innerHTML='<div class="empty-hint">No chats</div>';
       pGrp.appendChild(pBody);
       projBody.appendChild(pGrp);
     });
@@ -2116,12 +2250,12 @@ function renderSessions(){
   chatGrp.appendChild(chatHead);
   const chatBody=document.createElement('div'); chatBody.className='sess-group-chats'+(state._openUnaffiliated!==false?' open':'');
   if(!unaffiliated.length){
-    chatBody.innerHTML='<div style="color:var(--text-dim);font-size:9px;padding:6px 22px">No chats yet</div>';
+    chatBody.innerHTML='<div class="empty-hint">No chats yet</div>';
   } else {
     unaffiliated.forEach(c=>{ chatBody.appendChild(makeChatItem(c)); });
   }
   chatGrp.appendChild(chatBody);
-  list.appendChild(chatGrp);
+  item.innerHTML='<span class="ci-arrow">&#9658;</span><span class="ci-title">'+esc(c.title)+'</span><button class="ci-menu-btn" title="Menu">&#8942;</button>';
 }
 function makeChatItem(c){
   const item=document.createElement('div'); item.className='chat-item-j'+(c.id===state.currentId?' active':'');
@@ -2246,14 +2380,7 @@ async function send(text){
   catch(e){ clearThinking(); addNote('CONNECTION FAILURE',true); finishTurn(); return; }
   if(!res||!res.ok||!res.body){ clearThinking(); addNote('REQUEST FAILED: '+(res?res.status:'no response'),true); finishTurn(); return; }
   try{
-    const reader=res.body.getReader(), dec=new TextDecoder(); let buf='';
-    while(true){
-      let chunk; try{chunk=await reader.read();}catch(e){break;}
-      if(chunk.done) break;
-      buf+=dec.decode(chunk.value,{stream:true}); let i;
-      while((i=buf.indexOf('\n\n'))>=0){ const line=buf.slice(0,i); buf=buf.slice(i+2);
-        if(line.startsWith('data: ')){ try{handle(JSON.parse(line.slice(6)));}catch(e){} } }
-    }
+    await readSSE(res, handle);
   }catch(e){ console.error('Stream read error:',e); }
   clearThinking(); if(state.busy) finishTurn();
 }
@@ -2269,8 +2396,7 @@ $('#logsBtn').onclick=openSessions;
 $('#newMissionBtn').onclick=newChat;
 $('#configBtn').onclick=openSettings;
 $('#voiceOutBtn').onclick=toggleVoiceOut;
-$('#viewportBtn').onclick=toggleViewport;
-$('#vpClearBtn').onclick=clearViewport;
+
 $('#closeSessionsBtn').onclick=closeSessions;
 $('#newProjectModalClose').onclick=closeNewProjectModal;
 $('#newProjectCancel').onclick=closeNewProjectModal;
@@ -2302,8 +2428,7 @@ document.addEventListener('keydown',e=>{
   }
 });
 
-// start collapsed viewport; restore persisted prefs
-$('#viewportPanel').classList.add('collapsed');
+
 try{
   state.voiceName=localStorage.getItem('cagentic_voice')||'';
   if(localStorage.getItem('cagentic_voiceout')==='1') toggleVoiceOut();
