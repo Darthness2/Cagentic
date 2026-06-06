@@ -2251,6 +2251,7 @@ function renderSessions(){
     unaffiliated.forEach(c=>{ chatBody.appendChild(makeChatItem(c)); });
   }
   chatGrp.appendChild(chatBody);
+  list.appendChild(chatGrp);
 }
 function makeChatItem(c){
   const item=document.createElement('div'); item.className='chat-item-j'+(c.id===state.currentId?' active':'');
