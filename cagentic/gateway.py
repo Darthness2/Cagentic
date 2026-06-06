@@ -66,14 +66,27 @@ Panel schemas (pick the type that fits; all fields optional except shown):
   {"panel":"pie","title":"...","labels":["A","B","C"],"values":[40,35,25]}
   {"panel":"clear"}   ← closes all floating windows when you want a fresh display
 
+Interactive panels (these render INLINE in the conversation, not as floating
+windows — the user clicks them and their choice is sent back to you as a reply):
+  {"panel":"actions","title":"...","buttons":[{"label":"Yes, proceed","prompt":"Yes, go ahead"},{"label":"Cancel","prompt":"Cancel that"}]}
+  {"panel":"choices","title":"...","prompt":"I choose ","options":["Red","Green","Blue"]}
+  {"panel":"form","title":"...","fields":[{"name":"city","label":"City","placeholder":"e.g. Paris"}],"submit":"What's the weather in {city}?","button":"Check"}
+  {"panel":"checklist","title":"...","items":["First step","Second step","Third step"]}
+
 Rules:
 - Emit `hud` blocks ONLY for things worth visualizing. Don't wrap every reply.
 - Each block = exactly one JSON object, valid JSON, double quotes.
 - Use charts (bar/line/pie) for numeric comparisons, trends, and distributions.
+- Use interactive panels when you want the user to pick, confirm, or fill in
+  something — clicking a button/choice or submitting a form sends that text
+  back to you as their next message, so phrase prompts as the user would reply.
+- For `form`, the `submit` string is a template; {name} placeholders are filled
+  with the matching field values when the user submits.
 - Emit {"panel":"clear"} before new panels when replacing the previous display.
 - After tool calls that return structured data, a matching panel is a nice touch.
 - Still write a brief natural-language reply alongside the panels.
-- Panels appear as draggable floating windows the user can move around freely.
+- Data panels appear as draggable floating windows; interactive panels appear
+  inline in the chat so the user can act on them in context.
 """
 
 
@@ -787,6 +800,7 @@ _HTML = """<!doctype html>
 <!-- Confirm modal -->
 <div id="confirmModal" class="modal hidden">
   <div class="modal-card sm">
+    <div class="modal-head">
       <span id="confirmTitle" class="modal-title">Confirm</span>
       <button id="confirmClose" class="icon-btn">&#10005;</button>
     </div>
@@ -905,6 +919,11 @@ _CSS = """
   --panel-bg: rgba(34,27,42,.88);
   --grid:     rgba(240,168,122,.03);
   --mono: "Courier New", Consolas, monospace;
+  --ease: cubic-bezier(.22,.61,.36,1);
+  --ease-out: cubic-bezier(.16,1,.3,1);
+}
+@media (prefers-reduced-motion: reduce) {
+  *, *::before, *::after { animation-duration: .001ms !important; animation-iteration-count: 1 !important; transition-duration: .001ms !important; }
 }
 * { box-sizing: border-box; margin: 0; padding: 0; }
 html, body { height: 100%; overflow: hidden; }
@@ -988,9 +1007,10 @@ body {
   background: var(--accent-dim); border: 1px solid var(--border);
   color: var(--accent); font: 9px var(--mono); cursor: pointer;
   padding: 4px 11px; letter-spacing: .12em; text-transform: uppercase;
-  transition: background .15s, border-color .15s; white-space: nowrap;
+  transition: background .15s var(--ease), border-color .15s var(--ease), transform .1s var(--ease); white-space: nowrap;
 }
 .nav-btn:hover { background: rgba(240,168,122,.22); border-color: var(--border-h); }
+.nav-btn:active { transform: scale(.95); }
 .nav-btn.active { background: rgba(240,168,122,.28); border-color: var(--accent); color: #fff; }
 .nav-divider { width: 1px; height: 16px; background: var(--border); }
 .nav-spacer { flex: 1; }
@@ -1037,18 +1057,31 @@ body {
 }
 .quick-cards { display: grid; grid-template-columns: repeat(3, 1fr); gap: 10px; }
 .qcard {
+  position: relative; overflow: hidden;
   padding: 14px 16px; border: 1px solid var(--border);
   background: rgba(240,168,122,.03); cursor: pointer;
-  transition: background .15s, border-color .15s, transform .15s; text-align: left;
+  transition: background .2s var(--ease), border-color .2s var(--ease), transform .2s var(--ease), box-shadow .2s var(--ease);
+  text-align: left;
+  opacity: 0; animation: cardIn .4s var(--ease-out) forwards; animation-delay: calc(var(--i, 0) * 45ms);
 }
-.qcard:hover { background: rgba(240,168,122,.08); border-color: var(--border-h); transform: translateY(-2px); }
-.qcard-icon { font-size: 18px; margin-bottom: 7px; display: block; }
+.qcard::after {
+  content: ''; position: absolute; left: 0; top: 0; height: 100%; width: 2px;
+  background: var(--accent); opacity: 0; transform: scaleY(.3);
+  transition: opacity .2s var(--ease), transform .25s var(--ease);
+}
+.qcard:hover { background: rgba(240,168,122,.08); border-color: var(--border-h); transform: translateY(-3px); box-shadow: 0 6px 22px rgba(0,0,0,.35); }
+.qcard:hover::after { opacity: 1; transform: scaleY(1); }
+.qcard:active { transform: translateY(-1px) scale(.99); }
+@keyframes cardIn { from { opacity: 0; transform: translateY(10px); } to { opacity: 1; transform: translateY(0); } }
+.qcard-icon { font-size: 18px; margin-bottom: 7px; display: block; transition: transform .2s var(--ease); }
+.qcard:hover .qcard-icon { transform: scale(1.12); }
 .qcard-title { font-size: 11px; color: #d8c8e0; letter-spacing: .05em; display: block; margin-bottom: 3px; }
 .qcard-sub   { font-size: 9px;  color: var(--text-2); letter-spacing: .04em; line-height: 1.5; display: block; }
 
 /* messages */
-.msg-row { margin: 10px 0; animation: fadeIn .25s ease; }
-@keyframes fadeIn { from { opacity: 0; transform: translateY(5px); } }
+.msg-row { margin: 10px 0; animation: messageIn .32s var(--ease-out) both; }
+@keyframes messageIn { from { opacity: 0; transform: translateY(8px); } to { opacity: 1; transform: translateY(0); } }
+.msg-row.user .bubble { transition: background .2s var(--ease), border-color .2s var(--ease); }
 .msg-row.user { display: flex; flex-direction: column; align-items: flex-end; }
 .msg-row.user .bubble {
   background: rgba(142,100,120,.28); border: 1px solid rgba(240,168,122,.3);
@@ -1080,8 +1113,9 @@ body {
   border: 1px solid var(--accent); display: flex; align-items: center;
   justify-content: center; color: var(--accent); font-size: 11px;
   box-shadow: 0 0 10px var(--accent-glow); background: rgba(240,168,122,.05);
-  font-weight: bold;
+  font-weight: bold; animation: avatarGlow 4s ease-in-out infinite;
 }
+@keyframes avatarGlow { 0%,100% { box-shadow: 0 0 8px var(--accent-glow); } 50% { box-shadow: 0 0 16px var(--accent-glow); } }
 .msg-body { flex: 1; min-width: 0; font-size: 12px; color: var(--text); line-height: 1.65; }
 .msg-body p { margin: 0 0 9px; }
 .msg-body p:last-child { margin: 0; }
@@ -1107,8 +1141,12 @@ body {
   display: flex; align-items: center; gap: 8px; padding: 7px 12px;
   margin: 6px 0; font-size: 11px; border: 1px solid var(--border);
   background: rgba(34,27,42,.85); letter-spacing: .04em;
-  border-left: 2px solid var(--text-dim); transition: border-color .2s;
+  border-left: 2px solid var(--text-dim);
+  transition: border-color .25s var(--ease), background .25s var(--ease);
+  animation: messageIn .3s var(--ease-out) both;
 }
+.tool-row .tool-icon { transition: transform .2s var(--ease); }
+.tool-row.ok .tool-icon, .tool-row.bad .tool-icon { transform: scale(1.05); }
 .tool-row .tname { color: #d8c8e0; font-weight: 600; }
 .tool-row .tsum  { color: var(--text-2); flex: 1; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; font-family: var(--mono); font-size: 10px; }
 .tool-row .tres  { margin-left: auto; }
@@ -1118,7 +1156,6 @@ body {
 .tool-row.bad { border-left-color: var(--hot); }
 .tool-row.pending .tres { color: var(--warn); animation: pulse 1s ease infinite; }
 .tool-row.pending { border-color: rgba(255,170,0,.3); border-left-color: var(--warn); background: rgba(255,170,0,.04); }
-@keyframes pulse { 50% { opacity: .3; } }
 @keyframes pulse { 50% { opacity: .3; } }
 
 /* thinking */
@@ -1161,8 +1198,9 @@ body {
   background: rgba(22,17,24,.92); border: 1px solid var(--border-h);
   box-shadow: 0 4px 30px rgba(0,0,0,.55), 0 0 20px rgba(240,168,122,.06);
   display: flex; flex-direction: column;
-  animation: hudWinIn .3s ease;
+  animation: hudWinIn .35s var(--ease-out);
   backdrop-filter: blur(6px);
+  transition: box-shadow .25s var(--ease);
 }
 .hud-win-resize {
   position: absolute; bottom: 0; right: 0;
@@ -1178,8 +1216,8 @@ body {
   border-bottom: 2px solid var(--text-dim);
   opacity: 0.4;
 }
-.hud-window.resizing { opacity: .85; box-shadow: 0 8px 40px rgba(0,0,0,.7), 0 0 30px rgba(240,168,122,.12); }
-@keyframes hudWinIn { from { opacity: 0; transform: scale(.92) translateY(10px); } }
+.hud-window.resizing { opacity: .9; box-shadow: 0 8px 40px rgba(0,0,0,.7), 0 0 30px rgba(240,168,122,.12); }
+@keyframes hudWinIn { from { opacity: 0; transform: scale(.9) translateY(14px); } to { opacity: 1; transform: scale(1) translateY(0); } }
 .hud-win-head {
   display: flex; align-items: center; justify-content: space-between;
   padding: 7px 12px; border-bottom: 1px solid var(--border);
@@ -1243,6 +1281,89 @@ body {
   linear-gradient(90deg, rgba(240,168,122,.08) 1px, transparent 1px); background-size: 22px 22px; }
 .vp-map .mlabel { position: absolute; bottom: 6px; left: 8px; font-size: 8.5px; color: var(--ok); letter-spacing: .06em; }
 
+/* ---- INTERACTIVE PANELS (inline, clickable) ------------------------------- */
+.ix-panel {
+  margin: 10px 0 12px; padding: 13px 15px;
+  border: 1px solid var(--border-h); border-left: 2px solid var(--accent);
+  background: linear-gradient(180deg, rgba(240,168,122,.05), rgba(34,27,42,.55));
+  position: relative; animation: messageIn .32s var(--ease-out) both;
+}
+.ix-panel::before {
+  content: ''; position: absolute; top: -1px; left: 0; width: 40px; height: 1px;
+  background: linear-gradient(90deg, var(--accent), transparent);
+}
+.ix-title {
+  font-size: 9px; color: var(--accent); letter-spacing: .14em; text-transform: uppercase;
+  margin-bottom: 11px; text-shadow: 0 0 8px var(--accent-glow);
+}
+.ix-panel.ix-used { opacity: .62; border-left-color: var(--text-dim); }
+.ix-panel.ix-used::before { background: linear-gradient(90deg, var(--ok), transparent); }
+
+/* action buttons */
+.ix-actions-row { display: flex; flex-wrap: wrap; gap: 9px; }
+.ix-btn {
+  flex: 0 1 auto; padding: 9px 16px; cursor: pointer;
+  border: 1px solid var(--accent); background: rgba(240,168,122,.1);
+  color: var(--accent); font: 10px var(--mono); letter-spacing: .08em;
+  text-transform: uppercase; position: relative; overflow: hidden;
+  transition: background .18s var(--ease), box-shadow .2s var(--ease), transform .1s var(--ease), color .18s var(--ease);
+}
+.ix-btn:hover { background: rgba(240,168,122,.24); box-shadow: 0 4px 18px rgba(240,168,122,.22); transform: translateY(-1px); }
+.ix-btn:active { transform: translateY(0) scale(.97); }
+.ix-btn.ix-active { background: var(--accent); color: #161118; border-color: var(--accent); }
+.ix-btn:disabled { cursor: default; opacity: .5; box-shadow: none; transform: none; }
+.ix-btn:disabled:hover { background: rgba(240,168,122,.1); box-shadow: none; transform: none; }
+
+/* choices list */
+.ix-choices-list { display: flex; flex-direction: column; gap: 6px; }
+.ix-choice {
+  display: flex; align-items: center; gap: 9px; text-align: left; width: 100%;
+  padding: 9px 13px; cursor: pointer; color: var(--text);
+  border: 1px solid var(--border); background: rgba(240,168,122,.03);
+  font: 11px var(--mono); letter-spacing: .03em;
+  transition: background .18s var(--ease), border-color .18s var(--ease), padding-left .18s var(--ease), color .18s var(--ease);
+}
+.ix-choice .ix-choice-mark { color: var(--accent); transition: transform .18s var(--ease); }
+.ix-choice:hover { background: rgba(240,168,122,.1); border-color: var(--border-h); padding-left: 18px; color: #fff; }
+.ix-choice:hover .ix-choice-mark { transform: translateX(2px); }
+.ix-choice:active { background: rgba(240,168,122,.18); }
+.ix-choice.ix-active { border-color: var(--accent); background: rgba(240,168,122,.16); color: var(--accent); }
+.ix-choice:disabled { cursor: default; opacity: .55; }
+.ix-choice:disabled:hover { background: rgba(240,168,122,.03); padding-left: 13px; color: var(--text); }
+
+/* form */
+.ix-form-fields { display: flex; flex-direction: column; gap: 10px; margin-bottom: 11px; }
+.ix-field { display: flex; flex-direction: column; gap: 4px; }
+.ix-flabel { font-size: 9px; color: var(--text-2); letter-spacing: .1em; text-transform: uppercase; }
+.ix-input {
+  width: 100%; background: rgba(22,17,24,.7); border: 1px solid var(--border-h);
+  color: var(--text); padding: 8px 10px; font: 12px var(--mono); letter-spacing: .03em;
+  transition: border-color .18s var(--ease), box-shadow .18s var(--ease);
+}
+.ix-input:focus { outline: 0; border-color: var(--accent); box-shadow: 0 0 14px rgba(240,168,122,.15); }
+.ix-input:disabled { opacity: .55; }
+.ix-submit {
+  padding: 9px 20px; cursor: pointer; border: 1px solid var(--accent);
+  background: rgba(240,168,122,.12); color: var(--accent); font: 10px var(--mono);
+  letter-spacing: .14em; text-transform: uppercase;
+  transition: background .18s var(--ease), box-shadow .2s var(--ease), transform .1s var(--ease);
+}
+.ix-submit:hover { background: rgba(240,168,122,.26); box-shadow: 0 4px 18px rgba(240,168,122,.22); }
+.ix-submit:active { transform: scale(.97); }
+.ix-submit:disabled { cursor: default; opacity: .5; box-shadow: none; transform: none; }
+
+/* checklist */
+.ix-checklist-list { display: flex; flex-direction: column; gap: 3px; }
+.ix-check { display: flex; align-items: center; gap: 10px; padding: 6px 4px; cursor: pointer; user-select: none; font: 11px var(--mono); color: var(--text-2); transition: color .18s var(--ease); }
+.ix-check:hover { color: var(--text); }
+.ix-check input { position: absolute; opacity: 0; width: 0; height: 0; }
+.ix-box { width: 15px; height: 15px; flex-shrink: 0; border: 1px solid var(--border-h); background: rgba(240,168,122,.04); position: relative; transition: background .18s var(--ease), border-color .18s var(--ease); }
+.ix-box::after { content: '\2713'; position: absolute; inset: 0; display: flex; align-items: center; justify-content: center; font-size: 11px; color: #161118; opacity: 0; transform: scale(.4); transition: opacity .18s var(--ease), transform .18s var(--ease); }
+.ix-check.checked .ix-box { background: var(--accent); border-color: var(--accent); box-shadow: 0 0 10px var(--accent-glow); }
+.ix-check.checked .ix-box::after { opacity: 1; transform: scale(1); }
+.ix-check.checked .ix-clabel { color: var(--text-dim); text-decoration: line-through; text-decoration-color: var(--text-dim); }
+.ix-clabel { transition: color .18s var(--ease); }
+
 /* ---- CMD AREA -------------------------------------------------------------- */
 .cmd-area { flex-shrink: 0; padding: 10px 20px 12px; border-top: 1px solid var(--border); background: rgba(22,17,24,.7); }
 .cmd-box {
@@ -1267,10 +1388,12 @@ body {
 .exec-btn {
   flex-shrink: 0; padding: 7px 18px; border: 1px solid var(--accent);
   background: rgba(240,168,122,.1); color: var(--accent); font: 10px var(--mono);
-  cursor: pointer; letter-spacing: .16em; text-transform: uppercase; transition: background .15s;
+  cursor: pointer; letter-spacing: .16em; text-transform: uppercase;
+  transition: background .15s var(--ease), box-shadow .2s var(--ease), transform .1s var(--ease);
 }
-.exec-btn:hover    { background: rgba(240,168,122,.24); }
-.exec-btn:disabled { opacity: .28; cursor: default; }
+.exec-btn:hover    { background: rgba(240,168,122,.24); box-shadow: 0 0 18px rgba(240,168,122,.25); }
+.exec-btn:active   { transform: scale(.96); }
+.exec-btn:disabled { opacity: .28; cursor: default; box-shadow: none; transform: none; }
 .cmd-footer { display: flex; justify-content: space-between; align-items: center; max-width: 1000px; margin: 5px auto 0; font-size: 9px; color: var(--text-dim); letter-spacing: .08em; }
 .busy-label { color: var(--ok); animation: pulse 1.2s ease infinite; }
 
@@ -1506,31 +1629,113 @@ function extractHud(text){
 }
 function stripHud(text){ return (text||'').replace(HUD_RX,'').trim(); }
 
-function renderHudPanels(text){
+// Panel types that render inline in the chat and the user can act on.
+const INTERACTIVE_TYPES=new Set(['actions','choices','form','checklist']);
+function renderPanels(text){
   const found=extractHud(text);
   if(!found.length) return;
   // Handle clear directives first
   found.forEach(({obj})=>{ if((obj.panel||'').toLowerCase()==='clear') clearViewport(); });
-  const nonClear=found.filter(({obj})=>(obj.panel||'').toLowerCase()!=='clear');
-  if(!nonClear.length) return;
   const layer=$('#windowLayer');
-  nonClear.forEach(({raw,obj})=>{
+  found.forEach(({raw,obj})=>{
+    const type=(obj.panel||'').toLowerCase();
+    if(type==='clear') return;
     if(state.renderedPanels.has(raw)) return;
-    state.renderedPanels.add(raw);
+    // Interactive panels live inline in the conversation thread.
+    if(INTERACTIVE_TYPES.has(type)){
+      const el=buildInteractive(obj); if(!el) return;
+      state.renderedPanels.add(raw);
+      getThread().appendChild(el); scrollDown();
+      return;
+    }
+    // Data panels render as draggable floating windows.
     const inner=buildPanelInner(obj); if(!inner) return;
+    state.renderedPanels.add(raw);
     const pos=_nextWinPos();
     const win=document.createElement('div'); win.className='hud-window';
     win.style.left=pos.x+'px'; win.style.top=pos.y+'px';
-    const title=obj.title||((obj.panel||'').charAt(0).toUpperCase()+(obj.panel||'').slice(1));
+    const title=obj.title||(type.charAt(0).toUpperCase()+type.slice(1));
     win.innerHTML='<div class="hud-win-head"><span class="hud-win-title">'+esc(title)+'</span>'+
       '<button class="hud-win-close" title="Close">&times;</button></div>'+
       '<div class="hud-win-body">'+inner+'</div>'+
       '<div class="hud-win-resize"></div>';
-    win.querySelector('.hud-win-close').addEventListener('mousedown',e=>{e.stopPropagation();win.remove();});
+    win.querySelector('.hud-win-close').addEventListener('pointerdown',e=>{e.stopPropagation();win.remove();});
     layer.appendChild(win);
-    _makeDraggable(win);
-    _makeResizable(win);
+    _initWindow(win);
   });
+}
+// ---- INTERACTIVE WIDGETS ----------------------------------------------------
+function _sendFromWidget(text){
+  text=(text||'').trim();
+  if(!text||state.busy) return;
+  if(log.querySelector('.j-empty')) clearLog();
+  send(text);
+}
+function _markUsed(wrap, activeEl){
+  wrap.classList.add('ix-used');
+  if(activeEl) activeEl.classList.add('ix-active');
+  wrap.querySelectorAll('button,input').forEach(el=>{ el.disabled=true; });
+}
+function buildInteractive(p){
+  const type=(p.panel||'').toLowerCase();
+  const wrap=document.createElement('div');
+  wrap.className='ix-panel ix-'+type;
+  const title=p.title?'<div class="ix-title">'+esc(p.title)+'</div>':'';
+  if(type==='actions'){
+    const btns=(p.buttons||p.items||[]);
+    wrap.innerHTML=title+'<div class="ix-actions-row">'+btns.map((b,i)=>{
+      const label=typeof b==='string'?b:(b.label||b.prompt||'');
+      return '<button class="ix-btn" data-i="'+i+'">'+esc(label)+'</button>';
+    }).join('')+'</div>';
+    wrap.querySelectorAll('.ix-btn').forEach(btn=>{ btn.onclick=()=>{
+      const b=btns[+btn.dataset.i];
+      const prompt=typeof b==='string'?b:(b.prompt||b.send||b.label||'');
+      _markUsed(wrap,btn); _sendFromWidget(prompt);
+    }; });
+  } else if(type==='choices'){
+    const opts=(p.options||p.items||[]); const pre=p.prompt||'';
+    wrap.innerHTML=title+'<div class="ix-choices-list">'+opts.map((o,i)=>{
+      const label=typeof o==='string'?o:(o.label||'');
+      return '<button class="ix-choice" data-i="'+i+'"><span class="ix-choice-mark">&#9656;</span>'+esc(label)+'</button>';
+    }).join('')+'</div>';
+    wrap.querySelectorAll('.ix-choice').forEach(btn=>{ btn.onclick=()=>{
+      const o=opts[+btn.dataset.i];
+      const val=typeof o==='string'?o:(o.label||'');
+      const prompt=(typeof o==='object'&&o.prompt)?o.prompt:(pre+val);
+      _markUsed(wrap,btn); _sendFromWidget(prompt);
+    }; });
+  } else if(type==='form'){
+    const fields=(p.fields||[]); const btnLabel=p.button||'Submit';
+    wrap.innerHTML=title+'<div class="ix-form-fields">'+fields.map((f,i)=>{
+      const name=f.name||('field'+i);
+      const lab=f.label?'<label class="ix-flabel">'+esc(f.label)+'</label>':'';
+      return '<div class="ix-field">'+lab+'<input class="ix-input" data-name="'+esc(name)+'" placeholder="'+esc(f.placeholder||'')+'" value="'+esc(f.value||'')+'"/></div>';
+    }).join('')+'</div><button class="ix-submit">'+esc(btnLabel)+'</button>';
+    const submit=()=>{
+      const vals={};
+      wrap.querySelectorAll('.ix-input').forEach(inp=>{ vals[inp.dataset.name]=inp.value.trim(); });
+      let out=p.submit||p.prompt||'';
+      if(out) out=out.replace(/\{(\w+)\}/g,(m,k)=>vals[k]!==undefined?vals[k]:m);
+      else out=Object.values(vals).filter(Boolean).join(' ');
+      _markUsed(wrap,wrap.querySelector('.ix-submit')); _sendFromWidget(out);
+    };
+    wrap.querySelector('.ix-submit').onclick=submit;
+    wrap.querySelectorAll('.ix-input').forEach(inp=>inp.addEventListener('keydown',e=>{
+      if(e.key==='Enter'){ e.preventDefault(); submit(); }
+    }));
+  } else if(type==='checklist'){
+    const items=(p.items||[]);
+    wrap.innerHTML=title+'<div class="ix-checklist-list">'+items.map(it=>{
+      const label=typeof it==='string'?it:(it.label||'');
+      const done=(typeof it==='object'&&it.done);
+      return '<label class="ix-check'+(done?' checked':'')+'"><input type="checkbox" '+(done?'checked':'')+'/><span class="ix-box"></span><span class="ix-clabel">'+esc(label)+'</span></label>';
+    }).join('')+'</div>';
+    wrap.querySelectorAll('.ix-check').forEach(c=>{
+      const cb=c.querySelector('input');
+      cb.addEventListener('change',()=>c.classList.toggle('checked',cb.checked));
+    });
+  } else { return null; }
+  return wrap;
 }
 function buildPanelInner(p){
   if(!p||typeof p!=='object') return null;
@@ -1673,58 +1878,41 @@ function _nextWinPos(){
   _winCascade++;
   return {x: Math.min(lw-260, 40+off), y: Math.min(lh-200, 60+off)};
 }
-function _makeDraggable(win){
+// One shared pointer manager drives every window's drag + resize, so windows
+// don't each leak a set of document-level listeners. Pointer events unify
+// mouse and touch in a single path.
+let _drag=null; // {win, mode:'move'|'resize', sx, sy, ox, oy, ow, oh}
+function _initWindow(win){
   const head=win.querySelector('.hud-win-head');
-  let dragging=false, sx,sy,ox,oy;
-  function start(cx,cy){
-    dragging=true; sx=cx; sy=cy;
-    ox=parseInt(win.style.left)||0; oy=parseInt(win.style.top)||0;
-    win.classList.add('dragging');
-  }
-  function move(cx,cy){
-    if(!dragging) return;
-    win.style.left=(ox+cx-sx)+'px';
-    win.style.top=(oy+cy-sy)+'px';
-  }
-  function stop(){ if(dragging){ dragging=false; win.classList.remove('dragging'); } }
-  head.addEventListener('mousedown',e=>{
+  if(head) head.addEventListener('pointerdown',e=>{
     if(e.target.classList.contains('hud-win-close')) return;
-    start(e.clientX,e.clientY); e.preventDefault();
+    _drag={win, mode:'move', sx:e.clientX, sy:e.clientY,
+      ox:parseInt(win.style.left)||0, oy:parseInt(win.style.top)||0};
+    win.classList.add('dragging'); e.preventDefault();
   });
-  document.addEventListener('mousemove',e=>move(e.clientX,e.clientY));
-  document.addEventListener('mouseup',stop);
-  // touch support
-  head.addEventListener('touchstart',e=>{
-    if(e.target.classList.contains('hud-win-close')) return;
-    const t=e.touches[0]; start(t.clientX,t.clientY); e.preventDefault();
-  },{passive:false});
-  document.addEventListener('touchmove',e=>{
-    if(!dragging) return; const t=e.touches[0]; move(t.clientX,t.clientY);
-  },{passive:true});
-  document.addEventListener('touchend',stop);
-}
-function _makeResizable(win){
   const handle=win.querySelector('.hud-win-resize');
-  if(!handle) return;
-  let resizing=false, rsx,rsy,rsw,rsh;
-  function rstart(cx,cy){
-    resizing=true; rsx=cx; rsy=cy;
-    rsw=win.offsetWidth; rsh=win.offsetHeight;
-    win.classList.add('resizing');
-  }
-  function rmove(cx,cy){
-    if(!resizing) return;
-    win.style.width=Math.max(220,rsw+(cx-rsx))+'px';
-    win.style.height=Math.max(100,rsh+(cy-rsy))+'px';
-  }
-  function rstop(){ if(resizing){ resizing=false; win.classList.remove('resizing'); } }
-  handle.addEventListener('mousedown',e=>{ rstart(e.clientX,e.clientY); e.preventDefault(); e.stopPropagation(); });
-  document.addEventListener('mousemove',e=>rmove(e.clientX,e.clientY));
-  document.addEventListener('mouseup',rstop);
-  handle.addEventListener('touchstart',e=>{ const t=e.touches[0]; rstart(t.clientX,t.clientY); e.preventDefault(); e.stopPropagation(); },{passive:false});
-  document.addEventListener('touchmove',e=>{ if(!resizing) return; const t=e.touches[0]; rmove(t.clientX,t.clientY); },{passive:true});
-  document.addEventListener('touchend',rstop);
+  if(handle) handle.addEventListener('pointerdown',e=>{
+    _drag={win, mode:'resize', sx:e.clientX, sy:e.clientY,
+      ow:win.offsetWidth, oh:win.offsetHeight};
+    win.classList.add('resizing'); e.preventDefault(); e.stopPropagation();
+  });
 }
+document.addEventListener('pointermove',e=>{
+  if(!_drag) return;
+  const dx=e.clientX-_drag.sx, dy=e.clientY-_drag.sy;
+  if(_drag.mode==='move'){
+    _drag.win.style.left=(_drag.ox+dx)+'px';
+    _drag.win.style.top=(_drag.oy+dy)+'px';
+  } else {
+    _drag.win.style.width=Math.max(220,_drag.ow+dx)+'px';
+    _drag.win.style.height=Math.max(100,_drag.oh+dy)+'px';
+  }
+});
+document.addEventListener('pointerup',()=>{
+  if(!_drag) return;
+  _drag.win.classList.remove('dragging','resizing');
+  _drag=null;
+});
 function clearViewport(){
   state.renderedPanels.clear();
   _winCascade=0;
@@ -1732,8 +1920,8 @@ function clearViewport(){
   if(layer) layer.innerHTML='';
 }
 
-// bring window to front on click
-$('#windowLayer').addEventListener('mousedown',e=>{
+// bring window to front on interaction
+$('#windowLayer').addEventListener('pointerdown',e=>{
   const win=e.target.closest('.hud-window');
   if(win && !e.target.classList.contains('hud-win-close')){
     // move to end of DOM = top of stack
@@ -1750,12 +1938,13 @@ const QUICK = [
   {icon:'📝', title:'Take a note',     sub:'Remember something for later',        prompt:'Take a note: '},
   {icon:'⏰', title:'Set a reminder',  sub:'Add something to my reminder list',   prompt:'Add a reminder: '},
   {icon:'📂', title:'Browse files',    sub:'List or read files on your machine',  prompt:'List files in my current directory'},
+  {icon:'🎛️', title:'Interactive panel', sub:'Buttons & forms I can click',       prompt:'Show me an interactive panel with a few action buttons I can click'},
 ];
 function showEmpty() {
   clearLog();
   const wrap=document.createElement('div'); wrap.className='j-empty';
    wrap.innerHTML='<div class="j-empty-title">Select a chat or type a message</div><div class="quick-cards">'+
-    QUICK.map(q=>`<div class="qcard" data-prompt="${esc(q.prompt)}"><span class="qcard-icon">${q.icon}</span>`+
+    QUICK.map((q,i)=>`<div class="qcard" style="--i:${i}" data-prompt="${esc(q.prompt)}"><span class="qcard-icon">${q.icon}</span>`+
       `<span class="qcard-title">${esc(q.title)}</span><span class="qcard-sub">${esc(q.sub)}</span></div>`).join('')+'</div>';
   log.appendChild(wrap);
   wrap.querySelectorAll('.qcard').forEach(c=>{ c.onclick=()=>{ input.value=c.dataset.prompt; autoGrow(); input.focus(); }; });
@@ -1763,13 +1952,17 @@ function showEmpty() {
 
 // ---- RENDERING --------------------------------------------------------------
 let _userMsgIdx=0;
+const MSG_ACTIONS_HTML='<button class="msg-act-btn" data-act="resend" title="Resend">&#8635; resend</button><button class="msg-act-btn" data-act="edit" title="Edit">&#9998; edit</button><button class="msg-act-btn del-btn" data-act="delete" title="Delete">&#10005; delete</button>';
+function wireMsgActions(row, idx, text){
+  row.querySelector('[data-act="resend"]').onclick=()=>resendMsg(idx,row);
+  row.querySelector('[data-act="edit"]').onclick=()=>editMsg(idx,row,text);
+  row.querySelector('[data-act="delete"]').onclick=()=>deleteMsg(idx,row);
+}
 function addUser(text){
   const idx=_userMsgIdx++;
   const r=document.createElement('div'); r.className='msg-row user'; r.dataset.idx=idx;
-  r.innerHTML='<div class="bubble">'+esc(text)+'</div><div class="msg-actions"><button class="msg-act-btn" data-act="resend" title="Resend">&#8635; resend</button><button class="msg-act-btn" data-act="edit" title="Edit">&#9998; edit</button><button class="msg-act-btn del-btn" data-act="delete" title="Delete">&#10005; delete</button></div>';
-  r.querySelector('[data-act="resend"]').onclick=()=>resendMsg(idx,r);
-  r.querySelector('[data-act="edit"]').onclick=()=>editMsg(idx,r,text);
-  r.querySelector('[data-act="delete"]').onclick=()=>deleteMsg(idx,r);
+  r.innerHTML='<div class="bubble">'+esc(text)+'</div><div class="msg-actions">'+MSG_ACTIONS_HTML+'</div>';
+  wireMsgActions(r, idx, text);
   getThread().appendChild(r); scrollDown();
 }
 // ---- DOM HELPERS (shared) ---------------------------------------------------
@@ -1836,10 +2029,8 @@ function editMsg(idx,row,origText){
   const cancel=()=>{
     row.classList.remove('editing');
     bubble.innerHTML=esc(origText);
-    actions.innerHTML='<button class="msg-act-btn" data-act="resend" title="Resend">&#8635; resend</button><button class="msg-act-btn" data-act="edit" title="Edit">&#9998; edit</button><button class="msg-act-btn del-btn" data-act="delete" title="Delete">&#10005; delete</button>';
-    row.querySelector('[data-act="resend"]').onclick=()=>resendMsg(idx,row);
-    row.querySelector('[data-act="edit"]').onclick=()=>editMsg(idx,row,origText);
-    row.querySelector('[data-act="delete"]').onclick=()=>deleteMsg(idx,row);
+    actions.innerHTML=MSG_ACTIONS_HTML;
+    wireMsgActions(row, idx, origText);
   };
   actions.querySelector('.edit-save').onclick=save;
   actions.querySelector('.edit-cancel').onclick=cancel;
@@ -1943,7 +2134,7 @@ function handle(ev){
     if(!live.body&&stripHud(txt).trim()){live.body=addAssistant(md(stripHud(txt)));live.raw=txt;}
     else if(live.body){ live.raw=txt; live.body.innerHTML=md(stripHud(txt)); }
     if(live.body) live.body.classList.remove('cursor');
-    renderHudPanels(txt);
+    renderPanels(txt);
     if(state.voiceOut){ const p=plain(txt); if(p) speak(p); }
   } else if(k==='plan'){
     const p=document.createElement('div'); p.className='plan-box';
@@ -2274,7 +2465,7 @@ function setCurrent(cur){
     else {
       const html=md(stripHud(m.content));
       const hasContent=html&&html.trim();
-      if(hasContent){ addAssistant(html,m.tools); renderHudPanels(m.content); }
+      if(hasContent){ addAssistant(html,m.tools); renderPanels(m.content); }
       else { (m.tools||[]).forEach(t=>addToolRow({name:t},true)); }
     }
   });
