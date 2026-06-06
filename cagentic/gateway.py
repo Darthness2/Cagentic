@@ -1236,7 +1236,7 @@ body {
 /* ---- CMD AREA -------------------------------------------------------------- */
 .cmd-area { flex-shrink: 0; padding: 10px 20px 12px; border-top: 1px solid var(--border); background: rgba(22,17,24,.7); }
 .cmd-box {
-  display: flex; align-items: flex-end; gap: 10px;
+  display: flex; align-items: center; gap: 10px;
   border: 1px solid var(--border-h); padding: 9px 12px; background: rgba(34,27,42,.8);
   box-shadow: 0 0 30px rgba(240,168,122,.07), inset 0 0 25px rgba(0,0,0,.5);
   max-width: 1000px; margin: 0 auto;
