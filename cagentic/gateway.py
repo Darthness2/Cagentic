@@ -1879,6 +1879,7 @@ function addToolRow(t, done){
   const row=document.createElement('div'); row.className='tool-row'+(done?'':' pending');
   row.dataset.name=t.name||'';
   const isCmd=(t.name||'').startsWith('run_')||(t.name||'').startsWith('bash');
+  const icon=isCmd?'&#9654;':'&#9889;';
   const iconColor=isCmd?'var(--warn)':'var(--accent)';
   row.innerHTML='<span class="tool-icon" style="color:'+iconColor+'">'+icon+'</span>'+
     '<span class="tname">'+esc(t.name||'')+'</span>'+
