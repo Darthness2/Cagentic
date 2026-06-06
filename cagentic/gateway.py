@@ -1797,7 +1797,7 @@ function streamEdit(idx,text){
   live={body:null,raw:'',toolRow:null,thinking:null,turnStart:null};
   showThinking(); setOrbLabel('Thinking\u2026');
   fetch('/api/chat/edit',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({index:idx,message:text})})
-  .then(r=>readSSE(r,handle))
+  .then(r=>{ if(!r.ok||!r.body) throw new Error(r.status); return readSSE(r,handle); })
   .then(()=>{clearThinking();if(state.busy)finishTurn();})
   .catch(()=>{clearThinking();addNote('CONNECTION FAILURE',true);finishTurn();});
 }
@@ -1882,7 +1882,6 @@ function addToolRow(t, done){
   const iconColor=isCmd?'var(--warn)':'var(--accent)';
   row.innerHTML='<span class="tool-icon" style="color:'+iconColor+'">'+icon+'</span>'+
     '<span class="tname">'+esc(t.name||'')+'</span>'+
-    '<span class="tname">'+esc(t.name||'')+'</span>'+
     (t.summary?'<span class="tsum">'+esc(t.summary)+'</span>':'')+
     (done?'':'<span class="tres">RUNNING&#8230;</span>');
   getThread().appendChild(row); scrollDown(); return row;
@@ -1907,6 +1906,7 @@ function showPermission(d){
 
 // ---- SSE STREAM READER (shared) -------------------------------------------
 async function readSSE(response, onEvent){
+  if(!response||!response.body) return;
   const reader=response.body.getReader(), dec=new TextDecoder(); let buf='';
   while(true){
     let chunk; try{chunk=await reader.read();}catch(e){break;}
@@ -2251,11 +2251,10 @@ function renderSessions(){
     unaffiliated.forEach(c=>{ chatBody.appendChild(makeChatItem(c)); });
   }
   chatGrp.appendChild(chatBody);
-  item.innerHTML='<span class="ci-arrow">&#9658;</span><span class="ci-title">'+esc(c.title)+'</span><button class="ci-menu-btn" title="Menu">&#8942;</button>';
 }
 function makeChatItem(c){
   const item=document.createElement('div'); item.className='chat-item-j'+(c.id===state.currentId?' active':'');
-  item.innerHTML='<span style="color:var(--accent);font-size:10px">&#9658;</span><span class="ci-title">'+esc(c.title)+'</span><button class="ci-menu-btn" title="Menu">&#8942;</button>';
+  item.innerHTML='<span class="ci-arrow">&#9658;</span><span class="ci-title">'+esc(c.title)+'</span><button class="ci-menu-btn" title="Menu">&#8942;</button>';
   item.querySelector('.ci-title').onclick=()=>loadChat(c.id);
   item.querySelector('.ci-menu-btn').onclick=e=>{ e.stopPropagation(); showCtx(e,c.id); };
   return item;
