@@ -1751,8 +1751,6 @@ const QUICK = [
   {icon:'⏰', title:'Set a reminder',  sub:'Add something to my reminder list',   prompt:'Add a reminder: '},
   {icon:'📂', title:'Browse files',    sub:'List or read files on your machine',  prompt:'List files in my current directory'},
 ];
-  {icon:'📁', title:'Browse files',    sub:'List or read files on your machine',  prompt:'List files in my current directory'},
-];
 function showEmpty() {
   clearLog();
   const wrap=document.createElement('div'); wrap.className='j-empty';
