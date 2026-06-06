@@ -5,8 +5,9 @@ and runs the full agent behind it: the same tools, notes, reminders, MCP
 servers, browser control — everything the terminal REPL can do.
 
 The app has a sidebar of saved chats, a settings panel, and streams each
-turn token-by-token. Tools that need approval surface an Approve / Deny
-prompt right in the page. Bound to localhost only.
+turn token-by-token. HUD panels appear as draggable floating windows.
+Tools that need approval surface an Approve / Deny prompt right in the
+page. Bound to localhost only.
 """
 from __future__ import annotations
 
@@ -38,14 +39,14 @@ def _clean(text: str) -> str:
     return text.strip()
 
 
-# Taught to the gateway's engine only — lets the model "summon" panels into
-# the viewport by emitting fenced ```hud blocks of JSON. The web
-# UI parses these out of the reply, renders them as holographic cards, and
+# Taught to the gateway's engine only — lets the model "summon" panels as
+# floating windows by emitting fenced ```hud blocks of JSON. The web
+# UI parses these out of the reply, renders them as draggable cards, and
 # strips them from the chat text. Purely optional sugar — plain replies still
 # work — but it makes the interface feel alive.
 _HUD_INSTRUCTIONS = """=== HUD Display ===
 You are speaking through a heads-up display. Besides your normal
-reply, you MAY render visual panels into the viewport by emitting one or more
+reply, you MAY render visual panels as floating windows by emitting one or more
 fenced code blocks with the language tag `hud`, each containing a single JSON
 object. Use them when a visual would help — comparisons, status, search hits,
 images, locations, key numbers, charts. Keep prose short when you show a panel.
@@ -63,7 +64,7 @@ Panel schemas (pick the type that fits; all fields optional except shown):
   {"panel":"bar","title":"...","labels":["Jan","Feb"],"values":[42,87],"color":"#f0a87a"}
   {"panel":"line","title":"...","labels":["Mon","Tue"],"datasets":[{"label":"CPU","values":[30,80],"color":"#f0a87a"}]}
   {"panel":"pie","title":"...","labels":["A","B","C"],"values":[40,35,25]}
-  {"panel":"clear"}   ← clears all current viewport panels when you want a fresh display
+  {"panel":"clear"}   ← closes all floating windows when you want a fresh display
 
 Rules:
 - Emit `hud` blocks ONLY for things worth visualizing. Don't wrap every reply.
@@ -72,6 +73,7 @@ Rules:
 - Emit {"panel":"clear"} before new panels when replacing the previous display.
 - After tool calls that return structured data, a matching panel is a nice touch.
 - Still write a brief natural-language reply alongside the panels.
+- Panels appear as draggable floating windows the user can move around freely.
 """
 
 
@@ -709,7 +711,7 @@ _HTML = """<!doctype html>
     <span class="nav-meta">SESSION <span id="jSession">--------</span></span>
     <div class="nav-spacer"></div>
     <button class="nav-btn toggle-btn" id="voiceOutBtn" title="Read replies aloud">[ &#128264; Voice: OFF ]</button>
-    <button class="nav-btn" id="viewportBtn" title="Toggle viewport">[ &#9707; VIEWPORT ]</button>
+  
     <div class="nav-divider"></div>
     <button class="nav-btn" id="configBtn">[ CONFIG ]</button>
   </div>
@@ -726,17 +728,9 @@ _HTML = """<!doctype html>
       </div>
       <div id="log" class="chat-log"></div>
     </div>
-
-    <aside class="viewport-panel" id="viewportPanel">
-      <div class="vp-head">
-        <span class="panel-hdr">&#123; Viewport &#125;</span>
-        <button class="icon-btn" id="vpClearBtn" title="Clear viewport">&#10005;</button>
-      </div>
-      <div class="vp-body" id="vpBody">
-        <div class="vp-empty">No active display<br/><span>Panels appear here</span></div>
-      </div>
-    </aside>
   </div>
+
+  <div id="windowLayer"></div>
 
   <div class="cmd-area">
     <div class="cmd-box" id="cmdBox">
@@ -1169,25 +1163,38 @@ body {
 .perm-btns .no     { background: transparent; color: var(--text-2); border-color: var(--border); }
 .perm-decided      { font-size: 10px; color: var(--text-dim); }
 
-/* ---- VIEWPORT PANEL -------------------------------------------------------- */
-.viewport-panel {
-  width: 340px; flex-shrink: 0; border-left: 1px solid var(--border);
-  background: rgba(22,17,24,.55); display: flex; flex-direction: column;
-  transition: width .3s ease, margin-right .3s ease;
+/* ---- FLOATING HUD WINDOWS -------------------------------------------------- */
+#windowLayer {
+  position: fixed; inset: 0; z-index: 170; pointer-events: none;
 }
-.viewport-panel.collapsed { width: 0; margin-right: -1px; overflow: hidden; border-left: 0; }
-.vp-head { display: flex; align-items: center; justify-content: space-between; padding: 9px 14px; border-bottom: 1px solid var(--border); flex-shrink: 0; }
-.vp-body { flex: 1; overflow-y: auto; padding: 12px; display: flex; flex-direction: column; gap: 12px; }
-.vp-empty { color: var(--text-dim); font-size: 9px; letter-spacing: .16em; text-align: center; margin: auto; line-height: 2; text-transform: uppercase; }
-.vp-empty span { color: var(--text-dim); opacity: .6; font-size: 8px; }
+.hud-window {
+  position: absolute; pointer-events: auto;
+  min-width: 220px; max-width: 420px;
+  background: rgba(22,17,24,.92); border: 1px solid var(--border-h);
+  box-shadow: 0 4px 30px rgba(0,0,0,.55), 0 0 20px rgba(240,168,122,.06);
+  display: flex; flex-direction: column;
+  animation: hudWinIn .3s ease;
+  backdrop-filter: blur(6px);
+}
+@keyframes hudWinIn { from { opacity: 0; transform: scale(.92) translateY(10px); } }
+.hud-win-head {
+  display: flex; align-items: center; justify-content: space-between;
+  padding: 7px 12px; border-bottom: 1px solid var(--border);
+  cursor: grab; user-select: none; flex-shrink: 0;
+}
+.hud-win-head:active { cursor: grabbing; }
+.hud-win-title { font-size: 9px; color: var(--accent); letter-spacing: .14em; text-transform: uppercase; text-shadow: 0 0 8px var(--accent-glow); }
+.hud-win-close { background: transparent; border: 0; color: var(--text-dim); cursor: pointer; font: 14px var(--mono); padding: 0 4px; line-height: 1; }
+.hud-win-close:hover { color: var(--accent); }
+.hud-window::before { content: ''; position: absolute; top: -1px; left: 12px; right: 12px; height: 1px; background: linear-gradient(90deg, transparent, var(--accent), transparent); }
+.hud-win-body { overflow-y: auto; padding: 12px; display: flex; flex-direction: column; gap: 8px; max-height: 60vh; }
+.hud-window.dragging { opacity: .85; box-shadow: 0 8px 40px rgba(0,0,0,.7), 0 0 30px rgba(240,168,122,.12); }
 
 /* viewport panels (rendered by model directives) */
 .vpanel {
-  border: 1px solid var(--border); background: var(--panel-bg);
-  padding: 11px 13px; position: relative; animation: vpIn .35s ease;
+  position: relative;
 }
-@keyframes vpIn { from { opacity: 0; transform: translateX(12px); } }
-.vpanel::before { content: ''; position: absolute; top: -1px; left: 12px; right: 12px; height: 1px; background: linear-gradient(90deg, transparent, var(--accent), transparent); }
+
 .vpanel-title { font-size: 9px; color: var(--accent); letter-spacing: .14em; text-transform: uppercase; margin-bottom: 9px; text-shadow: 0 0 8px var(--accent-glow); }
 .vp-stat-row { display: flex; justify-content: space-between; align-items: center; padding: 4px 0; border-bottom: 1px solid rgba(240,168,122,.06); font-size: 10px; }
 .vp-stat-row .l { color: var(--text-2); letter-spacing: .05em; }
@@ -1350,7 +1357,7 @@ body {
 ::-webkit-scrollbar-thumb:hover { background: rgba(240,168,122,.38); }
 
 @media (max-width: 900px) {
-  .viewport-panel { position: fixed; right: 0; top: 0; bottom: 0; z-index: 180; box-shadow: 0 0 40px rgba(0,0,0,.6); }
+  .hud-window { max-width: 90vw; }
   .j-sub { display: none; }
   .quick-cards { grid-template-columns: 1fr 1fr; }
 }
@@ -1489,17 +1496,25 @@ function renderHudPanels(text){
   found.forEach(({obj})=>{ if((obj.panel||'').toLowerCase()==='clear') clearViewport(); });
   const nonClear=found.filter(({obj})=>(obj.panel||'').toLowerCase()!=='clear');
   if(!nonClear.length) return;
-  ensureViewportOpen();
-  const body=$('#vpBody'); const empty=body.querySelector('.vp-empty'); if(empty) empty.remove();
+  const layer=$('#windowLayer');
   nonClear.forEach(({raw,obj})=>{
-    if(state.renderedPanels.has(raw)) return;     // dedupe across stream/final
+    if(state.renderedPanels.has(raw)) return;
     state.renderedPanels.add(raw);
-    const el=buildPanel(obj); if(el){ body.appendChild(el); body.scrollTop=body.scrollHeight; }
+    const inner=buildPanelInner(obj); if(!inner) return;
+    const pos=_nextWinPos();
+    const win=document.createElement('div'); win.className='hud-window';
+    win.style.left=pos.x+'px'; win.style.top=pos.y+'px';
+    const title=obj.title||((obj.panel||'').charAt(0).toUpperCase()+(obj.panel||'').slice(1));
+    win.innerHTML='<div class="hud-win-head"><span class="hud-win-title">'+esc(title)+'</span>'+
+      '<button class="hud-win-close" title="Close">&times;</button></div>'+
+      '<div class="hud-win-body">'+inner+'</div>';
+    win.querySelector('.hud-win-close').onclick=()=>win.remove();
+    layer.appendChild(win);
+    _makeDraggable(win);
   });
 }
-function buildPanel(p){
+function buildPanelInner(p){
   if(!p||typeof p!=='object') return null;
-  const wrap=document.createElement('div'); wrap.className='vpanel';
   const title=p.title?'<div class="vpanel-title">'+esc(p.title)+'</div>':'';
   let inner='';
   switch((p.panel||'').toLowerCase()){
@@ -1532,8 +1547,8 @@ function buildPanel(p){
       break;
     case 'alert':
       const lvl=(p.level||'info').toLowerCase();
-      return assign(wrap,'<div class="vp-alert '+lvl+'"><div class="at">'+esc(p.title||lvl.toUpperCase())+
-        '</div><div class="ax">'+esc(p.text||'')+'</div></div>');
+      return '<div class="vp-alert '+lvl+'"><div class="at">'+esc(p.title||lvl.toUpperCase())+
+        '</div><div class="ax">'+esc(p.text||'')+'</div></div>';
     case 'progress':
       inner=(p.items||[]).map(it=>{const pct=Math.max(0,Math.min(100,+it.pct||0));
         return '<div class="vp-prog-row"><div class="pl"><span>'+esc(it.label||'')+'</span><span>'+pct+'%</span></div>'+
@@ -1587,29 +1602,70 @@ function buildPanel(p){
       inner=`<svg viewBox="0 0 300 145" style="width:100%;height:auto">${slices}${legend}</svg>`; break; }
     default: return null;
   }
-  wrap.innerHTML=title+inner; return wrap;
+  return title+inner;
 }
-function assign(wrap,html){ wrap.innerHTML=html; return wrap; }
 
-// ---- VIEWPORT ---------------------------------------------------------------
-function ensureViewportOpen(){
-  const vp=$('#viewportPanel');
-  if(vp.classList.contains('collapsed')){ vp.classList.remove('collapsed'); $('#viewportBtn').classList.add('active'); }
+// ---- FLOATING HUD WINDOWS ----------------------------------------------------
+let _winCascade = 0;
+function _nextWinPos(){
+  const layer=$('#windowLayer');
+  const lw=layer.clientWidth, lh=layer.clientHeight;
+  const off=(_winCascade%8)*30;
+  _winCascade++;
+  return {x: Math.min(lw-260, 40+off), y: Math.min(lh-200, 60+off)};
 }
-function toggleViewport(){
-  const vp=$('#viewportPanel'); vp.classList.toggle('collapsed');
-  $('#viewportBtn').classList.toggle('active', !vp.classList.contains('collapsed'));
+function _makeDraggable(win){
+  const head=win.querySelector('.hud-win-head');
+  let dragging=false, sx,sy,ox,oy;
+  function start(cx,cy){
+    dragging=true; sx=cx; sy=cy;
+    ox=parseInt(win.style.left)||0; oy=parseInt(win.style.top)||0;
+    win.classList.add('dragging');
+  }
+  function move(cx,cy){
+    if(!dragging) return;
+    win.style.left=(ox+cx-sx)+'px';
+    win.style.top=(oy+cy-sy)+'px';
+  }
+  function stop(){ if(dragging){ dragging=false; win.classList.remove('dragging'); } }
+  head.addEventListener('mousedown',e=>{
+    if(e.target.classList.contains('hud-win-close')) return;
+    start(e.clientX,e.clientY); e.preventDefault();
+  });
+  document.addEventListener('mousemove',e=>move(e.clientX,e.clientY));
+  document.addEventListener('mouseup',stop);
+  // touch support
+  head.addEventListener('touchstart',e=>{
+    if(e.target.classList.contains('hud-win-close')) return;
+    const t=e.touches[0]; start(t.clientX,t.clientY); e.preventDefault();
+  },{passive:false});
+  document.addEventListener('touchmove',e=>{
+    if(!dragging) return; const t=e.touches[0]; move(t.clientX,t.clientY);
+  },{passive:true});
+  document.addEventListener('touchend',stop);
 }
 function clearViewport(){
   state.renderedPanels.clear();
-  $('#vpBody').innerHTML='<div class="vp-empty">No active display<br/><span>Panels appear here</span></div>';
+  _winCascade=0;
+  const layer=$('#windowLayer');
+  if(layer) layer.innerHTML='';
 }
+
+// bring window to front on click
+document.addEventListener('mousedown',e=>{
+  const win=e.target.closest('.hud-window');
+  if(win){
+    const layer=$('#windowLayer');
+    // move to end of DOM = top of stack
+    layer.appendChild(win);
+  }
+});
 
 // ---- EMPTY STATE ------------------------------------------------------------
 const QUICK = [
   {icon:'🌐', title:'Search the web',  sub:'Find and summarise anything online', prompt:'Search the web for '},
   {icon:'📋', title:'Read my screen',  sub:'Summarise what\'s in my browser tab', prompt:'Read my screen and summarise what you see'},
-  {icon:'📊', title:'Show me stats',   sub:'Render live data into the viewport',  prompt:'Show me a status panel of my system'},
+  {icon:'📊', title:'Show me stats',   sub:'Render live data as floating panels',  prompt:'Show me a status panel of my system'},
   {icon:'📈', title:'Draw a chart',    sub:'Bar, line, or pie — visualise data',   prompt:'Show me a bar chart comparing '},
   {icon:'📝', title:'Take a note',     sub:'Remember something for later',        prompt:'Take a note: '},
   {icon:'🔔', title:'Set a reminder',  sub:'Add something to my reminder list',   prompt:'Add a reminder: '},
@@ -2269,8 +2325,7 @@ $('#logsBtn').onclick=openSessions;
 $('#newMissionBtn').onclick=newChat;
 $('#configBtn').onclick=openSettings;
 $('#voiceOutBtn').onclick=toggleVoiceOut;
-$('#viewportBtn').onclick=toggleViewport;
-$('#vpClearBtn').onclick=clearViewport;
+
 $('#closeSessionsBtn').onclick=closeSessions;
 $('#newProjectModalClose').onclick=closeNewProjectModal;
 $('#newProjectCancel').onclick=closeNewProjectModal;
@@ -2302,8 +2357,7 @@ document.addEventListener('keydown',e=>{
   }
 });
 
-// start collapsed viewport; restore persisted prefs
-$('#viewportPanel').classList.add('collapsed');
+
 try{
   state.voiceName=localStorage.getItem('cagentic_voice')||'';
   if(localStorage.getItem('cagentic_voiceout')==='1') toggleVoiceOut();
