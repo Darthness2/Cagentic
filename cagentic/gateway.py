@@ -438,10 +438,8 @@ class Gateway:
             emit("error", {"text": f"invalid message index {index}"})
             return
         target = user_indices[index]
-        # Truncate everything after this user message
-        self.engine.messages = self.engine.messages[: target + 1]
-        # Replace the user message content
-        self.engine.messages[target]["content"] = message
+        # Truncate to before the target user message so submit_message adds it fresh
+        self.engine.messages = self.engine.messages[:target]
         self._active_emit = emit
         self.engine.model = self.agent.model
         try:
@@ -1810,7 +1808,7 @@ function deleteMsg(idx,row){
   if(state.busy) return;
   truncateAfter(row, true);
   // If no messages left, show empty state
-  if(!thread.children.length) showEmpty();
+  if(!getThread().children.length) showEmpty();
   // Tell backend to truncate history
   fetch('/api/chat/delete-msg',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({index:idx})})
   .then(r=>r.json()).then(d=>{
