@@ -1508,7 +1508,7 @@ function renderHudPanels(text){
     win.innerHTML='<div class="hud-win-head"><span class="hud-win-title">'+esc(title)+'</span>'+
       '<button class="hud-win-close" title="Close">&times;</button></div>'+
       '<div class="hud-win-body">'+inner+'</div>';
-    win.querySelector('.hud-win-close').onclick=()=>win.remove();
+    win.querySelector('.hud-win-close').addEventListener('mousedown',e=>{e.stopPropagation();win.remove();});
     layer.appendChild(win);
     _makeDraggable(win);
   });
@@ -1560,46 +1560,86 @@ function buildPanelInner(p){
       break;
     case 'bar':{ const vals=(p.values||[]).map(Number); const labs=p.labels||vals.map((_,i)=>String(i+1));
       const maxV=Math.max(...vals,1); const col=p.color||'#f0a87a';
-      const W2=300,H2=140,pad=30,bw=Math.max(8,Math.floor((W2-pad*2)/Math.max(vals.length,1)*0.65));
-      const gap=Math.floor((W2-pad*2)/Math.max(vals.length,1));
-      let bars=''; vals.forEach((v,i)=>{
-        const bh=Math.round((v/maxV)*(H2-45)); const x=pad+i*gap+(gap-bw)/2; const y=H2-20-bh;
-        bars+=`<rect x="${x}" y="${y}" width="${bw}" height="${bh}" fill="${esc(col)}" rx="2" opacity="0.85"/>`;
+      const W2=320,H2=160,padL=36,padR=10,padT=14,padB=22;
+      const plotW=W2-padL-padR, plotH=H2-padT-padB;
+      const bw=Math.max(10,Math.min(36,Math.floor(plotW/Math.max(vals.length,1)*0.6)));
+      const gap=Math.floor(plotW/Math.max(vals.length,1));
+      // grid lines
+      let grid='';
+      for(let g=0;g<=4;g++){
+        const gy=padT+plotH*(1-g/4);
+        const gv=(maxV*g/4);
+        grid+=`<line x1="${padL}" y1="${gy}" x2="${W2-padR}" y2="${gy}" stroke="#2a2235" stroke-width="1"/>`;
+        grid+=`<text x="${padL-4}" y="${gy+3}" text-anchor="end" font-size="8" fill="#6b5f7a">${gv%1===0?gv:gv.toFixed(1)}</text>`;
+      }
+      // gradient def
+      const gid='bg'+(_winCascade||0);
+      let bars=grid;
+      bars+=`<defs><linearGradient id="${gid}" x1="0" y1="0" x2="0" y2="1"><stop offset="0%" stop-color="${esc(col)}" stop-opacity="1"/><stop offset="100%" stop-color="${esc(col)}" stop-opacity="0.45"/></linearGradient></defs>`;
+      vals.forEach((v,i)=>{
+        const bh=Math.round((v/maxV)*plotH); const x=padL+i*gap+(gap-bw)/2; const y=padT+plotH-bh;
+        bars+=`<rect x="${x}" y="${y}" width="${bw}" height="${bh}" fill="url(#${gid})" rx="3" ry="3"/>`;
         bars+=`<text x="${x+bw/2}" y="${H2-4}" text-anchor="middle" font-size="9" fill="#b0a6ba">${esc(String(labs[i]||''))}</text>`;
-        bars+=`<text x="${x+bw/2}" y="${y-3}" text-anchor="middle" font-size="8" fill="${esc(col)}">${esc(String(v))}</text>`;
+        bars+=`<text x="${x+bw/2}" y="${y-4}" text-anchor="middle" font-size="8" font-weight="600" fill="${esc(col)}">${esc(String(v))}</text>`;
       });
       inner=`<svg viewBox="0 0 ${W2} ${H2}" style="width:100%;height:auto">${bars}</svg>`; break; }
     case 'line':{ const ds=(p.datasets||[{values:p.values||[],label:'',color:'#f0a87a'}]);
       const labs=p.labels||[];  const maxAll=Math.max(...ds.flatMap(d=>d.values||[]).map(Number),1);
-      const W2=300,H2=140,pad=30;
+      const W2=320,H2=160,padL=36,padR=10,padT=14,padB=22;
+      const plotW=W2-padL-padR, plotH=H2-padT-padB;
       let lines=''; const colors=['#f0a87a','#8ecf95','#e3a978','#c97fd4','#e5928f'];
+      // grid
+      for(let g=0;g<=4;g++){
+        const gy=padT+plotH*(1-g/4); const gv=(maxAll*g/4);
+        lines+=`<line x1="${padL}" y1="${gy}" x2="${W2-padR}" y2="${gy}" stroke="#2a2235" stroke-width="1"/>`;
+        lines+=`<text x="${padL-4}" y="${gy+3}" text-anchor="end" font-size="8" fill="#6b5f7a">${gv%1===0?gv:gv.toFixed(1)}</text>`;
+      }
       ds.forEach((d,di)=>{ const vals=(d.values||[]).map(Number); const col=d.color||colors[di%colors.length];
         if(!vals.length) return;
-        const pts=vals.map((v,i)=>{const x=pad+i*(W2-pad*2)/Math.max(vals.length-1,1); const y=H2-20-Math.round((v/maxAll)*(H2-40)); return `${x},${y}`;});
-        lines+=`<polyline points="${pts.join(' ')}" fill="none" stroke="${esc(col)}" stroke-width="2" opacity="0.9"/>`;
+        const pts=vals.map((v,i)=>{const x=padL+i*plotW/Math.max(vals.length-1,1); const y=padT+plotH*(1-v/maxAll); return `${x},${y}`;});
+        // area fill
+        const areaPts=[`${padL},${padT+plotH}`,...pts,`${padL+plotW},${padT+plotH}`].join(' ');
+        const aid='la'+(_winCascade||0)+di;
+        lines+=`<defs><linearGradient id="${aid}" x1="0" y1="0" x2="0" y2="1"><stop offset="0%" stop-color="${esc(col)}" stop-opacity="0.25"/><stop offset="100%" stop-color="${esc(col)}" stop-opacity="0.02"/></linearGradient></defs>`;
+        lines+=`<polygon points="${areaPts}" fill="url(#${aid})"/>`;
+        lines+=`<polyline points="${pts.join(' ')}" fill="none" stroke="${esc(col)}" stroke-width="2.5" stroke-linecap="round" stroke-linejoin="round"/>`;
         pts.forEach((pt,i)=>{ const[x,y]=pt.split(',');
-          lines+=`<circle cx="${x}" cy="${y}" r="3" fill="${esc(col)}"/>`; });
-        if(d.label) lines+=`<text x="${W2-4}" y="${pts[pts.length-1].split(',')[1]}" text-anchor="end" font-size="8" fill="${esc(col)}">${esc(d.label)}</text>`;
+          lines+=`<circle cx="${x}" cy="${y}" r="3.5" fill="#16111c" stroke="${esc(col)}" stroke-width="2"/>`; });
+        if(d.label){ const lastPt=pts[pts.length-1].split(',');
+          lines+=`<text x="${+lastPt[0]+6}" y="${+lastPt[1]+3}" font-size="9" font-weight="600" fill="${esc(col)}">${esc(d.label)}</text>`; }
       });
-      labs.forEach((l,i)=>{ const x=pad+i*(W2-pad*2)/Math.max(labs.length-1,1);
+      labs.forEach((l,i)=>{ const x=padL+i*plotW/Math.max(labs.length-1,1);
         lines+=`<text x="${x}" y="${H2-4}" text-anchor="middle" font-size="9" fill="#b0a6ba">${esc(String(l))}</text>`; });
       inner=`<svg viewBox="0 0 ${W2} ${H2}" style="width:100%;height:auto">${lines}</svg>`; break; }
     case 'pie':{ const vals=(p.values||[]).map(Number); const labs=p.labels||vals.map((_,i)=>String(i+1));
       const total=vals.reduce((a,b)=>a+b,0)||1;
-      const colors=['#f0a87a','#8ecf95','#e3a978','#c97fd4','#e5928f','#b0a6ba'];
-      const cx=90,cy=70,r=55,ri=28; let angle=-Math.PI/2; let slices=''; let legend='';
+      const colors=['#f0a87a','#8ecf95','#e3a978','#c97fd4','#e5928f','#b0a6ba','#7ec8e3','#d4a76a'];
+      const cx=100,cy=80,r=62,ri=32; let angle=-Math.PI/2; let slices=''; let legend='';
+      // shadow ring
+      slices+=`<circle cx="${cx+1}" cy="${cy+2}" r="${r+2}" fill="none" stroke="#0a0810" stroke-width="4" opacity="0.4"/>`;
       vals.forEach((v,i)=>{ const sweep=2*Math.PI*(v/total); const col=colors[i%colors.length];
+        const mid=angle+sweep/2;
         const x1=cx+r*Math.cos(angle),y1=cy+r*Math.sin(angle);
         const x2=cx+r*Math.cos(angle+sweep),y2=cy+r*Math.sin(angle+sweep);
         const xi1=cx+ri*Math.cos(angle),yi1=cy+ri*Math.sin(angle);
         const xi2=cx+ri*Math.cos(angle+sweep),yi2=cy+ri*Math.sin(angle+sweep);
         const lg=sweep>Math.PI?1:0;
-        slices+=`<path d="M${xi1} ${yi1} L${x1} ${y1} A${r} ${r} 0 ${lg} 1 ${x2} ${y2} L${xi2} ${yi2} A${ri} ${ri} 0 ${lg} 0 ${xi1} ${yi1}" fill="${col}" opacity="0.85"/>`;
+        // slight explode for large slices
+        const ex=sweep>0.3?2*Math.cos(mid):0, ey=sweep>0.3?2*Math.sin(mid):0;
+        slices+=`<path d="M${xi1+ex} ${yi1+ey} L${x1+ex} ${y1+ey} A${r} ${r} 0 ${lg} 1 ${x2+ex} ${y2+ey} L${xi2+ex} ${yi2+ey} A${ri} ${ri} 0 ${lg} 0 ${xi1+ex} ${yi1+ey}" fill="${col}" opacity="0.9" stroke="#16111c" stroke-width="1"/>`;
+        // percentage label inside slice
+        if(sweep>0.25){
+          const lr=(r+ri)/2, lx=cx+lr*Math.cos(mid)+ex, ly=cy+lr*Math.sin(mid)+ey;
+          const pct=Math.round(v/total*100);
+          slices+=`<text x="${lx}" y="${ly+3}" text-anchor="middle" font-size="9" font-weight="600" fill="#fff">${pct}%</text>`;
+        }
         const pct=Math.round(v/total*100);
-        legend+=`<rect x="188" y="${8+i*16}" width="8" height="8" fill="${col}"/>`;
-        legend+=`<text x="200" y="${16+i*16}" font-size="9" fill="#cdbbd8">${esc(String(labs[i]))} ${pct}%</text>`;
+        legend+=`<rect x="190" y="${8+i*18}" width="10" height="10" rx="2" fill="${col}"/>`;
+        legend+=`<text x="204" y="${17+i*18}" font-size="10" fill="#cdbbd8">${esc(String(labs[i]))} <tspan fill="#8a7e96">${pct}%</tspan></text>`;
         angle+=sweep; });
-      inner=`<svg viewBox="0 0 300 145" style="width:100%;height:auto">${slices}${legend}</svg>`; break; }
+      // center label
+      slices+=`<circle cx="${cx}" cy="${cy}" r="${ri-4}" fill="#16111c" opacity="0.6"/>`;
+      inner=`<svg viewBox="0 0 320 165" style="width:100%;height:auto">${slices}${legend}</svg>`; break; }
     default: return null;
   }
   return title+inner;
@@ -1652,12 +1692,11 @@ function clearViewport(){
 }
 
 // bring window to front on click
-document.addEventListener('mousedown',e=>{
+$('#windowLayer').addEventListener('mousedown',e=>{
   const win=e.target.closest('.hud-window');
-  if(win){
-    const layer=$('#windowLayer');
+  if(win && !e.target.classList.contains('hud-win-close')){
     // move to end of DOM = top of stack
-    layer.appendChild(win);
+    e.currentTarget.appendChild(win);
   }
 });
 
