@@ -101,9 +101,18 @@ class Gateway:
 
         self._turn_lock = threading.Lock()
         self._active_emit = None
+        self._active_source: str = "pc"  # "ios" or "pc" — who initiated this turn
 
         self._perm_cv = threading.Condition()
         self._perm_answer: str | None = None
+
+        # Computer control approval bridge (iOS client approves/denies PC actions)
+        self._comp_cv = threading.Condition()
+        self._comp_approvals: dict[str, bool] = {}  # action_id -> approved
+
+        # Phone action result bridge (iOS client returns results from phone actions)
+        self._phone_cv = threading.Condition()
+        self._phone_results: dict[str, dict] = {}  # action_id -> result dict
 
         # The gateway's own engine — a separate conversation, but the SAME
         # shared state (notes, reminders, browser bridge, MCP, workspace).
@@ -120,6 +129,10 @@ class Gateway:
         # Teach this engine (gateway only) to drive the holographic HUD.
         self.engine.system_suffix = _HUD_INSTRUCTIONS
         self.engine.refresh_system_prompt()
+        # Wire up phone action callback — will be activated when source=ios
+        self._setup_phone_action()
+        # Wire up widget action callback — emits SSE widget events
+        self._setup_widget_action()
         # The current chat is a session record (shared store with the REPL).
         self.session = sessions.make(agent.model)
         self.engine.session_id = self.session["id"]
@@ -181,6 +194,145 @@ class Gateway:
             self._perm_answer = answer if answer in ("yes", "no", "always", "never") else "no"
             self._perm_cv.notify_all()
 
+    # -- computer control approval bridge -----------------------------------
+
+    def deliver_computer_approval(self, action_id: str, approved: bool) -> None:
+        """Receive an approval/denial from the iOS client for a computer control action."""
+        with self._comp_cv:
+            self._comp_approvals[action_id] = approved
+            self._comp_cv.notify_all()
+
+    def wait_computer_approval(self, action_id: str, emit, event_type: str, data: dict, timeout: float = 300) -> bool:
+        """Emit a computer control SSE event and wait for the iOS client to approve.
+        Returns True if approved, False if denied or timed out."""
+        with self._comp_cv:
+            self._comp_approvals.pop(action_id, None)
+        emit(event_type, data)
+        with self._comp_cv:
+            deadline = time.monotonic() + timeout
+            while action_id not in self._comp_approvals:
+                remaining = deadline - time.monotonic()
+                if remaining <= 0:
+                    return False
+                self._comp_cv.wait(remaining)
+            return self._comp_approvals.pop(action_id, False)
+
+    # -- phone action result bridge -----------------------------------------
+
+    def deliver_phone_result(self, action_id: str, result: dict) -> None:
+        """Receive an execution result from the iOS client for a phone action."""
+        with self._phone_cv:
+            self._phone_results[action_id] = result
+            self._phone_cv.notify_all()
+
+    def wait_phone_result(self, action_id: str, emit, event_type: str, data: dict, timeout: float = 120) -> dict | None:
+        """Emit a phone action SSE event and wait for the iOS client to execute it.
+        Returns the result dict, or None on timeout."""
+        with self._phone_cv:
+            self._phone_results.pop(action_id, None)
+        emit(event_type, data)
+        with self._phone_cv:
+            deadline = time.monotonic() + timeout
+            while action_id not in self._phone_results:
+                remaining = deadline - time.monotonic()
+                if remaining <= 0:
+                    return None
+                self._phone_cv.wait(remaining)
+            return self._phone_results.pop(action_id, None)
+
+    # -- device context injection -------------------------------------------
+
+    _DEVICE_PROMPT_IOS = """
+
+=== DEVICE CONTEXT ===
+The user is prompting you from their iPhone (iOS device). You can control BOTH the PC (where this gateway runs) AND the iPhone. When you want to control the iPhone, use phone-specific tools:
+- phone_shell: Run a shell command on the iPhone
+- phone_clipboard_read: Read the iPhone clipboard
+- phone_clipboard_write: Write to the iPhone clipboard
+- phone_open_app: Open an app on the iPhone by scheme or URL
+- phone_open_url: Open a URL on the iPhone (in Safari)
+- phone_screenshot: The iPhone user can take a screenshot and share it with you
+
+When you want to control the PC, use the normal tools (shell, file operations, etc.) as usual. The user will approve PC actions from their phone.
+
+=== WIDGET DISPLAY ===
+You can display rich visual widgets on the user's iPhone using the show_widget tool. This renders structured data as native iOS cards — much better than plain text for visual information. Use show_widget whenever you have structured data to present:
+
+- **Stocks**: Use type "stocks" with items containing symbol, name, price, change, change_pct. Include a chart object with labels (time periods) and values (prices) to show an interactive stock graph: chart: {labels: ["9:30","10:00",...], values: [178.50,179.20,...]}
+- **Sports scores**: Use type "sports" with league and games containing home/away teams, scores, and status.
+- **Weather**: Use type "weather" with current conditions and forecast array.
+- **Crypto**: Use type "crypto" with items containing symbol, name, price, change_24h, change_pct. Include chart data for price graphs.
+- **Calendar**: Use type "calendar" with date and events array.
+- **Stats**: Use type "stats" with items containing label, value, and trend.
+- **Progress**: Use type "progress" with steps array showing build/deployment progress.
+- **Lists**: Use type "list" with items containing text and checked status.
+- **Tables**: Use type "table" with headers and rows for any tabular data.
+
+Always prefer show_widget over plain text when presenting visual/structured data. The user's phone will render it beautifully.
+
+IMPORTANT: When you use show_widget, do NOT repeat the widget title or type in your text response. The widget card already shows what it is. Just give a brief 1-sentence intro like "Here's the info:" or skip the text entirely — never say "Here are the stocks:" then also show a stocks widget with title "Stocks".
+"""
+
+    _DEVICE_PROMPT_PC = ""
+    def _inject_device_context(self, source: str) -> None:
+        """Update the system prompt and tool groups based on who initiated the turn."""
+        from .tools import DEFAULT_GROUPS
+        suffix = self.engine.system_suffix or ""
+        marker = "\n\n=== DEVICE CONTEXT ==="
+        # Remove any previous device context injection
+        if marker in suffix:
+            suffix = suffix[:suffix.index(marker)]
+        if source == "ios":
+            suffix += self._DEVICE_PROMPT_IOS
+            # Enable phone tool group for iOS-originated turns
+            groups = self.engine.state.tool_groups
+            if groups is None:
+                groups = set(DEFAULT_GROUPS)
+            groups = groups | {"phone"}
+            self.engine.state.tool_groups = groups
+        else:
+            # Disable phone tool group for PC-originated turns
+            groups = self.engine.state.tool_groups
+            if groups is not None:
+                groups = groups - {"phone"}
+                self.engine.state.tool_groups = groups
+        self.engine.system_suffix = suffix
+        self.engine.refresh_system_prompt()
+        self.engine.refresh_tool_cache()
+
+    def _setup_phone_action(self) -> None:
+        """Wire up the phone_action callback on the engine's tool executor."""
+        gw = self
+
+        def phone_action(action_type: str, payload: dict) -> dict | None:
+            """Callback for phone control tools. Emits SSE event and waits for result."""
+            import uuid
+            action_id = str(uuid.uuid4())
+            emit = gw._active_emit
+            if emit is None:
+                return {"success": False, "error": "no active connection"}
+            event_type = f"phone_{action_type}"
+            data = {"id": action_id, **payload}
+            return gw.wait_phone_result(action_id, emit, event_type, data)
+
+        self.engine.executor.phone_action = phone_action
+
+    def _setup_widget_action(self) -> None:
+        """Wire up the widget_action callback on the engine's tool executor."""
+        gw = self
+
+        def widget_action(widget_type: str, title: str, data: dict) -> str | None:
+            """Callback for show_widget tool. Emits SSE widget event."""
+            emit = gw._active_emit
+            if emit is None:
+                return None  # No active stream — tool returns text fallback
+            emit("widget", {"type": widget_type, "title": title, "data": data})
+            return None  # Signal to tool that widget was emitted
+
+        self.engine.executor.widget_action = widget_action
+
+    # -- chats --------------------------------------------------------------
+    # -- chats --------------------------------------------------------------
     # -- chats --------------------------------------------------------------
 
     def _save_current(self) -> None:
@@ -358,6 +510,7 @@ class Gateway:
             models.extend(mlist)
         # Current model shown with provider prefix if cloud.
         current = self.agent.model
+        gw_cfg = self.config.get("gateway") or {}
         return {
             "model": current,
             "models": models,
@@ -365,7 +518,14 @@ class Gateway:
             "user_name": self.agent.state.user_name or "",
             "stream": self.engine.stream,
             "yolo": self.agent.state.yolo,
+            "gateway_port": int(gw_cfg.get("port", 8700)),
+            "gateway_auto_start": bool(gw_cfg.get("auto_start", True)),
+            "system_prompt": self.engine.system_suffix or "",
         }
+
+    def abort_generation(self) -> None:
+        """Abort the current streaming generation."""
+        self.engine._abort_turn = True
 
     def update_settings(self, data: dict) -> dict:
         cfg = self.config
@@ -391,6 +551,19 @@ class Gateway:
         if "yolo" in data:
             self.agent.state.update(yolo=bool(data["yolo"]))
             cfg["yolo"] = bool(data["yolo"])
+        if "gateway_port" in data:
+            try:
+                port = int(data["gateway_port"])
+                if 1 <= port <= 65535:
+                    _config.set_value(cfg, "gateway.port", port)
+            except (TypeError, ValueError):
+                pass
+        if "gateway_auto_start" in data:
+            _config.set_value(cfg, "gateway.auto_start", bool(data["gateway_auto_start"]))
+        if "system_prompt" in data:
+            self.engine.system_suffix = str(data["system_prompt"]).strip()
+            self.engine.refresh_system_prompt()
+            cfg["system_prompt"] = self.engine.system_suffix
         try:
             _config.save(cfg)
         except Exception:
@@ -481,12 +654,15 @@ class Gateway:
         self._save_current()
         return self.current_chat()
 
-    def run_turn(self, message: str, emit) -> None:
+    def run_turn(self, message: str, emit, source: str = "pc") -> None:
         if not self._turn_lock.acquire(blocking=False):
             emit("error", {"text": "Cagentic is still working on the previous message."})
             return
         self._active_emit = emit
+        self._active_source = source
         self.engine.model = self.agent.model
+        # Inject device context into system prompt
+        self._inject_device_context(source)
         try:
             for ev in self.engine.submit_message(message):
                 emit(ev.kind, ev.data)
@@ -496,11 +672,235 @@ class Gateway:
             emit("error", {"text": f"{type(e).__name__}: {e}"})
         finally:
             self._active_emit = None
+            self._active_source = "pc"
             try:
                 self._save_current()
             except Exception:
                 pass
             self._turn_lock.release()
+
+    # -- slash command handler for web UI -----------------------------------
+
+    def handle_cmd(self, cmd: str, arg1: str = "", arg2: str = "") -> dict:
+        """Execute a slash command from the web UI and return a result dict.
+
+        Supported commands mirror the CLI: /new, /clear, /model, /models,
+        /diag, /tools, /groups, /yolo, /help, /plan, /stream, /name, /host,
+        /retry, /undo, /save, /notes, /mcp, /config, /set.
+        """
+        from .tools import DEFAULT_GROUPS, _all_tools
+        from . import config as _cfg
+
+        cmd = cmd.lstrip("/").lower()
+        agent = self.agent
+        cfg = self.config
+
+        if cmd in ("help", "?"):
+            return {"ok": True, "text": (
+                "/new — start a new chat\n"
+                "/clear — clear the current chat\n"
+                "/model <name> — switch model\n"
+                "/models — list available models\n"
+                "/diag — show diagnostics\n"
+                "/tools — list active tools\n"
+                "/groups [enable|disable <name>] — show/change tool groups\n"
+                "/yolo [on|off] — toggle auto-approve\n"
+                "/plan [on|off] — toggle plan mode\n"
+                "/stream [on|off] — toggle streaming\n"
+                "/name <name> — set your name\n"
+                "/host <url> — change Ollama host\n"
+                "/save — save current chat\n"
+                "/notes — list notes\n"
+                "/mcp — list MCP servers\n"
+                "/config — show config\n"
+                "/set <key> <value> — set config value\n"
+                "/undo — undo last exchange\n"
+                "/retry — retry last turn\n"
+            )}
+
+        if cmd == "new":
+            cur = self.new_chat()
+            return {"ok": True, "text": "new chat started", "current": cur}
+
+        if cmd == "clear":
+            self.engine.messages.clear()
+            self._save_current()
+            return {"ok": True, "text": "chat cleared"}
+
+        if cmd == "model":
+            if not arg1:
+                return {"ok": True, "text": f"current model: {agent.model}"}
+            result = self.set_model(arg1)
+            if "error" in result:
+                return {"ok": False, "text": result["error"]}
+            return {"ok": True, "text": f"model → {result['model']}", "model": result["model"]}
+
+        if cmd == "models":
+            try:
+                models = agent.client.list_models()
+            except Exception as e:
+                return {"ok": False, "text": f"could not list models: {e}"}
+            return {"ok": True, "text": "available models:\n" + "\n".join(f"  {m}" for m in models), "models": models}
+
+        if cmd == "diag":
+            groups = agent.state.tool_groups if agent.state.tool_groups is not None else DEFAULT_GROUPS
+            lines = [f"model:    {agent.model}"]
+            lines.append(f"name:     {agent.state.user_name or '(not set)'}")
+            lines.append(f"workspace: {agent.state.workspace}")
+            lines.append(f"tools:    {'native' if agent.tools_enabled else 'text-protocol fallback'}")
+            lines.append(f"groups:   {', '.join(sorted(groups))}")
+            lines.append(f"stream:   {'on' if agent.engine.stream else 'off'}")
+            try:
+                status = agent.client.model_vram_status(agent.model)
+                if status is None:
+                    lines.append("vram:     model not currently loaded")
+                elif status["fully_gpu"]:
+                    lines.append(f"vram:     {status['size_vram'] / (1024**3):.1f} GB · fully on GPU ✓")
+                else:
+                    size_gb = status["size"] / (1024**3)
+                    cpu_gb = status["cpu_bytes"] / (1024**3)
+                    pct = status["cpu_percent"]
+                    lines.append(f"vram:     {cpu_gb:.1f}/{size_gb:.1f} GB on CPU ({pct:.0f}% offloaded — slow)")
+            except Exception:
+                lines.append("vram:     (not available)")
+            mcp_servers = list(((cfg.get("mcp") or {}).get("servers") or {}).keys())
+            lines.append(f"mcp:      {len(mcp_servers)} configured ({', '.join(mcp_servers) or 'none'})")
+            return {"ok": True, "text": "\n".join(lines)}
+
+        if cmd == "tools":
+            mode = "native" if agent.tools_enabled else "text-protocol fallback"
+            tools = _all_tools()
+            lines = [f"{len(tools)} tools ({mode}):"]
+            for t in tools:
+                lines.append(f"  {t['function']['name']}")
+            return {"ok": True, "text": "\n".join(lines)}
+
+        if cmd == "groups":
+            active = agent.state.tool_groups if agent.state.tool_groups is not None else DEFAULT_GROUPS
+            if not arg1:
+                from .tools import TOOL_GROUPS
+                lines = ["tool groups (✓ = sent to the model):"]
+                for g, names in sorted(TOOL_GROUPS.items()):
+                    mark = "✓" if g in active else "✗"
+                    lines.append(f"  {mark} {g} ({len(names)} tools)")
+                return {"ok": True, "text": "\n".join(lines)}
+            if arg1 == "enable" and arg2:
+                groups = set(active)
+                groups.add(arg2)
+                agent.state.tool_groups = groups
+                _cfg.set_value(cfg, "tool_groups", sorted(groups))
+                _cfg.save(cfg)
+                self.engine.refresh_system_prompt()
+                return {"ok": True, "text": f"enabled '{arg2}' — {len(groups)} group(s) active"}
+            if arg1 == "disable" and arg2:
+                groups = set(active)
+                groups.discard(arg2)
+                agent.state.tool_groups = groups
+                _cfg.set_value(cfg, "tool_groups", sorted(groups))
+                _cfg.save(cfg)
+                self.engine.refresh_system_prompt()
+                return {"ok": True, "text": f"disabled '{arg2}' — {len(groups)} group(s) active"}
+            return {"ok": False, "text": "usage: /groups  |  /groups enable <name>  |  /groups disable <name>"}
+
+        if cmd == "yolo":
+            want = arg1.lower() if arg1 else ("off" if agent.state.yolo else "on")
+            if want not in ("on", "off"):
+                return {"ok": False, "text": "usage: /yolo on|off"}
+            agent.state.update(yolo=(want == "on"))
+            cfg["yolo"] = agent.state.yolo
+            _cfg.save(cfg)
+            return {"ok": True, "text": f"yolo mode: {'ON (auto-approve)' if agent.state.yolo else 'OFF (ask every time)'}"}
+
+        if cmd == "plan":
+            want = arg1.lower() if arg1 else ("off" if agent.state.plan_mode else "on")
+            if want not in ("on", "off"):
+                return {"ok": False, "text": "usage: /plan on|off"}
+            agent.state.update(plan_mode=(want == "on"))
+            self.engine.refresh_system_prompt()
+            return {"ok": True, "text": f"plan mode: {'ON (read-only)' if agent.state.plan_mode else 'OFF'}"}
+
+        if cmd == "stream":
+            want = arg1.lower() if arg1 else ("off" if agent.engine.stream else "on")
+            if want not in ("on", "off"):
+                return {"ok": False, "text": "usage: /stream on|off"}
+            agent.engine.stream = (want == "on")
+            _cfg.set_value(cfg, "ollama.stream", agent.engine.stream)
+            _cfg.save(cfg)
+            return {"ok": True, "text": f"streaming: {'on' if agent.engine.stream else 'off'} (saved)"}
+
+        if cmd == "name":
+            if not arg1:
+                return {"ok": True, "text": f"your name: {agent.state.user_name or '(not set)'}"}
+            agent.state.update(user_name=arg1)
+            self.engine.refresh_system_prompt()
+            _cfg.set_value(cfg, "user_name", arg1)
+            _cfg.save(cfg)
+            return {"ok": True, "text": f"name set to: {arg1}"}
+
+        if cmd == "host":
+            if not arg1:
+                return {"ok": True, "text": f"ollama host: {agent.client.host}"}
+            try:
+                agent.client.host = arg1.rstrip("/")
+                _cfg.set_value(cfg, "ollama.host", agent.client.host)
+                _cfg.save(cfg)
+                return {"ok": True, "text": f"host → {agent.client.host}"}
+            except Exception as e:
+                return {"ok": False, "text": f"error: {e}"}
+
+        if cmd == "save":
+            self._save_current()
+            return {"ok": True, "text": "chat saved"}
+
+        if cmd == "notes":
+            from .notes import _notes
+            all_notes = _notes.list_all()
+            if not all_notes:
+                return {"ok": True, "text": "no notes"}
+            lines = [f"{n['title']}  ({n['id']})" for n in all_notes]
+            return {"ok": True, "text": "\n".join(lines)}
+
+        if cmd == "mcp":
+            mcp_servers = list(((cfg.get("mcp") or {}).get("servers") or {}).keys())
+            if not mcp_servers:
+                return {"ok": True, "text": "no MCP servers configured"}
+            return {"ok": True, "text": "MCP servers:\n" + "\n".join(f"  {s}" for s in mcp_servers)}
+
+        if cmd == "config":
+            import copy
+            safe = copy.deepcopy(cfg)
+            gh = safe.get("github") or {}
+            tok = gh.get("token")
+            if tok and len(tok) > 8:
+                gh["token"] = tok[:4] + "…" + tok[-4:]
+            return {"ok": True, "text": json.dumps(safe, indent=2)}
+
+        if cmd == "set":
+            if not arg1 or not arg2:
+                return {"ok": False, "text": "usage: /set <key> <value>"}
+            _cfg.set_value(cfg, arg1, arg2)
+            _cfg.save(cfg)
+            return {"ok": True, "text": f"set {arg1} = {arg2}"}
+
+        if cmd == "undo":
+            # Remove last user + assistant messages
+            msgs = self.engine.messages
+            while msgs and msgs[-1].get("role") != "user":
+                msgs.pop()
+            if msgs and msgs[-1].get("role") == "user":
+                msgs.pop()
+            self._save_current()
+            return {"ok": True, "text": "undid last exchange"}
+
+        if cmd == "retry":
+            # Remove last assistant message so the engine re-generates
+            msgs = self.engine.messages
+            while msgs and msgs[-1].get("role") == "assistant":
+                msgs.pop()
+            self._save_current()
+            return {"ok": True, "text": "removed last reply — send a message to retry"}
+
+        return {"ok": False, "text": f"unknown command: /{cmd}. Type /help for available commands."}
 
 
 # ---------------------------------------------------------------- handler ---
@@ -564,8 +964,14 @@ class _Handler(BaseHTTPRequestHandler):
     def do_POST(self) -> None:  # noqa: N802
         path = self.path.split("?")[0]
         gw = self._gw()
+        if path == "/api/abort":
+            gw.abort_generation()
+            self._json({"ok": True})
+            return
         if path == "/api/chat":
-            self._stream_chat(str(self._body().get("message", "")).strip())
+            b = self._body()
+            source = str(b.get("source", "pc"))
+            self._stream_chat(str(b.get("message", "")).strip(), source=source)
             return
         if path == "/api/chat/edit":
             b = self._body()
@@ -577,6 +983,20 @@ class _Handler(BaseHTTPRequestHandler):
             return
         if path == "/api/permission":
             gw.deliver_permission(str(self._body().get("answer", "no")))
+            self._json({"ok": True})
+            return
+        if path == "/api/computer/approve":
+            b = self._body()
+            action_id = str(b.get("id", ""))
+            approved = bool(b.get("approved", False))
+            gw.deliver_computer_approval(action_id, approved)
+            self._json({"ok": True})
+            return
+        if path == "/api/computer/result":
+            b = self._body()
+            action_id = str(b.get("id", ""))
+            result = b.get("result", {})
+            gw.deliver_phone_result(action_id, result)
             self._json({"ok": True})
             return
         if path == "/api/chats/new":
@@ -622,6 +1042,10 @@ class _Handler(BaseHTTPRequestHandler):
             b = self._body()
             self._json(gw.update_project_config(str(b.get("id", "")), b.get("system_prompt", ""), b.get("context", "")))
             return
+        if path == "/api/cmd":
+            b = self._body()
+            self._json(gw.handle_cmd(str(b.get("cmd", "")), str(b.get("arg1", "")), str(b.get("arg2", ""))))
+            return
         self._send(b"not found", "text/plain", status=404)
 
     def _begin_sse(self):
@@ -641,7 +1065,7 @@ class _Handler(BaseHTTPRequestHandler):
                 raise _ClientGone()
         return emit
 
-    def _stream_chat(self, message: str) -> None:
+    def _stream_chat(self, message: str, source: str = "pc") -> None:
         emit = self._begin_sse()
         if not message:
             try:
@@ -650,7 +1074,7 @@ class _Handler(BaseHTTPRequestHandler):
                 pass
             return
         try:
-            self._gw().run_turn(message, emit)
+            self._gw().run_turn(message, emit, source=source)
             emit("end", {})
         except _ClientGone:
             return
@@ -731,6 +1155,10 @@ _HTML = """<!doctype html>
   </div>
 
   <div id="windowLayer"></div>
+  <div id="restorePill" class="restore-pill" style="display:none">
+    <span class="restore-pill-icon">↩</span><span class="restore-pill-count">0</span> panels
+    <div class="restore-dropdown" id="restoreDropdown"></div>
+  </div>
 
   <div class="cmd-area">
     <div class="cmd-box" id="cmdBox">
@@ -738,11 +1166,13 @@ _HTML = """<!doctype html>
       <textarea id="input" rows="1" placeholder="Type a message&#8230;"></textarea>
       <button id="micBtn" class="mic-btn" title="Voice input">&#127908;</button>
       <button id="send" class="exec-btn">EXECUTE</button>
+      <button id="stopBtn" class="exec-btn stop-btn hidden">&#9632; STOP</button>
     </div>
     <div class="cmd-footer">
       <span>CAGENTIC v<span id="versionSpan">--</span></span>
-      <span id="hintText">Enter to send &bull; Shift+Enter for newline &bull; Ctrl+K New Chat</span>
+      <span id="hintText">Enter to send &bull; Shift+Enter for newline &bull; Ctrl+K New Chat &bull; Ctrl+S Settings</span>
       <span id="busyLabel" class="busy-label hidden">&#9679; Thinking&#8230;</span>
+      <span id="tokenStats" class="token-stats hidden"></span>
     </div>
   </div>
 </div>
@@ -789,6 +1219,23 @@ _HTML = """<!doctype html>
       <div class="field row">
         <span class="field-label">Auto-approve tools</span>
         <label class="toggle"><input id="setYolo" type="checkbox" /><span></span></label>
+      </div>
+      <hr class="settings-divider" />
+      <div class="section-label">GATEWAY</div>
+      <div class="field">
+        <span class="field-label">PORT</span>
+        <input id="setGwPort" type="number" min="1" max="65535" placeholder="8700" />
+      </div>
+      <div class="field row">
+        <span class="field-label">Auto-start on launch</span>
+        <label class="toggle"><input id="setGwAuto" type="checkbox" /><span></span></label>
+      </div>
+      <div class="field-hint">Port takes effect next launch. Auto-start can be toggled anytime.</div>
+      <hr class="settings-divider" />
+      <div class="section-label">SYSTEM PROMPT</div>
+      <div class="field">
+        <span class="field-label">Custom instructions</span>
+        <textarea id="setSysPrompt" rows="4" placeholder="Additional instructions appended to the system prompt&#8230;"></textarea>
       </div>
     </div>
     <div class="modal-foot">
@@ -1079,8 +1526,10 @@ body {
 .qcard-sub   { font-size: 9px;  color: var(--text-2); letter-spacing: .04em; line-height: 1.5; display: block; }
 
 /* messages */
-.msg-row { margin: 10px 0; animation: messageIn .32s var(--ease-out) both; }
-@keyframes messageIn { from { opacity: 0; transform: translateY(8px); } to { opacity: 1; transform: translateY(0); } }
+.msg-row { margin: 10px 0; animation: messageIn .32s var(--ease-out) both; animation-delay: calc(var(--i, 0) * 60ms); }
+.msg-row.user { --slide-x: 30px; }
+.msg-row.assistant { --slide-x: -30px; }
+@keyframes messageIn { from { opacity: 0; transform: translate(var(--slide-x, 0), 12px); } to { opacity: 1; transform: translate(0, 0); } }
 .msg-row.user .bubble { transition: background .2s var(--ease), border-color .2s var(--ease); }
 .msg-row.user { display: flex; flex-direction: column; align-items: flex-end; }
 .msg-row.user .bubble {
@@ -1144,6 +1593,7 @@ body {
   border-left: 2px solid var(--text-dim);
   transition: border-color .25s var(--ease), background .25s var(--ease);
   animation: messageIn .3s var(--ease-out) both;
+  animation-delay: calc(var(--i, 0) * 60ms);
 }
 .tool-row .tool-icon { transition: transform .2s var(--ease); }
 .tool-row.ok .tool-icon, .tool-row.bad .tool-icon { transform: scale(1.05); }
@@ -1169,6 +1619,7 @@ body {
 /* done stats */
 .done-stats { padding: 2px 0 4px 38px; font-size: 9px; color: var(--text-dim); letter-spacing: .06em; opacity: .7; }
 .done-stats .ds-sep { margin: 0 4px; }
+.token-stats { font-size: 9px; color: var(--text-dim); letter-spacing: .06em; }
 
 /* plan / note / error / permission */
 .plan-box { margin: 9px 0; padding: 11px 14px; border: 1px solid rgba(255,170,0,.3); background: rgba(255,170,0,.03); }
@@ -1192,13 +1643,43 @@ body {
 #windowLayer {
   position: fixed; inset: 0; z-index: 170; pointer-events: none;
 }
+.restore-pill {
+  position: fixed; bottom: 20px; right: 20px; z-index: 200;
+  background: rgba(22,17,24,.92); border: 1px solid var(--border-h);
+  box-shadow: 0 4px 20px rgba(0,0,0,.5), 0 0 12px rgba(240,168,122,.08);
+  backdrop-filter: blur(6px);
+  padding: 8px 14px; border-radius: 20px;
+  color: var(--accent); font-size: 11px; letter-spacing: .06em;
+  cursor: pointer; user-select: none;
+  transition: transform .2s var(--ease), box-shadow .2s var(--ease);
+  pointer-events: auto;
+}
+.restore-pill:hover { transform: translateY(-2px); box-shadow: 0 6px 24px rgba(0,0,0,.6), 0 0 16px rgba(240,168,122,.12); }
+.restore-pill-icon { margin-right: 4px; }
+.restore-pill-count { font-weight: 700; }
+.restore-dropdown {
+  display: none; position: absolute; bottom: calc(100% + 8px); right: 0;
+  background: rgba(22,17,24,.96); border: 1px solid var(--border-h);
+  box-shadow: 0 8px 30px rgba(0,0,0,.6);
+  backdrop-filter: blur(8px);
+  border-radius: 10px; min-width: 180px; max-width: 260px;
+  padding: 6px 0; overflow: hidden;
+}
+.restore-pill.open .restore-dropdown { display: block; }
+.restore-item {
+  padding: 8px 14px; font-size: 11px; color: #d8c8e0; cursor: pointer;
+  transition: background .15s;
+  white-space: nowrap; overflow: hidden; text-overflow: ellipsis;
+}
+.restore-item:hover { background: rgba(240,168,122,.1); color: var(--accent); }
 .hud-window {
   position: absolute; pointer-events: auto;
   min-width: 220px; min-height: 100px;
   background: rgba(22,17,24,.92); border: 1px solid var(--border-h);
   box-shadow: 0 4px 30px rgba(0,0,0,.55), 0 0 20px rgba(240,168,122,.06);
   display: flex; flex-direction: column;
-  animation: hudWinIn .35s var(--ease-out);
+  animation: hudWinIn .4s var(--ease-out) both;
+  animation-delay: calc(var(--i, 0) * 80ms);
   backdrop-filter: blur(6px);
   transition: box-shadow .25s var(--ease);
 }
@@ -1217,7 +1698,7 @@ body {
   opacity: 0.4;
 }
 .hud-window.resizing { opacity: .9; box-shadow: 0 8px 40px rgba(0,0,0,.7), 0 0 30px rgba(240,168,122,.12); }
-@keyframes hudWinIn { from { opacity: 0; transform: scale(.9) translateY(14px); } to { opacity: 1; transform: scale(1) translateY(0); } }
+@keyframes hudWinIn { from { opacity: 0; transform: scale(.88) translateY(18px); } to { opacity: 1; transform: scale(1) translateY(0); } }
 .hud-win-head {
   display: flex; align-items: center; justify-content: space-between;
   padding: 7px 12px; border-bottom: 1px solid var(--border);
@@ -1394,6 +1875,8 @@ body {
 .exec-btn:hover    { background: rgba(240,168,122,.24); box-shadow: 0 0 18px rgba(240,168,122,.25); }
 .exec-btn:active   { transform: scale(.96); }
 .exec-btn:disabled { opacity: .28; cursor: default; box-shadow: none; transform: none; }
+.stop-btn { background: rgba(220,60,60,.18); color: #e06060; border-color: rgba(220,60,60,.4); }
+.stop-btn:hover { background: rgba(220,60,60,.32); box-shadow: 0 0 18px rgba(220,60,60,.25); }
 .cmd-footer { display: flex; justify-content: space-between; align-items: center; max-width: 1000px; margin: 5px auto 0; font-size: 9px; color: var(--text-dim); letter-spacing: .08em; }
 .busy-label { color: var(--ok); animation: pulse 1.2s ease infinite; }
 
@@ -1474,6 +1957,13 @@ body {
 .field.row { flex-direction: row; align-items: center; justify-content: space-between; }
 .field-label { font-size: 9px; color: var(--text-2); letter-spacing: .1em; text-transform: uppercase; }
 .field-label em { color: var(--text-dim); font-style: normal; }
+.settings-divider { border: none; border-top: 1px solid var(--border); margin: 4px 0; }
+.section-label { font-size: 9px; color: var(--accent); letter-spacing: .14em; text-transform: uppercase; font-weight: 600; }
+.field-hint { font-size: 10px; color: var(--text-dim); line-height: 1.4; }
+.field input[type=number] { background: rgba(34,27,42,.9); border: 1px solid var(--border); color: var(--text); padding: 8px 11px; font: 11.5px var(--mono); letter-spacing: .04em; width: 100%; }
+.field input[type=number]:focus { outline: 0; border-color: var(--accent); }
+#setSysPrompt { background: rgba(34,27,42,.9); border: 1px solid var(--border); color: var(--text); padding: 8px 11px; font: 11.5px var(--mono); letter-spacing: .04em; width: 100%; resize: vertical; min-height: 60px; }
+#setSysPrompt:focus { outline: 0; border-color: var(--accent); }
 .field select, .field input[type=text] { background: rgba(34,27,42,.9); border: 1px solid var(--border); color: var(--text); padding: 8px 11px; font: 11.5px var(--mono); letter-spacing: .04em; }
 .field select:focus, .field input[type=text]:focus { outline: 0; border-color: var(--accent); }
 .field input[type=range] { accent-color: var(--accent); width: 100%; }
@@ -1490,16 +1980,646 @@ body {
 .btn-ghost:hover { border-color: var(--text-2); }
 /* ---- BACKDROP + SCROLLBARS ------------------------------------------------- */
 .backdrop { position: fixed; inset: 0; z-index: 150; background: rgba(22,17,24,.6); backdrop-filter: blur(2px); }
-::-webkit-scrollbar { width: 4px; }
+::-webkit-scrollbar { width: 8px; height: 8px; }
 ::-webkit-scrollbar-track { background: transparent; }
-::-webkit-scrollbar-thumb { background: rgba(240,168,122,.18); border-radius: 2px; }
-::-webkit-scrollbar-thumb:hover { background: rgba(240,168,122,.38); }
+::-webkit-scrollbar-thumb { background: rgba(240,168,122,.22); border-radius: 4px; border: 2px solid transparent; background-clip: padding-box; }
+::-webkit-scrollbar-thumb:hover { background: rgba(240,168,122,.42); background-clip: padding-box; border: 2px solid transparent; }
+::-webkit-scrollbar-corner { background: transparent; }
 /* Firefox scrollbar */
-* { scrollbar-width: thin; scrollbar-color: rgba(240,168,122,.18) transparent; }
+* { scrollbar-width: thin; scrollbar-color: rgba(240,168,122,.28) transparent; }
 @media (max-width: 900px) {
   .hud-window { max-width: 90vw; }
   .j-sub { display: none; }
   .quick-cards { grid-template-columns: 1fr 1fr; }
+}
+
+/* ===== Specialty widget cards (stocks, weather, crypto, sports, calendar) ===== */
+/* Shared shell */
+.sw-window { min-width: 280px; }
+.sw-window .hud-win-body { padding: 0; gap: 0; }
+.sw-card { padding: 12px 14px; font-family: var(--mono); }
+.sw-card .sw-spark, .sw-card .sw-sub, .sw-card .sw-watch { margin-top: 10px; }
+
+/* ---- Stocks / Crypto ---- */
+.sw-stocks, .sw-crypto {
+  display: flex; flex-direction: column;
+}
+.sw-stocks .sw-hero, .sw-crypto .sw-hero {
+  display: flex; align-items: flex-start; justify-content: space-between;
+  gap: 12px;
+}
+.sw-stocks .sw-sym, .sw-crypto .sw-sym {
+  font-size: 22px; color: #fff; letter-spacing: .04em; font-weight: 700;
+  text-shadow: 0 0 14px var(--accent-glow); line-height: 1;
+}
+.sw-stocks .sw-name, .sw-crypto .sw-name {
+  font-size: 10px; color: var(--text-2); margin-top: 4px; letter-spacing: .04em;
+  max-width: 160px; overflow: hidden; text-overflow: ellipsis; white-space: nowrap;
+}
+.sw-stocks .sw-price, .sw-crypto .sw-price {
+  font-size: 26px; color: #fff; line-height: 1; text-align: right;
+  text-shadow: 0 0 16px var(--accent-glow); letter-spacing: .02em;
+}
+.sw-stocks .sw-chg, .sw-crypto .sw-chg {
+  font-size: 11px; margin-top: 5px; text-align: right; letter-spacing: .03em;
+}
+.sw-stocks .sw-chg.ok, .sw-crypto .sw-chg.ok { color: var(--ok); }
+.sw-stocks .sw-chg.hot, .sw-crypto .sw-chg.hot { color: var(--hot); }
+.sw-stocks .sw-chg-pct, .sw-crypto .sw-chg-pct { opacity: .85; font-weight: 600; }
+.sw-stocks .sw-spark, .sw-crypto .sw-spark {
+  background: linear-gradient(180deg, rgba(240,168,122,.04), transparent);
+  border-top: 1px solid var(--border); border-bottom: 1px solid var(--border);
+  padding: 6px 0; margin: 8px 0 0;
+}
+.sw-stocks .sw-spark svg, .sw-crypto .sw-spark svg { width: 100%; height: 60px; display: block; }
+.sw-stocks .sw-sub, .sw-crypto .sw-sub {
+  display: grid; grid-template-columns: repeat(4, 1fr); gap: 0;
+  border-top: 1px solid var(--border); padding-top: 8px;
+}
+.sw-stocks .sw-subcell, .sw-crypto .sw-subcell {
+  display: flex; flex-direction: column; align-items: flex-start;
+}
+.sw-stocks .sw-subl, .sw-crypto .sw-subl {
+  font-size: 8px; color: var(--text-dim); letter-spacing: .12em; text-transform: uppercase;
+}
+.sw-stocks .sw-subv, .sw-crypto .sw-subv {
+  font-size: 11px; color: var(--text); margin-top: 2px;
+}
+.sw-stocks .sw-watch, .sw-crypto .sw-watch {
+  display: flex; flex-direction: column; gap: 0;
+  border-top: 1px solid var(--border); padding-top: 6px;
+}
+.sw-stocks .sw-watch-row, .sw-crypto .sw-watch-row {
+  display: grid; grid-template-columns: 60px 1fr 70px 56px;
+  align-items: center; gap: 8px; padding: 5px 0;
+  font-size: 10px; border-bottom: 1px solid rgba(240,168,122,.04);
+}
+.sw-stocks .sw-watch-row:last-child, .sw-crypto .sw-watch-row:last-child { border-bottom: 0; }
+.sw-stocks .sw-watch-sym, .sw-crypto .sw-watch-sym {
+  color: var(--accent); letter-spacing: .04em; font-weight: 600;
+}
+.sw-stocks .sw-watch-name, .sw-crypto .sw-watch-name {
+  color: var(--text-2); overflow: hidden; text-overflow: ellipsis; white-space: nowrap;
+}
+.sw-stocks .sw-watch-price, .sw-crypto .sw-watch-price {
+  color: var(--text); text-align: right;
+}
+.sw-stocks .sw-watch-chg, .sw-crypto .sw-watch-chg {
+  text-align: right; font-weight: 600;
+}
+.sw-stocks .sw-watch-chg.ok, .sw-crypto .sw-watch-chg.ok { color: var(--ok); }
+.sw-stocks .sw-watch-chg.hot, .sw-crypto .sw-watch-chg.hot { color: var(--hot); }
+
+/* ---- Weather ---- */
+.sw-weather { padding: 0; }
+.sw-weather .ww-hero {
+  display: flex; align-items: center; gap: 16px;
+  padding: 16px 16px 12px;
+  background: linear-gradient(135deg, rgba(240,168,122,.10), rgba(240,168,122,0) 70%);
+  border-bottom: 1px solid var(--border);
+}
+.sw-weather .ww-ic {
+  font-size: 56px; line-height: 1; color: var(--accent);
+  text-shadow: 0 0 18px var(--accent-glow); flex-shrink: 0;
+}
+.sw-weather .ww-hero-r { flex: 1; min-width: 0; }
+.sw-weather .ww-loc {
+  font-size: 11px; color: var(--accent); letter-spacing: .14em;
+  text-transform: uppercase; text-shadow: 0 0 8px var(--accent-glow);
+  overflow: hidden; text-overflow: ellipsis; white-space: nowrap;
+}
+.sw-weather .ww-temp {
+  font-size: 42px; color: #fff; line-height: 1; margin-top: 4px;
+  text-shadow: 0 0 22px var(--accent-glow); letter-spacing: .02em;
+}
+.sw-weather .ww-cond {
+  font-size: 11px; color: var(--text); margin-top: 4px; letter-spacing: .04em;
+}
+.sw-weather .ww-meta {
+  display: grid; grid-template-columns: repeat(auto-fit, minmax(70px, 1fr));
+  gap: 0; padding: 10px 14px;
+  border-bottom: 1px solid var(--border);
+}
+.sw-weather .ww-metacell { padding: 0 6px; border-left: 1px solid var(--border); }
+.sw-weather .ww-metacell:first-child { border-left: 0; padding-left: 0; }
+.sw-weather .ww-metal {
+  font-size: 8px; color: var(--text-dim); letter-spacing: .12em; text-transform: uppercase;
+}
+.sw-weather .ww-metav { font-size: 12px; color: var(--text); margin-top: 2px; }
+.sw-weather .ww-fc {
+  display: grid; grid-auto-flow: column; grid-auto-columns: 1fr;
+  padding: 10px 6px 12px;
+}
+.sw-weather .ww-fcday {
+  display: flex; flex-direction: column; align-items: center; gap: 4px;
+  padding: 6px 2px; border-radius: 3px;
+  transition: background .2s var(--ease);
+}
+.sw-weather .ww-fcday:hover { background: rgba(240,168,122,.06); }
+.sw-weather .ww-fcd {
+  font-size: 9px; color: var(--text-dim); letter-spacing: .12em; text-transform: uppercase;
+}
+.sw-weather .ww-fci { font-size: 18px; color: var(--accent); line-height: 1; }
+.sw-weather .ww-fch { font-size: 11px; color: var(--text); font-weight: 600; }
+.sw-weather .ww-fcl { font-size: 10px; color: var(--text-dim); }
+
+/* ---- Sports ---- */
+.sw-sports { display: flex; flex-direction: column; }
+.sw-sports .sx-row {
+  display: grid; grid-template-columns: 1fr auto 1fr;
+  align-items: center; gap: 12px; padding: 11px 4px;
+  border-bottom: 1px solid var(--border);
+}
+.sw-sports .sx-row:last-child { border-bottom: 0; }
+.sw-sports .sx-side { min-width: 0; }
+.sw-sports .sx-side.win .sx-name { color: var(--accent); text-shadow: 0 0 8px var(--accent-glow); }
+.sw-sports .sx-home { text-align: right; }
+.sw-sports .sx-name {
+  font-size: 12px; color: var(--text); font-weight: 600; letter-spacing: .03em;
+  overflow: hidden; text-overflow: ellipsis; white-space: nowrap;
+}
+.sw-sports .sx-rec { font-size: 9px; color: var(--text-dim); margin-top: 2px; letter-spacing: .04em; }
+.sw-sports .sx-mid { display: flex; flex-direction: column; align-items: center; gap: 3px; min-width: 60px; }
+.sw-sports .sx-score {
+  font-size: 18px; color: var(--text-dim); letter-spacing: .04em; line-height: 1;
+  display: flex; align-items: center; gap: 6px;
+}
+.sw-sports .sx-score .win { color: #fff; font-weight: 700; text-shadow: 0 0 8px var(--accent-glow); }
+.sw-sports .sx-dash { color: var(--text-dim); }
+.sw-sports .sx-status {
+  font-size: 9px; color: var(--text-2); letter-spacing: .12em; text-transform: uppercase;
+  display: flex; align-items: center; gap: 5px;
+}
+.sw-sports .sx-status.live { color: var(--hot); }
+.sw-sports .sx-status.final { color: var(--ok); }
+.sw-sports .sx-status .sx-dot {
+  width: 6px; height: 6px; border-radius: 50%; background: var(--hot);
+  box-shadow: 0 0 6px var(--hot); animation: pulse 1.2s ease infinite;
+}
+.sw-sports .sx-note {
+  font-size: 9px; color: var(--text-dim); margin-top: 2px; max-width: 140px;
+  text-align: center; line-height: 1.3;
+}
+
+/* ---- Calendar ---- */
+.sw-cal { display: flex; flex-direction: column; }
+.sw-cal .cx-row {
+  display: grid; grid-template-columns: 80px 1fr; gap: 12px;
+  padding: 9px 4px; border-bottom: 1px solid var(--border);
+  border-left: 2px solid var(--cx-color, var(--accent));
+  padding-left: 10px; margin-left: -2px;
+}
+.sw-cal .cx-row:last-child { border-bottom: 0; }
+.sw-cal .cx-time { display: flex; flex-direction: column; align-items: flex-start; }
+.sw-cal .cx-time-t { font-size: 13px; color: var(--accent); font-weight: 600; letter-spacing: .02em; }
+.sw-cal .cx-time-d { font-size: 9px; color: var(--text-dim); margin-top: 2px; letter-spacing: .04em; }
+.sw-cal .cx-body { min-width: 0; }
+.sw-cal .cx-title { font-size: 12px; color: var(--text); font-weight: 600; letter-spacing: .02em; }
+.sw-cal .cx-loc { font-size: 10px; color: var(--text-2); margin-top: 3px; letter-spacing: .03em; }
+.sw-cal .cx-note { font-size: 10px; color: var(--text-dim); margin-top: 4px; line-height: 1.4; }
+
+/* =========================================================================
+   v2 SPECIALTY WIDGETS — Robinhood / Apple-Weather / ESPN / Calendar look
+   ========================================================================= */
+
+/* shared */
+.sw-card .st-tab,
+.sw-card .st-chip,
+.sw-card .sx-status-lbl,
+.sw-card .sx-dot,
+.sw-card .ww-fcbar-fill,
+.sw-card .st-range-fill { font-family: var(--mono); }
+
+/* ---- STOCKS / CRYPTO ---- */
+.sw-stocks { padding: 0; }
+.sw-stocks .st-head {
+  display: flex; align-items: flex-start; justify-content: space-between;
+  gap: 14px; padding: 14px 16px 12px;
+  background: linear-gradient(180deg, rgba(240,168,122,.07), rgba(240,168,122,0) 80%);
+  border-bottom: 1px solid var(--border);
+}
+.sw-stocks .st-head-l { min-width: 0; flex: 1; }
+.sw-stocks .st-sym {
+  font-size: 26px; color: #fff; letter-spacing: .04em; font-weight: 700;
+  text-shadow: 0 0 16px var(--accent-glow); line-height: 1; font-family: var(--mono);
+}
+.sw-stocks .st-name {
+  font-size: 10.5px; color: var(--text-2); margin-top: 4px; letter-spacing: .03em;
+  overflow: hidden; text-overflow: ellipsis; white-space: nowrap;
+}
+.sw-stocks .st-chips { display: flex; gap: 5px; margin-top: 8px; flex-wrap: wrap; }
+.sw-stocks .st-chip {
+  font-size: 8.5px; padding: 2px 7px; letter-spacing: .1em; text-transform: uppercase;
+  border: 1px solid; line-height: 1.5;
+}
+.sw-stocks .st-chip.st-ex { color: var(--text-2); border-color: var(--border-h); background: rgba(240,168,122,.04); }
+.sw-stocks .st-chip.st-ms-open   { color: var(--ok);  border-color: rgba(142,207,149,.35); background: rgba(142,207,149,.06); }
+.sw-stocks .st-chip.st-ms-closed { color: var(--text-2); border-color: var(--border); background: rgba(255,255,255,.02); }
+.sw-stocks .st-head-r { text-align: right; flex-shrink: 0; }
+.sw-stocks .st-price {
+  font-size: 30px; color: #fff; line-height: 1; letter-spacing: .01em;
+  text-shadow: 0 0 18px var(--accent-glow); font-variant-numeric: tabular-nums;
+  font-family: var(--mono); font-weight: 600;
+}
+.sw-stocks .st-chg {
+  font-size: 11px; margin-top: 6px; letter-spacing: .04em; font-family: var(--mono);
+  display: inline-flex; align-items: baseline; gap: 8px;
+}
+.sw-stocks .st-chg.ok  { color: var(--ok); }
+.sw-stocks .st-chg.hot { color: var(--hot); }
+.sw-stocks .st-chg.flat{ color: var(--text-2); }
+.sw-stocks .st-chg-pct { font-weight: 700; opacity: .92; }
+
+/* chart panel */
+.sw-stocks .st-chart { padding: 8px 12px 0; border-bottom: 1px solid var(--border); }
+.sw-stocks .st-tabs {
+  display: flex; gap: 0; margin: 0 0 6px;
+  border-bottom: 1px solid rgba(240,168,122,.08);
+}
+.sw-stocks .st-tab {
+  padding: 5px 11px; font-size: 9.5px; color: var(--text-2);
+  letter-spacing: .1em; text-transform: uppercase; cursor: default;
+  border-bottom: 1px solid transparent; margin-bottom: -1px;
+  transition: color .15s var(--ease), border-color .15s var(--ease);
+}
+.sw-stocks .st-tab:hover { color: var(--text); }
+.sw-stocks .st-tab.st-tab-active {
+  color: var(--accent); border-bottom-color: var(--accent);
+  text-shadow: 0 0 8px var(--accent-glow);
+}
+.sw-stocks .st-chart-svg { width: 100%; height: 160px; display: block; }
+
+/* stats grid */
+.sw-stocks .st-stats {
+  display: grid; grid-template-columns: 1fr 1fr; gap: 0;
+  border-bottom: 1px solid var(--border);
+}
+.sw-stocks .st-stat {
+  display: flex; flex-direction: column; gap: 3px;
+  padding: 9px 14px;
+  border-right: 1px solid var(--border);
+  border-bottom: 1px solid rgba(240,168,122,.04);
+}
+.sw-stocks .st-stat:nth-child(2n)  { border-right: 0; }
+.sw-stocks .st-stat:nth-last-child(-n+2) { border-bottom: 0; }
+.sw-stocks .st-stat-l {
+  font-size: 8.5px; color: var(--text-dim); letter-spacing: .12em; text-transform: uppercase;
+}
+.sw-stocks .st-stat-v {
+  font-size: 12.5px; color: #fff; font-weight: 600; letter-spacing: .02em;
+  font-family: var(--mono); font-variant-numeric: tabular-nums;
+}
+.sw-stocks .st-stat-r { display: flex; flex-direction: column; gap: 4px; }
+.sw-stocks .st-range {
+  position: relative; height: 6px; margin-top: 4px;
+}
+.sw-stocks .st-range-track {
+  position: absolute; inset: 0;
+  background: linear-gradient(90deg, rgba(229,146,143,.35), rgba(230,192,115,.4), rgba(142,207,149,.35));
+  border-radius: 1px; opacity: .6;
+}
+.sw-stocks .st-range-fill {
+  position: absolute; top: 0; bottom: 0; left: 0;
+  background: rgba(240,168,122,.18);
+}
+.sw-stocks .st-range-tick {
+  position: absolute; top: -3px; width: 2px; height: 12px; background: var(--accent);
+  box-shadow: 0 0 6px var(--accent-glow);
+  transform: translateX(-1px);
+}
+.sw-stocks .st-range-vals {
+  display: flex; justify-content: space-between;
+  font-size: 9.5px; color: var(--text-2); font-family: var(--mono);
+  font-variant-numeric: tabular-nums;
+}
+
+/* watchlist */
+.sw-stocks .st-watch {
+  display: flex; flex-direction: column; gap: 0;
+  border-bottom: 1px solid var(--border);
+}
+.sw-stocks .st-watch-row {
+  display: grid; grid-template-columns: 60px 64px 1fr 64px 60px;
+  align-items: center; gap: 10px; padding: 7px 14px;
+  font-size: 10.5px; border-bottom: 1px solid rgba(240,168,122,.05);
+  transition: background .15s var(--ease);
+}
+.sw-stocks .st-watch-row:last-child { border-bottom: 0; }
+.sw-stocks .st-watch-row:hover { background: rgba(240,168,122,.04); }
+.sw-stocks .st-watch-sym {
+  color: var(--accent); letter-spacing: .04em; font-weight: 700; font-family: var(--mono);
+  text-shadow: 0 0 6px var(--accent-glow);
+}
+.sw-stocks .st-watch-spk { display: flex; align-items: center; height: 18px; }
+.sw-stocks .st-watch-spk svg { width: 100%; height: 18px; }
+.sw-stocks .st-watch-name {
+  color: var(--text-2); overflow: hidden; text-overflow: ellipsis; white-space: nowrap;
+  font-size: 10px;
+}
+.sw-stocks .st-watch-price {
+  color: var(--text); text-align: right; font-family: var(--mono);
+  font-variant-numeric: tabular-nums;
+}
+.sw-stocks .st-watch-chg {
+  text-align: right; font-weight: 700; font-family: var(--mono);
+  font-variant-numeric: tabular-nums;
+}
+.sw-stocks .st-watch-chg.ok  { color: var(--ok); }
+.sw-stocks .st-watch-chg.hot { color: var(--hot); }
+
+/* news */
+.sw-stocks .st-news { padding: 8px 14px 12px; }
+.sw-stocks .st-news-row {
+  display: flex; gap: 9px; padding: 6px 0; align-items: flex-start;
+  border-bottom: 1px solid rgba(240,168,122,.05);
+}
+.sw-stocks .st-news-row:last-child { border-bottom: 0; }
+.sw-stocks .st-news-dot {
+  width: 6px; height: 6px; border-radius: 50%; background: var(--accent);
+  margin-top: 5px; flex-shrink: 0; box-shadow: 0 0 6px var(--accent-glow);
+}
+.sw-stocks .st-news-body { min-width: 0; flex: 1; }
+.sw-stocks .st-news-title { font-size: 10.5px; color: var(--text); line-height: 1.4; letter-spacing: .02em; }
+.sw-stocks .st-news-meta {
+  display: flex; gap: 5px; margin-top: 3px;
+  font-size: 8.5px; color: var(--text-dim); letter-spacing: .08em; text-transform: uppercase;
+}
+.sw-stocks .st-news-sep { opacity: .6; }
+
+/* crypto variant — same chassis, slight tint */
+.sw-stocks.sw-crypto { background: linear-gradient(180deg, rgba(142,100,120,.04), transparent 30%); }
+.sw-stocks.sw-crypto .st-head { background: linear-gradient(180deg, rgba(229,146,143,.08), rgba(229,146,143,0) 80%); }
+
+/* ---- WEATHER ---- */
+.sw-weather { padding: 0; position: relative; overflow: hidden; }
+.sw-weather .ww-hero {
+  position: relative;
+  display: flex; align-items: center; justify-content: space-between; gap: 16px;
+  padding: 18px 18px 16px; border-bottom: 1px solid var(--border);
+  isolation: isolate;
+}
+.sw-weather .ww-hero::before {
+  content: ''; position: absolute; inset: 0; z-index: -1; opacity: .9;
+  background: linear-gradient(135deg, rgba(240,168,122,.18), rgba(240,168,122,0) 70%);
+  transition: background .6s var(--ease);
+}
+.sw-weather.ww-tone-day .ww-hero::before   { background: linear-gradient(135deg, rgba(240,168,122,.22), rgba(230,144,115,.04) 70%); }
+.sw-weather.ww-tone-cloud .ww-hero::before { background: linear-gradient(135deg, rgba(176,166,186,.22), rgba(120,110,130,.05) 70%); }
+.sw-weather.ww-tone-rain .ww-hero::before  { background: linear-gradient(135deg, rgba(110,140,180,.28), rgba(70,90,130,.08) 70%); }
+.sw-weather.ww-tone-snow .ww-hero::before  { background: linear-gradient(135deg, rgba(220,225,235,.25), rgba(180,190,210,.06) 70%); }
+.sw-weather.ww-tone-fog .ww-hero::before   { background: linear-gradient(135deg, rgba(160,155,170,.22), rgba(110,105,120,.06) 70%); }
+.sw-weather.ww-tone-night .ww-hero::before { background: linear-gradient(135deg, rgba(80,70,120,.30), rgba(40,30,70,.10) 70%); }
+
+.sw-weather .ww-hero-l { min-width: 0; flex: 1; }
+.sw-weather .ww-loc {
+  font-size: 11px; color: var(--accent); letter-spacing: .16em; text-transform: uppercase;
+  text-shadow: 0 0 8px var(--accent-glow); font-weight: 600;
+  overflow: hidden; text-overflow: ellipsis; white-space: nowrap;
+}
+.sw-weather .ww-upd {
+  font-size: 8.5px; color: var(--text-dim); margin-top: 2px; letter-spacing: .08em; text-transform: uppercase;
+}
+.sw-weather .ww-temp {
+  font-size: 64px; color: #fff; line-height: .95; margin-top: 6px; font-weight: 200;
+  text-shadow: 0 0 28px var(--accent-glow); letter-spacing: -.02em;
+  font-variant-numeric: tabular-nums;
+}
+.sw-weather .ww-temp-u {
+  font-size: 36px; color: var(--accent); vertical-align: top; line-height: 1; margin-left: 2px;
+  font-weight: 300;
+}
+.sw-weather .ww-cond {
+  font-size: 12px; color: var(--text); margin-top: 4px; letter-spacing: .04em; font-weight: 500;
+}
+.sw-weather .ww-hl {
+  font-size: 11px; color: var(--text-2); margin-top: 6px; letter-spacing: .04em;
+  display: flex; gap: 6px; align-items: baseline; font-family: var(--mono);
+}
+.sw-weather .ww-hl-sep { color: var(--text-dim); }
+
+.sw-weather .ww-ic {
+  font-size: 84px; line-height: 1; flex-shrink: 0;
+  text-shadow: 0 0 22px var(--accent-glow);
+  animation: wwIcBob 6s ease-in-out infinite;
+}
+@keyframes wwIcBob { 0%,100% { transform: translateY(0); } 50% { transform: translateY(-3px); } }
+
+.sw-weather .ww-hourly {
+  padding: 12px 6px 6px; border-bottom: 1px solid var(--border);
+  background: linear-gradient(180deg, rgba(240,168,122,.03), transparent);
+}
+.sw-weather .ww-hourly-svg { width: 100%; height: 92px; display: block; }
+
+.sw-weather .ww-meta {
+  display: grid; grid-template-columns: repeat(4, 1fr); gap: 0;
+  border-bottom: 1px solid var(--border);
+  background: rgba(34,27,42,.4);
+}
+.sw-weather .ww-metacell {
+  display: flex; flex-direction: column; gap: 3px;
+  padding: 10px 12px; border-left: 1px solid var(--border);
+}
+.sw-weather .ww-metacell:first-child { border-left: 0; }
+.sw-weather .ww-metal {
+  font-size: 8.5px; color: var(--text-dim); letter-spacing: .12em; text-transform: uppercase;
+}
+.sw-weather .ww-metav {
+  font-size: 12.5px; color: #fff; font-weight: 600; font-family: var(--mono);
+  font-variant-numeric: tabular-nums;
+}
+
+.sw-weather .ww-fc {
+  display: grid; grid-auto-flow: column; grid-auto-columns: 1fr; gap: 0;
+  padding: 10px 4px 12px;
+}
+.sw-weather .ww-fcday {
+  display: flex; flex-direction: column; align-items: center; gap: 4px;
+  padding: 8px 4px; border-radius: 4px;
+  transition: background .2s var(--ease);
+}
+.sw-weather .ww-fcday:hover { background: rgba(240,168,122,.06); }
+.sw-weather .ww-fcd {
+  font-size: 9px; color: var(--text-2); letter-spacing: .12em; text-transform: uppercase; font-weight: 600;
+}
+.sw-weather .ww-fci { font-size: 20px; color: var(--accent); line-height: 1; margin: 2px 0; }
+.sw-weather .ww-fch { font-size: 12px; color: #fff; font-weight: 600; font-family: var(--mono); }
+.sw-weather .ww-fcl { font-size: 10.5px; color: var(--text-dim); font-family: var(--mono); }
+.sw-weather .ww-fcbar {
+  width: 70%; height: 4px; background: rgba(240,168,122,.08);
+  position: relative; border-radius: 1px; margin: 2px 0 0; overflow: visible;
+}
+.sw-weather .ww-fcbar-fill {
+  position: absolute; top: 0; bottom: 0;
+  background: linear-gradient(90deg, #8ecf95, #f0a87a 50%, #e5928f);
+  border-radius: 1px;
+}
+.sw-weather .ww-fcp {
+  font-size: 8.5px; color: var(--text-2); letter-spacing: .04em; font-family: var(--mono);
+  margin-top: 2px;
+}
+.sw-weather .ww-fcp:empty, .sw-weather .ww-fcday:not(:has(.ww-fcp)) .ww-fcp { display: none; }
+
+.sw-weather .ww-sun {
+  padding: 8px 14px 12px; border-top: 1px solid var(--border);
+  background: linear-gradient(180deg, rgba(230,192,115,.04), transparent);
+}
+.sw-weather .ww-sun-svg { width: 100%; height: 58px; display: block; }
+
+/* ---- SPORTS ---- */
+.sw-sports { padding: 0; display: flex; flex-direction: column; }
+.sw-sports .sx-league {
+  padding: 7px 16px; font-size: 9px; color: var(--accent); letter-spacing: .16em; text-transform: uppercase;
+  background: rgba(240,168,122,.06); border-bottom: 1px solid var(--border); font-weight: 600;
+  text-shadow: 0 0 6px var(--accent-glow);
+}
+.sw-sports .sx-row {
+  padding: 12px 16px; border-bottom: 1px solid var(--border);
+  position: relative;
+}
+.sw-sports .sx-row:last-child { border-bottom: 0; }
+.sw-sports .sx-status-row {
+  display: flex; align-items: center; gap: 7px; margin-bottom: 9px;
+  font-size: 9px; letter-spacing: .14em; text-transform: uppercase;
+}
+.sw-sports .sx-status-lbl {
+  padding: 2px 7px; font-weight: 700; line-height: 1.4;
+}
+.sw-sports .sx-live   { color: #fff; background: var(--hot); box-shadow: 0 0 8px rgba(229,146,143,.4); }
+.sw-sports .sx-final  { color: var(--text-2); background: rgba(255,255,255,.04); border: 1px solid var(--border); padding: 1px 6px; }
+.sw-sports .sx-sched  { color: var(--text-2); }
+.sw-sports .sx-time   { color: var(--text-2); font-size: 9px; margin-left: auto; font-family: var(--mono); letter-spacing: .04em; }
+.sw-sports .sx-dot {
+  width: 7px; height: 7px; border-radius: 50%; background: var(--hot);
+  box-shadow: 0 0 8px var(--hot); animation: sxPulse 1.2s ease infinite;
+  flex-shrink: 0;
+}
+@keyframes sxPulse { 50% { opacity: .35; transform: scale(.8); } }
+
+.sw-sports .sx-game { display: flex; flex-direction: column; gap: 7px; }
+.sw-sports .sx-team {
+  display: grid; grid-template-columns: 32px 1fr auto;
+  align-items: center; gap: 12px;
+  padding: 4px 0;
+  transition: opacity .2s var(--ease);
+}
+.sw-sports .sx-team.sx-win { /* winner */ }
+.sw-sports .sx-team:not(.sx-win) { opacity: .7; }
+
+.sw-sports .sx-logo {
+  width: 30px; height: 30px; border-radius: 6px;
+  display: flex; align-items: center; justify-content: center;
+  font-size: 11px; font-weight: 700; color: #fff;
+  border: 1px solid; font-family: var(--mono);
+  letter-spacing: .02em;
+  text-shadow: 0 1px 2px rgba(0,0,0,.4);
+}
+.sw-sports .sx-team-info { min-width: 0; }
+.sw-sports .sx-name {
+  font-size: 13px; color: var(--text); font-weight: 600; letter-spacing: .02em;
+  overflow: hidden; text-overflow: ellipsis; white-space: nowrap;
+  line-height: 1.2;
+}
+.sw-sports .sx-team.sx-win .sx-name { color: #fff; text-shadow: 0 0 8px var(--accent-glow); }
+.sw-sports .sx-rec { font-size: 9px; color: var(--text-dim); margin-top: 1px; letter-spacing: .04em; font-family: var(--mono); }
+.sw-sports .sx-score {
+  font-size: 22px; color: var(--text-dim); letter-spacing: .04em; line-height: 1;
+  font-family: var(--mono); font-variant-numeric: tabular-nums; font-weight: 600;
+  min-width: 36px; text-align: right;
+}
+.sw-sports .sx-score.sx-score-win {
+  color: #fff; text-shadow: 0 0 10px var(--accent-glow);
+}
+.sw-sports .sx-note {
+  font-size: 9.5px; color: var(--text-dim); margin-top: 7px; line-height: 1.4;
+  padding-left: 44px; font-style: italic;
+}
+
+/* ---- CALENDAR ---- */
+.sw-cal { padding: 0; display: flex; flex-direction: column; }
+.sw-cal .cx-date {
+  padding: 12px 16px 10px; border-bottom: 1px solid var(--border);
+  display: flex; align-items: baseline; gap: 10px;
+  background: linear-gradient(180deg, rgba(240,168,122,.06), transparent);
+}
+.sw-cal .cx-date::before { content: ''; }
+.sw-cal .cx-date-num {
+  font-size: 22px; color: #fff; font-weight: 200; letter-spacing: -.01em;
+  text-shadow: 0 0 14px var(--accent-glow);
+  font-variant-numeric: tabular-nums;
+}
+.sw-cal .cx-allday {
+  display: flex; flex-wrap: wrap; gap: 5px; padding: 8px 16px;
+  border-bottom: 1px solid var(--border); background: rgba(34,27,42,.3);
+}
+.sw-cal .cx-allday-pill {
+  font-size: 10px; color: var(--text); padding: 3px 9px;
+  background: color-mix(in srgb, var(--cx-color, var(--accent)) 12%, transparent);
+  border: 1px solid color-mix(in srgb, var(--cx-color, var(--accent)) 35%, transparent);
+  border-left: 2px solid var(--cx-color, var(--accent));
+  border-radius: 2px; letter-spacing: .02em;
+}
+
+.sw-cal .cx-timeline {
+  display: grid; grid-template-columns: 48px 1fr;
+  position: relative; min-height: 220px;
+}
+.sw-cal .cx-hours { position: relative; padding: 4px 0; }
+.sw-cal .cx-hour {
+  display: flex; align-items: flex-start; gap: 6px;
+  height: 50px; padding: 0 6px 0 0;
+  border-bottom: 1px dashed rgba(240,168,122,.06);
+}
+.sw-cal .cx-hour:last-child { border-bottom: 0; }
+.sw-cal .cx-hour-lbl {
+  font-size: 8.5px; color: var(--text-dim); letter-spacing: .04em;
+  font-family: var(--mono); text-align: right; flex-shrink: 0;
+  width: 30px; padding-top: 1px;
+}
+.sw-cal .cx-track {
+  position: relative; border-left: 1px solid var(--border); padding: 4px 0;
+  min-height: 100%;
+}
+.sw-cal .cx-ev {
+  position: absolute; left: 8px; right: 10px;
+  display: flex; gap: 8px; padding: 5px 8px 5px 10px;
+  background: color-mix(in srgb, var(--cx-color, var(--accent)) 14%, transparent);
+  border: 1px solid color-mix(in srgb, var(--cx-color, var(--accent)) 30%, transparent);
+  border-left: 2px solid var(--cx-color, var(--accent));
+  border-radius: 2px; overflow: hidden;
+  transition: transform .15s var(--ease), box-shadow .15s var(--ease);
+}
+.sw-cal .cx-ev:hover {
+  transform: translateX(1px);
+  box-shadow: 0 4px 14px rgba(0,0,0,.4);
+}
+.sw-cal .cx-ev-bar { display: none; }
+.sw-cal .cx-ev-body { min-width: 0; flex: 1; }
+.sw-cal .cx-ev-time {
+  font-size: 8.5px; color: var(--text-2); letter-spacing: .06em; text-transform: uppercase;
+  font-family: var(--mono);
+}
+.sw-cal .cx-ev-title {
+  font-size: 11px; color: #fff; font-weight: 600; letter-spacing: .02em;
+  line-height: 1.25; margin-top: 1px;
+  overflow: hidden; text-overflow: ellipsis; white-space: nowrap;
+}
+.sw-cal .cx-ev-loc {
+  font-size: 9px; color: var(--text-2); margin-top: 2px; letter-spacing: .03em;
+  overflow: hidden; text-overflow: ellipsis; white-space: nowrap;
+}
+.sw-cal .cx-now {
+  position: absolute; left: 0; right: 0; height: 0;
+  display: flex; align-items: center; pointer-events: none;
+  z-index: 2;
+}
+.sw-cal .cx-now-dot {
+  width: 8px; height: 8px; border-radius: 50%; background: var(--hot);
+  box-shadow: 0 0 8px var(--hot); margin-left: -4px; flex-shrink: 0;
+  position: relative; z-index: 1;
+}
+.sw-cal .cx-now-line {
+  flex: 1; height: 1px; background: var(--hot);
+  box-shadow: 0 0 4px var(--hot);
 }
 """
 
@@ -1509,7 +2629,7 @@ const $ = s => document.querySelector(s);
 const log = $('#log'), input = $('#input'), sendBtn = $('#send');
 let state = {
   chats: [], currentId: null, settings: {}, busy: false,
-  voiceOut: false, voiceName: '', renderedPanels: new Set(),
+  voiceOut: false, voiceName: '', renderedPanels: new Set(), closedWindows: [],
   projects: [], activeProjectId: null,
   _openProjects: new Set(), _openUnaffiliated: true, _openProjectsRoot: true,
 };
@@ -1651,15 +2771,16 @@ function renderPanels(text){
     // Data panels render as draggable floating windows.
     const inner=buildPanelInner(obj); if(!inner) return;
     state.renderedPanels.add(raw);
+    const idx=_winCascade; // capture before _nextWinPos increments
     const pos=_nextWinPos();
     const win=document.createElement('div'); win.className='hud-window';
-    win.style.left=pos.x+'px'; win.style.top=pos.y+'px';
+    win.style.cssText='left:'+pos.x+'px;top:'+pos.y+'px;--i:'+idx;
     const title=obj.title||(type.charAt(0).toUpperCase()+type.slice(1));
     win.innerHTML='<div class="hud-win-head"><span class="hud-win-title">'+esc(title)+'</span>'+
       '<button class="hud-win-close" title="Close">&times;</button></div>'+
       '<div class="hud-win-body">'+inner+'</div>'+
       '<div class="hud-win-resize"></div>';
-    win.querySelector('.hud-win-close').addEventListener('pointerdown',e=>{e.stopPropagation();win.remove();});
+    win.querySelector('.hud-win-close').addEventListener('pointerdown',e=>{e.stopPropagation();_closeWindow(win);});
     layer.appendChild(win);
     _initWindow(win);
   });
@@ -1739,7 +2860,7 @@ function buildInteractive(p){
 }
 function buildPanelInner(p){
   if(!p||typeof p!=='object') return null;
-  const title=p.title?'<div class="vpanel-title">'+esc(p.title)+'</div>':'';
+  const title='';
   let inner='';
   switch((p.panel||'').toLowerCase()){
     case 'stats':
@@ -1864,9 +2985,753 @@ function buildPanelInner(p){
       // center label
       slices+=`<circle cx="${cx}" cy="${cy}" r="${ri-4}" fill="#16111c" opacity="0.6"/>`;
       inner=`<svg viewBox="0 0 320 165" style="width:100%;height:auto">${slices}${legend}</svg>`; break; }
+    case 'stocks':{
+      const inner=buildStocksCard(p);
+      if(!inner) return null;
+      return title+inner;
+    }
+    case 'crypto':{
+      const inner=buildCryptoCard(p);
+      if(!inner) return null;
+      return title+inner;
+    }
+    case 'weather':{
+      const inner=buildWeatherCard(p);
+      if(!inner) return null;
+      return title+inner;
+    }
+    case 'sports':{
+      const inner=buildSportsCard(p);
+      if(!inner) return null;
+      return title+inner;
+    }
+    case 'calendar':{
+      const inner=buildCalendarCard(p);
+      if(!inner) return null;
+      return title+inner;
+    }
     default: return null;
   }
   return title+inner;
+}
+
+// ---- SPECIALTY WIDGETS (stocks, weather, crypto, sports, calendar) --------
+//
+// `show_widget` is the agent-facing tool. It emits an SSE `widget` event with
+// {type, title, data}; the frontend drops it into a draggable HUD window.
+// We share the renderer with the inline `hud` panels (panels also use
+// {panel: 'stocks', ...}) so the model can pick either channel.
+function _fmtNum(n, dp){
+  const x=Number(n); if(!isFinite(x)) return '—';
+  if(dp===undefined){
+    if(Math.abs(x)>=1000) return x.toLocaleString('en-US',{maximumFractionDigits:0});
+    return x.toLocaleString('en-US',{maximumFractionDigits:2});
+  }
+  return x.toLocaleString('en-US',{minimumFractionDigits:dp,maximumFractionDigits:dp});
+}
+// ============================================================================
+// SPECIALTY WIDGETS — stocks, crypto, weather, sports, calendar
+// ============================================================================
+//
+// `show_widget` is the agent-facing tool. It emits an SSE `widget` event with
+// {type, title, data}; the frontend drops it into a draggable HUD window.
+// We share the renderer with the inline `hud` panels (panels also use
+// {panel: 'stocks', ...}) so the model can pick either channel.
+//
+// The cards here are designed to look like small versions of the real apps:
+//   * stocks / crypto  → Robinhood × Bloomberg-terminal feel
+//   * weather          → Apple-Weather feel with condition-tinted header
+//   * sports           → ESPN scoreboard
+//   * calendar         → Google Calendar × Fantastical timeline
+
+function _fmtVol(n){
+  const x=Number(n); if(!isFinite(x)) return '—';
+  const a=Math.abs(x);
+  if(a>=1e12) return (x/1e12).toFixed(2)+'T';
+  if(a>=1e9)  return (x/1e9).toFixed(2)+'B';
+  if(a>=1e6)  return (x/1e6).toFixed(2)+'M';
+  if(a>=1e3)  return (x/1e3).toFixed(1)+'K';
+  return String(x);
+}
+function _fmtBig(n){ // for mkt cap, p/e, etc.
+  const x=Number(n); if(!isFinite(x)) return '—';
+  const a=Math.abs(x);
+  if(a>=1e12) return (x/1e12).toFixed(2)+'T';
+  if(a>=1e9)  return (x/1e9).toFixed(2)+'B';
+  if(a>=1e6)  return (x/1e6).toFixed(1)+'M';
+  return x.toLocaleString('en-US',{maximumFractionDigits:0});
+}
+function _fmtPct(n, dp){
+  const x=Number(n); if(!isFinite(x)) return '—';
+  return x.toFixed(dp===undefined?2:dp)+'%';
+}
+function _greetingColor(n){
+  // color by % change; thresholds tuned for a peach/rose palette
+  const x=Number(n);
+  if(!isFinite(x)) return 'var(--text-2)';
+  if(x>=1) return 'var(--ok)';
+  if(x<=-1) return 'var(--hot)';
+  return 'var(--text-2)';
+}
+function _marketState(now){
+  // Heuristic US-market state from local hour (server clock, no TZ awareness).
+  const d=new Date(now||Date.now());
+  const day=d.getDay(); if(day===0||day===6) return {open:false,label:'CLOSED · WKND'};
+  const h=d.getHours(), m=d.getMinutes();
+  const t=h*60+m;
+  if(t<4*60)        return {open:false,label:'CLOSED'};
+  if(t<9*60+30)     return {open:false,label:'PRE-MKT'};
+  if(t<16*60)       return {open:true, label:'● OPEN'};
+  if(t<20*60)       return {open:false,label:'AFTER-HRS'};
+  return {open:false,label:'CLOSED'};
+}
+
+// --- SVG chart primitives ---
+function _uid(p){ return (p||'id')+Math.random().toString(36).slice(2,8); }
+
+function _sparkSVG(vals, color, w, h){
+  // Compact gradient-filled line chart, like the existing 'line' panel but
+  // tighter and used as a hero accent for stocks/crypto.
+  const vs=(vals||[]).map(Number).filter(v=>isFinite(v));
+  if(vs.length<2) return '';
+  const W=w||120, H=h||34, padL=2, padR=2, padT=3, padB=3;
+  const min=Math.min(...vs), max=Math.max(...vs);
+  const span=Math.max(max-min, 1e-9);
+  const plotW=W-padL-padR, plotH=H-padT-padB;
+  const xFor=i=>padL+i*plotW/(vs.length-1);
+  const yFor=v=>padT+plotH-(v-min)/span*plotH;
+  const pts=vs.map((v,i)=>xFor(i)+','+yFor(v));
+  const area=[xFor(0)+','+(padT+plotH), ...pts, xFor(vs.length-1)+','+(padT+plotH)].join(' ');
+  const gid=_uid('spk');
+  const last=vs[vs.length-1], first=vs[0];
+  const up=last>=first;
+  const stroke=up?color:'#e5928f';
+  return '<svg viewBox="0 0 '+W+' '+H+'" class="vp-spark" preserveAspectRatio="none">'+
+    '<defs><linearGradient id="'+gid+'" x1="0" y1="0" x2="0" y2="1">'+
+    '<stop offset="0%" stop-color="'+stroke+'" stop-opacity=".35"/>'+
+    '<stop offset="100%" stop-color="'+stroke+'" stop-opacity="0"/></linearGradient></defs>'+
+    '<polygon points="'+area+'" fill="url(#'+gid+')"/>'+
+    '<polyline points="'+pts.join(' ')+'" fill="none" stroke="'+stroke+'" stroke-width="1.5" stroke-linecap="round" stroke-linejoin="round"/>'+
+    '<circle cx="'+xFor(vs.length-1)+'" cy="'+yFor(last)+'" r="2.4" fill="#16111c" stroke="'+stroke+'" stroke-width="1.5"/>'+
+    '</svg>';
+}
+
+function _areaChartSVG(vals, opts){
+  // Bigger chart: gridlines, area+line, current-price marker on the right.
+  // opts: {w, h, color, showAxis, padL, padR, padT, padB, gradient}
+  const vs=(vals||[]).map(Number).filter(v=>isFinite(v));
+  if(vs.length<2) return '';
+  const o=opts||{};
+  const W=o.w||480, H=o.h||160;
+  const padL=o.padL||36, padR=o.padR||52, padT=o.padT||10, padB=o.padB||18;
+  const stroke=o.color||'#f0a87a';
+  const min=Math.min(...vs), max=Math.max(...vs);
+  const span=Math.max(max-min, 1e-9);
+  const plotW=W-padL-padR, plotH=H-padT-padB;
+  const xFor=i=>padL+i*plotW/(vs.length-1);
+  const yFor=v=>padT+plotH-(v-min)/span*plotH;
+  const pts=vs.map((v,i)=>[xFor(i),yFor(v)]);
+  const area='M '+xFor(0)+' '+(padT+plotH)+' L '+pts.map(p=>p[0]+' '+p[1]).join(' L ')+' L '+xFor(vs.length-1)+' '+(padT+plotH)+' Z';
+  const line=pts.map((p,i)=>(i?'L':'M')+' '+p[0]+' '+p[1]).join(' ');
+  const gid=_uid('ar');
+  const last=vs[vs.length-1], first=vs[0];
+  const up=last>=first;
+  const lineStroke=up?stroke:'#e5928f';
+  // gridlines: 4 horizontal, plus min/max labels on the y-axis
+  const grid=[];
+  for(let g=0; g<=4; g++){
+    const y=padT+(g/4)*plotH;
+    const val=max-(g/4)*span;
+    grid.push('<line x1="'+padL+'" y1="'+y+'" x2="'+(W-padR)+'" y2="'+y+'" stroke="rgba(240,168,122,.08)" stroke-width="1" stroke-dasharray="'+(g===0||g===4?'0':'2 3')+'"/>');
+    if(o.showAxis!==false){
+      grid.push('<text x="'+(padL-6)+'" y="'+(y+3)+'" font-size="9" fill="#7d7388" text-anchor="end" font-family="inherit">'+_fmtNum(val, val<10?2:0)+'</text>');
+    }
+  }
+  // current-price marker on the right
+  const lastY=yFor(last);
+  const marker=o.gradient===false ? '' : (
+    '<line x1="'+xFor(vs.length-1)+'" y1="'+padT+'" x2="'+xFor(vs.length-1)+'" y2="'+(padT+plotH)+'" stroke="'+lineStroke+'" stroke-width="1" stroke-dasharray="2 2" opacity=".6"/>'+
+    '<rect x="'+(W-padR+2)+'" y="'+(lastY-9)+'" width="'+(padR-6)+'" height="18" rx="2" fill="'+lineStroke+'" opacity=".95"/>'+
+    '<text x="'+(W-padR/2-2)+'" y="'+(lastY+4)+'" font-size="10" fill="#16111c" text-anchor="middle" font-weight="700">'+_fmtNum(last,2)+'</text>'
+  );
+  return '<svg viewBox="0 0 '+W+' '+H+'" class="st-chart-svg" preserveAspectRatio="none">'+
+    '<defs><linearGradient id="'+gid+'" x1="0" y1="0" x2="0" y2="1">'+
+    '<stop offset="0%" stop-color="'+lineStroke+'" stop-opacity=".45"/>'+
+    '<stop offset="100%" stop-color="'+lineStroke+'" stop-opacity="0"/></linearGradient></defs>'+
+    grid.join('')+
+    '<path d="'+area+'" fill="url(#'+gid+')"/>'+
+    '<path d="'+line+'" fill="none" stroke="'+lineStroke+'" stroke-width="1.6" stroke-linecap="round" stroke-linejoin="round"/>'+
+    '<circle cx="'+xFor(vs.length-1)+'" cy="'+lastY+'" r="3" fill="#16111c" stroke="'+lineStroke+'" stroke-width="1.8"/>'+
+    marker+
+  '</svg>';
+}
+
+function _candleChartSVG(ohlc, opts){
+  // ohlc: array of {o,h,l,c}. Pure-SVG candlesticks.
+  const vs=(ohlc||[]).filter(c=>c&&isFinite(c.o)&&isFinite(c.h)&&isFinite(c.l)&&isFinite(c.c));
+  if(vs.length<2) return '';
+  const o=opts||{};
+  const W=o.w||480, H=o.h||160;
+  const padL=o.padL||36, padR=o.padR||12, padT=o.padT||8, padB=o.padB||12;
+  const min=Math.min(...vs.map(c=>c.l));
+  const max=Math.max(...vs.map(c=>c.h));
+  const span=Math.max(max-min, 1e-9);
+  const plotW=W-padL-padR, plotH=H-padT-padB;
+  const yFor=v=>padT+plotH-(v-min)/span*plotH;
+  const colW=plotW/vs.length;
+  const bodyW=Math.max(2, colW*0.62);
+  // gridlines
+  const grid=[];
+  for(let g=0; g<=4; g++){
+    const y=padT+(g/4)*plotH;
+    const val=max-(g/4)*span;
+    grid.push('<line x1="'+padL+'" y1="'+y+'" x2="'+(W-padR)+'" y2="'+y+'" stroke="rgba(240,168,122,.08)" stroke-width="1" stroke-dasharray="'+(g===0||g===4?'0':'2 3')+'"/>');
+    grid.push('<text x="'+(padL-6)+'" y="'+(y+3)+'" font-size="9" fill="#7d7388" text-anchor="end" font-family="inherit">'+_fmtNum(val, val<10?2:0)+'</text>');
+  }
+  const candles=vs.map((c,i)=>{
+    const cx=padL+i*colW+colW/2;
+    const up=c.c>=c.o;
+    const color=up?'#8ecf95':'#e5928f';
+    const yo=yFor(c.o), yc=yFor(c.c), yh=yFor(c.h), yl=yFor(c.l);
+    const top=Math.min(yo,yc), bot=Math.max(yo,yc);
+    return '<line x1="'+cx+'" y1="'+yh+'" x2="'+cx+'" y2="'+yl+'" stroke="'+color+'" stroke-width="1"/>'+
+      '<rect x="'+(cx-bodyW/2)+'" y="'+top+'" width="'+bodyW+'" height="'+Math.max(1,bot-top)+'" fill="'+color+'"/>';
+  }).join('');
+  return '<svg viewBox="0 0 '+W+' '+H+'" class="st-chart-svg" preserveAspectRatio="none">'+
+    grid.join('')+candles+
+  '</svg>';
+}
+
+function _hourlyTempSVG(hourly, opts){
+  // hourly: [{h: '1p'|'13', t: 72, icon?: 'sun'}]. Renders a smooth 24h temp
+  // curve with hour labels and a current-hour highlight band.
+  const hs=(hourly||[]).map(h=>({h:String(h.h||''), t:Number(h.t), icon:h.icon||''})).filter(h=>isFinite(h.t));
+  if(hs.length<2) return '';
+  const o=opts||{};
+  const W=o.w||480, H=o.h||92;
+  const padL=o.padL||10, padR=o.padR||10, padT=o.padT||16, padB=o.padB||22;
+  const ts=hs.map(h=>h.t);
+  const tmin=Math.min(...ts), tmax=Math.max(...ts);
+  const span=Math.max(tmax-tmin, 1);
+  const plotW=W-padL-padR, plotH=H-padT-padB;
+  const xFor=i=>padL+(i/(hs.length-1))*plotW;
+  const yFor=v=>padT+plotH-(v-tmin)/span*plotH;
+  // smooth path via Catmull-Rom → cubic Bezier
+  const pts=hs.map((h,i)=>[xFor(i),yFor(h.t)]);
+  let path='';
+  if(pts.length>=2){
+    path='M '+pts[0][0]+' '+pts[0][1];
+    for(let i=0; i<pts.length-1; i++){
+      const p0=pts[i-1]||pts[i], p1=pts[i], p2=pts[i+1], p3=pts[i+2]||p2;
+      const t=0.18;
+      const c1x=p1[0]+(p2[0]-p0[0])*t, c1y=p1[1]+(p2[1]-p0[1])*t;
+      const c2x=p2[0]-(p3[0]-p1[0])*t, c2y=p2[1]-(p3[1]-p1[1])*t;
+      path+=' C '+c1x+' '+c1y+', '+c2x+' '+c2y+', '+p2[0]+' '+p2[1];
+    }
+  }
+  const area=path+' L '+pts[pts.length-1][0]+' '+(padT+plotH)+' L '+pts[0][0]+' '+(padT+plotH)+' Z';
+  const gid=_uid('hr');
+  // current-hour band (first item)
+  const currentIdx=0;
+  const bx0=xFor(currentIdx)-plotW/(hs.length-1)/2, bx1=bx0+plotW/(hs.length-1);
+  // hour labels: show every 6th
+  const labels=hs.map((h,i)=>{
+    if(i!==0 && i!==hs.length-1 && i%6!==0) return '';
+    return '<text x="'+xFor(i)+'" y="'+(H-6)+'" font-size="9" fill="#b0a6ba" text-anchor="middle" font-family="inherit">'+esc(h.h)+'</text>';
+  }).join('');
+  // spot dots every 6
+  const dots=hs.map((h,i)=> i%6===0 || i===hs.length-1
+    ? '<circle cx="'+xFor(i)+'" cy="'+yFor(h.t)+'" r="2.4" fill="#16111c" stroke="#f0a87a" stroke-width="1.4"/>'
+    : '').join('');
+  return '<svg viewBox="0 0 '+W+' '+H+'" class="ww-hourly-svg" preserveAspectRatio="none">'+
+    '<defs><linearGradient id="'+gid+'" x1="0" y1="0" x2="0" y2="1">'+
+    '<stop offset="0%" stop-color="#f0a87a" stop-opacity=".35"/>'+
+    '<stop offset="100%" stop-color="#f0a87a" stop-opacity="0"/></linearGradient></defs>'+
+    '<rect x="'+bx0+'" y="'+padT+'" width="'+(bx1-bx0)+'" height="'+plotH+'" fill="rgba(240,168,122,.10)"/>'+
+    '<path d="'+area+'" fill="url(#'+gid+')"/>'+
+    '<path d="'+path+'" fill="none" stroke="#f0a87a" stroke-width="1.6" stroke-linecap="round" stroke-linejoin="round"/>'+
+    dots+labels+
+  '</svg>';
+}
+
+function _sunArcSVG(sunrise, sunset, now){
+  // sunrise/sunset: "HH:MM" strings. now: current "HH:MM" or null.
+  if(!sunrise||!sunset) return '';
+  const toMin=s=>{const p=s.split(':').map(Number); return p[0]*60+(p[1]||0);};
+  const sr=toMin(sunrise), ss=toMin(sunset);
+  const mid=(sr+ss)/2;
+  const total=ss-sr;
+  const W=240, H=58, padL=18, padR=18, baseline=H-10;
+  const ax0=padL, ax1=W-padR, ay=baseline;
+  const xFor=m=>ax0+((m-sr)/total)*(ax1-ax0);
+  const yFor=m=>{ const t=(m-sr)/total; return ay - Math.sin(t*Math.PI)*40; };
+  // arc + ground line
+  const sx0=xFor(sr), sy0=yFor(sr);
+  const sx1=xFor(ss), sy1=yFor(ss);
+  const mx=xFor(mid), my=yFor(mid);
+  const arc='M '+sx0+' '+sy0+' Q '+mx+' '+(my-12)+', '+sx1+' '+sy1;
+  const gid=_uid('sn');
+  // sun position from `now` (defaults to actual current time of day)
+  const nowMin = now ? toMin(now) : (()=>{const d=new Date(); return d.getHours()*60+d.getMinutes();})();
+  const sunFrac = Math.max(0, Math.min(1, (nowMin-sr)/total));
+  const sunX = ax0 + sunFrac*(ax1-ax0);
+  const sunY = ay - Math.sin(sunFrac*Math.PI)*40;
+  const sunOnArc = nowMin>=sr && nowMin<=ss;
+  const sun = sunOnArc
+    ? '<circle cx="'+sunX+'" cy="'+sunY+'" r="4.2" fill="#f0a87a" stroke="#16111c" stroke-width="1.4"/>'
+    : '<circle cx="'+sunOnArc?sunX:(nowMin<sr?sx0:sx1)+'" cy="'+(sunOnArc?sunY:ay-3)+'" r="3" fill="#5a4e69"/>';
+  return '<svg viewBox="0 0 '+W+' '+H+'" class="ww-sun-svg" preserveAspectRatio="xMidYMid meet">'+
+    '<defs><linearGradient id="'+gid+'" x1="0" y1="0" x2="1" y2="0">'+
+    '<stop offset="0%" stop-color="#e5928f" stop-opacity=".55"/>'+
+    '<stop offset="50%" stop-color="#f0a87a" stop-opacity=".85"/>'+
+    '<stop offset="100%" stop-color="#e6c073" stop-opacity=".55"/></linearGradient></defs>'+
+    '<line x1="'+ax0+'" y1="'+ay+'" x2="'+ax1+'" y2="'+ay+'" stroke="rgba(240,168,122,.18)" stroke-dasharray="2 3"/>'+
+    '<path d="'+arc+'" fill="none" stroke="url(#'+gid+')" stroke-width="1.6" stroke-linecap="round"/>'+
+    sun+
+    '<text x="'+sx0+'" y="'+(H-1)+'" font-size="9" fill="#b0a6ba" text-anchor="middle" font-family="inherit">'+esc(sunrise)+'</text>'+
+    '<text x="'+sx1+'" y="'+(H-1)+'" font-size="9" fill="#b0a6ba" text-anchor="middle" font-family="inherit">'+esc(sunset)+'</text>'+
+  '</svg>';
+}
+
+// ============================================================================
+// STOCKS / CRYPTO
+// ============================================================================
+//
+// A Robinhood × Bloomberg-terminal look. The card has:
+//   1. Hero row:  market status pill · exchange chip · symbol · name ·
+//                 price · colored change row
+//   2. Timeframe tab strip:  1D | 1W | 1M | 3M | 1Y | All   (CSS-only)
+//   3. Main chart:           area+line with gridlines + current-price marker,
+//                             or candlesticks if `ohlc` is provided
+//   4. Stats grid:           Open, High, Low, Volume, Mkt Cap, 52W Range
+//   5. Watchlist:            symbol · mini-spark · price · change%
+//   6. News strip (optional)
+
+function _stTimeframeTabs(active){
+  const tabs=['1D','1W','1M','3M','1Y','All'];
+  return '<div class="st-tabs">'+
+    tabs.map(t=>'<div class="st-tab'+(t===active?' st-tab-active':'')+'">'+t+'</div>').join('')+
+  '</div>';
+}
+
+function _stStatsGrid(p, isCrypto){
+  // Open/High/Low/Volume + Mkt Cap + 52W Range with mini position bar
+  const cells=[];
+  if(p.open!==undefined)  cells.push(['Open',  _fmtNum(p.open,2)]);
+  if(p.high!==undefined)  cells.push(['High',  _fmtNum(p.high,2)]);
+  if(p.low!==undefined)   cells.push(['Low',   _fmtNum(p.low,2)]);
+  if(p.volume!==undefined)cells.push([isCrypto?'24h Vol':'Volume', _fmtVol(p.volume)]);
+  if(p.market_cap!==undefined) cells.push(['Mkt Cap', _fmtBig(p.market_cap)]);
+  if(isCrypto && p.dominance!==undefined) cells.push(['Dominance', _fmtPct(p.dominance,1)]);
+  if(!isCrypto && p.pe!==undefined) cells.push(['P/E', _fmtNum(p.pe,2)]);
+  // 52W Range with mini bar
+  if(p.low_52w!==undefined && p.high_52w!==undefined){
+    const lo=Number(p.low_52w), hi=Number(p.high_52w), cur=Number(p.price);
+    const span=Math.max(hi-lo, 1e-9);
+    const pct=isFinite(cur)?Math.max(0,Math.min(100, ((cur-lo)/span)*100)):0;
+    const rangeHtml='<div class="st-stat"><div class="st-stat-l">52W Range</div>'+
+      '<div class="st-stat-r"><div class="st-range">'+
+      '<div class="st-range-track"></div>'+
+      '<div class="st-range-fill" style="width:'+pct.toFixed(1)+'%"></div>'+
+      '<div class="st-range-tick" style="left:'+pct.toFixed(1)+'%"></div>'+
+      '</div>'+
+      '<div class="st-range-vals"><span>'+_fmtNum(lo,2)+'</span><span>'+_fmtNum(hi,2)+'</span></div></div></div>';
+    cells.push(['__raw__', rangeHtml]);
+  }
+  const grid=cells.map(c=>{
+    if(c[0]==='__raw__') return c[1];
+    return '<div class="st-stat"><div class="st-stat-l">'+esc(c[0])+'</div><div class="st-stat-v">'+esc(c[1])+'</div></div>';
+  }).join('');
+  return '<div class="st-stats">'+grid+'</div>';
+}
+
+function _stWatchlist(items){
+  if(!items||!items.length) return '';
+  return '<div class="st-watch">'+
+    items.map(it=>{
+      const u=Number(it.change)>=0;
+      const spk=(it.chart&&it.chart.values)?_sparkSVG(it.chart.values, u?'#8ecf95':'#e5928f', 56, 18):'';
+      return '<div class="st-watch-row">'+
+        '<div class="st-watch-sym">'+esc(it.symbol||'')+'</div>'+
+        '<div class="st-watch-spk">'+spk+'</div>'+
+        '<div class="st-watch-name">'+esc(it.name||'')+'</div>'+
+        '<div class="st-watch-price">'+_fmtNum(it.price,2)+'</div>'+
+        '<div class="st-watch-chg '+(u?'ok':'hot')+'">'+(u?'+':'')+_fmtNum(it.change_pct,2)+'%</div>'+
+      '</div>';
+    }).join('')+
+  '</div>';
+}
+
+function _stNews(news){
+  if(!news||!news.length) return '';
+  return '<div class="st-news">'+
+    news.map(n=>'<div class="st-news-row">'+
+      '<div class="st-news-dot"></div>'+
+      '<div class="st-news-body">'+
+        '<div class="st-news-title">'+esc(n.title||'')+'</div>'+
+        '<div class="st-news-meta"><span>'+esc(n.source||'')+'</span>'+(n.time?'<span class="st-news-sep">·</span><span>'+esc(n.time)+'</span>':'')+'</div>'+
+      '</div>'+
+    '</div>').join('')+
+  '</div>';
+}
+
+function buildStocksCard(p){
+  // p: {title, symbol, name, price, change, change_pct, exchange, market_state,
+  //     open, high, low, volume, market_cap, pe, low_52w, high_52w,
+  //     chart: {labels, values, timeframe}, ohlc: [...], items: [...], news: [...]}
+  const items=(p.items||[]);
+  const hasTopLevel=(p.price!==undefined||p.change!==undefined||p.change_pct!==undefined||p.symbol);
+  if(!items.length && !p.chart && !p.ohlc && !hasTopLevel) return null;
+
+  // hero
+  const sym=(p.symbol||(items[0]&&items[0].symbol)||'').toUpperCase();
+  const name=p.name||(items[0]&&items[0].name)||'';
+  const price=(p.price!==undefined)?p.price:(items[0]&&items[0].price);
+  const chg=(p.change!==undefined)?p.change:(items[0]&&items[0].change);
+  const chgPct=(p.change_pct!==undefined)?p.change_pct:(items[0]&&items[0].change_pct);
+  const up=Number(chg)>=0;
+  const arrow=up?'\u25B2':'\u25BC';
+  const chgColorClass = up?'ok':(Number(chg)<0?'hot':'flat');
+
+  const ms = p.market_state || _marketState();
+  const msClass = ms.open ? 'st-ms-open' : 'st-ms-closed';
+  const ex = p.exchange || (sym.endsWith('-USD')?'CRYPTO':(sym.length<=4?'NYSE':'NASDAQ'));
+
+  // chart
+  const tf = (p.chart&&p.chart.timeframe) || '1D';
+  const chart = p.ohlc
+    ? _candleChartSVG(p.ohlc, {w:480,h:160,padL:36,padR:12})
+    : (p.chart&&p.chart.values ? _areaChartSVG(p.chart.values, {w:480,h:160,color:'#f0a87a',padL:36,padR:52}) : '');
+
+  // watchlist — strip the first item if it duplicates the hero
+  const rest = items.length>1 ? items.slice(1) : [];
+
+  return '<div class="sw-card sw-stocks">'+
+    '<div class="st-head">'+
+      '<div class="st-head-l">'+
+        '<div class="st-sym">'+esc(sym)+'</div>'+
+        '<div class="st-name">'+esc(name)+'</div>'+
+        '<div class="st-chips">'+
+          '<span class="st-chip st-ex">'+esc(ex)+'</span>'+
+          '<span class="st-chip '+msClass+'">'+esc(ms.label)+'</span>'+
+        '</div>'+
+      '</div>'+
+      '<div class="st-head-r">'+
+        '<div class="st-price">'+_fmtNum(price,2)+'</div>'+
+        '<div class="st-chg '+chgColorClass+'">'+arrow+' '+(up?'+':'')+_fmtNum(chg,2)+' <span class="st-chg-pct">'+(up?'+':'')+_fmtNum(chgPct,2)+'%</span></div>'+
+      '</div>'+
+    '</div>'+
+    (chart ? ('<div class="st-chart">'+_stTimeframeTabs(tf)+chart+'</div>') : '')+
+    _stStatsGrid(p, false)+
+    _stWatchlist(rest)+
+    _stNews(p.news)+
+  '</div>';
+}
+
+function buildCryptoCard(p){
+  // Mirror stocks with crypto labels. Reuses everything via the same code path
+  // by flipping isCrypto=true for the stats grid and the exchange chip.
+  const items=(p.items||[]);
+  const hasTopLevel=(p.price!==undefined||p.change!==undefined||p.change_pct!==undefined||p.symbol);
+  if(!items.length && !p.chart && !p.ohlc && !hasTopLevel) return null;
+
+  const sym=(p.symbol||(items[0]&&items[0].symbol)||'').toUpperCase();
+  const name=p.name||(items[0]&&items[0].name)||'';
+  const price=(p.price!==undefined)?p.price:(items[0]&&items[0].price);
+  const chg=(p.change!==undefined)?p.change:(items[0]&&items[0].change);
+  const chgPct=(p.change_pct!==undefined)?p.change_pct:(items[0]&&items[0].change_pct);
+  const up=Number(chg)>=0;
+  const arrow=up?'\u25B2':'\u25BC';
+  const chgColorClass = up?'ok':(Number(chg)<0?'hot':'flat');
+
+  const tf = (p.chart&&p.chart.timeframe) || '24H';
+  const chart = p.ohlc
+    ? _candleChartSVG(p.ohlc, {w:480,h:160,padL:36,padR:12})
+    : (p.chart&&p.chart.values ? _areaChartSVG(p.chart.values, {w:480,h:160,color:'#f0a87a',padL:36,padR:52}) : '');
+  const rest = items.length>1 ? items.slice(1) : [];
+  const ex = p.exchange || (sym.endsWith('-USD')?'GLOBAL':(sym.length<=4?'CEX':'DEX'));
+
+  return '<div class="sw-card sw-stocks sw-crypto">'+
+    '<div class="st-head">'+
+      '<div class="st-head-l">'+
+        '<div class="st-sym">'+esc(sym)+'</div>'+
+        '<div class="st-name">'+esc(name)+'</div>'+
+        '<div class="st-chips">'+
+          '<span class="st-chip st-ex">'+esc(ex)+'</span>'+
+          '<span class="st-chip st-ms-open">● 24H</span>'+
+        '</div>'+
+      '</div>'+
+      '<div class="st-head-r">'+
+        '<div class="st-price">'+_fmtNum(price,2)+'</div>'+
+        '<div class="st-chg '+chgColorClass+'">'+arrow+' '+(up?'+':'')+_fmtNum(chg,2)+' <span class="st-chg-pct">'+(up?'+':'')+_fmtNum(chgPct,2)+'%</span></div>'+
+      '</div>'+
+    '</div>'+
+    (chart ? ('<div class="st-chart">'+_stTimeframeTabs(tf)+chart+'</div>') : '')+
+    _stStatsGrid(p, true)+
+    _stWatchlist(rest)+
+  '</div>';
+}
+
+// ============================================================================
+// WEATHER
+// ============================================================================
+//
+// Apple-Weather feel: condition-tinted header gradient, big temp, 24h hourly
+// curve, 5-day forecast with hi/lo bars + precip, sunrise/sunset arc, 4-up
+// wind/humidity/UV/pressure grid.
+
+function _wxIcon(s){
+  const m={
+    'sunny':'\u2600','clear':'\u2600',
+    'partly':'\u26C5','partly cloudy':'\u26C5','cloudy':'\u2601','overcast':'\u2601',
+    'rain':'\u2602','rainy':'\u2602','showers':'\u2602','drizzle':'\u2602',
+    'thunder':'\u26C8','thunderstorm':'\u26C8',
+    'snow':'\u2744','snowy':'\u2744','sleet':'\u2745',
+    'fog':'\u2601','mist':'\u2601','haze':'\u2601',
+    'wind':'\u2638','windy':'\u2638',
+    'night':'\u263E','clear night':'\u263E',
+    'hot':'\u2600','cold':'\u2744'
+  };
+  return m[(s||'').toLowerCase()]||'\u2601';
+}
+function _wxToneClass(s){
+  const k=(s||'').toLowerCase();
+  if(k.includes('thunder')||k.includes('rain')||k.includes('shower')||k.includes('drizzle')) return 'ww-tone-rain';
+  if(k.includes('snow')||k.includes('sleet')) return 'ww-tone-snow';
+  if(k.includes('fog')||k.includes('mist')||k.includes('haze')||k.includes('overcast')) return 'ww-tone-fog';
+  if(k.includes('night')||k.includes('clear')&&k.includes('night')) return 'ww-tone-night';
+  if(k.includes('cloud')||k.includes('partly')) return 'ww-tone-cloud';
+  return 'ww-tone-day';
+}
+
+function buildWeatherCard(p){
+  // p: {title, location, updated, current:{temp, condition, icon, feels, humidity, wind, uv, pressure, visibility},
+  //     hourly: [{h, t, icon}], forecast: [{day, high, low, icon, condition, precip}],
+  //     sunrise, sunset}
+  const cur=p.current||{};
+  const fc=p.forecast||[];
+  const hourly=p.hourly||[];
+  const tone=_wxToneClass(cur.icon||cur.condition||'sunny');
+  const tempStr = cur.temp!==undefined ? Math.round(Number(cur.temp)) : '—';
+  const iconStr = _wxIcon(cur.icon||cur.condition||'sunny');
+  const hl=fc.length?{hi:Math.max(...fc.map(d=>Number(d.high||d.hi||0))), lo:Math.min(...fc.map(d=>Number(d.low||d.lo||0)))}:{hi:0,lo:0};
+  // meta grid (humidity, wind, uv, pressure, visibility, feels)
+  const meta=[];
+  if(cur.humidity!==undefined)    meta.push(['Humidity',   cur.humidity+'%']);
+  if(cur.wind!==undefined)        meta.push(['Wind',       typeof cur.wind==='number'?cur.wind+' mph':String(cur.wind)]);
+  if(cur.feels!==undefined)       meta.push(['Feels Like', Math.round(Number(cur.feels))+'°']);
+  if(cur.uv!==undefined)          meta.push(['UV Index',   String(cur.uv)]);
+  if(cur.pressure!==undefined)    meta.push(['Pressure',   String(cur.pressure)]);
+  if(cur.visibility!==undefined)  meta.push(['Visibility', typeof cur.visibility==='number'?cur.visibility+' mi':String(cur.visibility)]);
+  // forecast with hi/lo bars
+  const fcHtml = fc.length ? (
+    '<div class="ww-fc">'+
+      fc.map(d=>{
+        const hi=Number(d.high??d.hi), lo=Number(d.low??d.lo);
+        // bar position within the day's overall hi/lo range
+        const dayMin=Math.min(lo, hl.lo);
+        const dayMax=Math.max(hi, hl.hi);
+        const span=Math.max(dayMax-dayMin, 1e-9);
+        const a=((lo-dayMin)/span)*100, b=((hi-dayMin)/span)*100;
+        return '<div class="ww-fcday">'+
+          '<div class="ww-fcd">'+esc((d.day||'').slice(0,3))+'</div>'+
+          '<div class="ww-fci">'+_wxIcon(d.icon||d.condition)+'</div>'+
+          '<div class="ww-fch">'+Math.round(hi)+'°</div>'+
+          '<div class="ww-fcbar"><div class="ww-fcbar-fill" style="left:'+a.toFixed(1)+'%;width:'+(b-a).toFixed(1)+'%"></div></div>'+
+          '<div class="ww-fcl">'+Math.round(lo)+'°</div>'+
+          (d.precip!==undefined?'<div class="ww-fcp">'+Math.round(Number(d.precip))+'%</div>':'')+
+        '</div>';
+      }).join('')+
+    '</div>'
+  ) : '';
+  const hourlySvg = hourly.length ? _hourlyTempSVG(hourly) : '';
+  const sunSvg = _sunArcSVG(p.sunrise, p.sunset, p.now);
+
+  return '<div class="sw-card sw-weather '+tone+'">'+
+    '<div class="ww-hero">'+
+      '<div class="ww-hero-l">'+
+        '<div class="ww-loc">'+esc(p.location||p.title||'Current Location')+'</div>'+
+        (p.updated?'<div class="ww-upd">Updated '+esc(p.updated)+'</div>':'')+
+        '<div class="ww-temp">'+tempStr+'<span class="ww-temp-u">°</span></div>'+
+        '<div class="ww-cond">'+esc(cur.condition||'')+'</div>'+
+        (fc.length?'<div class="ww-hl"><span>H '+Math.round(hl.hi)+'°</span><span class="ww-hl-sep">·</span><span>L '+Math.round(hl.lo)+'°</span></div>':'')+
+      '</div>'+
+      '<div class="ww-ic">'+iconStr+'</div>'+
+    '</div>'+
+    (hourlySvg?'<div class="ww-hourly">'+hourlySvg+'</div>':'')+
+    (meta.length?'<div class="ww-meta">'+meta.map(([l,v])=>
+      '<div class="ww-metacell"><div class="ww-metal">'+esc(l)+'</div><div class="ww-metav">'+esc(String(v))+'</div></div>'
+    ).join('')+'</div>':'')+
+    fcHtml+
+    (sunSvg?'<div class="ww-sun">'+sunSvg+'</div>':'')+
+  '</div>';
+}
+
+// ============================================================================
+// SPORTS
+// ============================================================================
+//
+// ESPN scoreboard: league chip, status pill with pulsing dot, two team rows
+// with logo-block + record + big score, winner accent-tinted.
+
+function _sxInitials(name){
+  return (name||'').split(/\s+/).filter(Boolean).slice(0,2).map(w=>w[0].toUpperCase()).join('')||'?';
+}
+function _sxTint(name){
+  // Deterministic hue from team name, 0-360
+  let h=0; for(let i=0; i<name.length; i++) h=(h*31+name.charCodeAt(i))%360;
+  return 'hsl('+h+',55%,52%)';
+}
+
+function buildSportsCard(p){
+  // p: {title, league, games: [{home, away, home_score, away_score, status, time, note, home_record, away_record, home_color, away_color}]}
+  const games=p.games||p.items||[];
+  if(!games.length) return null;
+  const league=p.league||'';
+  return '<div class="sw-card sw-sports">'+
+    (league?'<div class="sx-league">'+esc(league)+'</div>':'')+
+    games.map(g=>{
+      const hs=Number(g.home_score), as=Number(g.away_score);
+      const hasScore=isFinite(hs)&&isFinite(as);
+      const homeWin=hasScore&&hs>as, awayWin=hasScore&&as>hs;
+      const status=(g.status||'').toLowerCase();
+      const live=status==='live'||status==='in progress'||status==='in_progress';
+      const final=status==='final'||status==='finished';
+      const scheduled=status==='scheduled'||status==='pre'||(!hasScore&&!live&&!final);
+      const homeCol=g.home_color||_sxTint(g.home||'H');
+      const awayCol=g.away_color||_sxTint(g.away||'A');
+      return '<div class="sx-row">'+
+        '<div class="sx-status-row">'+
+          (live?'<span class="sx-dot"></span><span class="sx-status-lbl sx-live">LIVE</span>':'')+
+          (final?'<span class="sx-status-lbl sx-final">FINAL</span>':'')+
+          (scheduled?'<span class="sx-status-lbl sx-sched">'+esc(g.status||g.time||'SCHEDULED')+'</span>':'')+
+          (g.time&&hasScore?'<span class="sx-time">'+esc(g.time)+'</span>':'')+
+        '</div>'+
+        '<div class="sx-game">'+
+          '<div class="sx-team '+(homeWin?' sx-win':'')+'">'+
+            '<div class="sx-logo" style="background:'+esc(homeCol)+'22;border-color:'+esc(homeCol)+'">'+esc(_sxInitials(g.home))+'</div>'+
+            '<div class="sx-team-info">'+
+              '<div class="sx-name">'+esc(g.home||'')+'</div>'+
+              (g.home_record?'<div class="sx-rec">'+esc(g.home_record)+'</div>':'')+
+            '</div>'+
+            (hasScore?'<div class="sx-score '+(homeWin?' sx-score-win':'')+'">'+hs+'</div>':'')+
+          '</div>'+
+          '<div class="sx-team '+(awayWin?' sx-win':'')+'">'+
+            '<div class="sx-logo" style="background:'+esc(awayCol)+'22;border-color:'+esc(awayCol)+'">'+esc(_sxInitials(g.away))+'</div>'+
+            '<div class="sx-team-info">'+
+              '<div class="sx-name">'+esc(g.away||'')+'</div>'+
+              (g.away_record?'<div class="sx-rec">'+esc(g.away_record)+'</div>':'')+
+            '</div>'+
+            (hasScore?'<div class="sx-score '+(awayWin?' sx-score-win':'')+'">'+as+'</div>':'')+
+          '</div>'+
+        '</div>'+
+        (g.note?'<div class="sx-note">'+esc(g.note)+'</div>':'')+
+      '</div>';
+    }).join('')+
+  '</div>';
+}
+
+// ============================================================================
+// CALENDAR
+// ============================================================================
+//
+// Google-Calendar × Fantastical timeline: date header, all-day events as
+// pill rows, hourly gutter on the left, color-coded events, current-time
+// red horizontal line.
+
+function _cxToMin(s){
+  if(!s) return null;
+  const m=String(s).match(/^(\d{1,2})(?::(\d{2}))?\s*(am|pm)?$/i);
+  if(!m) return null;
+  let h=parseInt(m[1],10), mm=parseInt(m[2]||'0',10);
+  const ap=(m[3]||'').toLowerCase();
+  if(ap==='pm'&&h<12) h+=12;
+  if(ap==='am'&&h===12) h=0;
+  return h*60+mm;
+}
+function _cxFormatHour(h){
+  const ap=h<12?'a':'p';
+  const v=h%12===0?12:h%12;
+  return v+ap;
+}
+
+function buildCalendarCard(p){
+  // p: {title, date, day_name, now: 'HH:MM', events: [{start:'9:00', end:'10:30', title, location, note, color, all_day}]}
+  const events=p.events||p.items||[];
+  if(!events.length) return null;
+  const allDay = events.filter(e=>e.all_day);
+  const timed  = events.filter(e=>!e.all_day);
+  // collect hour gutter bounds
+  const startMins = timed.map(e=>_cxToMin(e.start)).filter(v=>v!==null);
+  const endMins   = timed.map(e=>_cxToMin(e.end||e.start)).filter(v=>v!==null);
+  let hourStart = startMins.length ? Math.floor(Math.min(...startMins)/60) : 8;
+  let hourEnd   = endMins.length   ? Math.ceil(Math.max(...endMins)/60)   : 18;
+  hourStart = Math.max(0, Math.min(23, hourStart-1));
+  hourEnd   = Math.max(hourStart+4, Math.min(24, hourEnd+1));
+  const spanMins = (hourEnd-hourStart)*60;
+  const nowMin = _cxToMin(p.now);
+  const nowPct = (nowMin!==null) ? ((nowMin-hourStart*60)/spanMins)*100 : null;
+
+  // all-day pills
+  const allDayHtml = allDay.length
+    ? '<div class="cx-allday">'+allDay.map(e=>{
+        const color=e.color||'#f0a87a';
+        return '<div class="cx-allday-pill" style="--cx-color:'+esc(color)+'">'+esc(e.title||'')+'</div>';
+      }).join('')+'</div>'
+    : '';
+  // timeline
+  const hourLabels=[];
+  for(let h=hourStart; h<=hourEnd; h++){
+    hourLabels.push('<div class="cx-hour"><div class="cx-hour-lbl">'+_cxFormatHour(h)+'</div><div class="cx-hour-line"></div></div>');
+  }
+  const eventsHtml = timed.map(e=>{
+    const s=_cxToMin(e.start);
+    let en=_cxToMin(e.end||e.start);
+    if(en===null||en<=s) en=s+30;
+    const top=((s-hourStart*60)/spanMins)*100;
+    const height=Math.max(4, ((en-s)/spanMins)*100);
+    const color=e.color||'#f0a87a';
+    return '<div class="cx-ev" style="top:'+top.toFixed(2)+'%;height:'+height.toFixed(2)+'%;--cx-color:'+esc(color)+'">'+
+      '<div class="cx-ev-bar"></div>'+
+      '<div class="cx-ev-body">'+
+        '<div class="cx-ev-time">'+esc((e.start||'')+(e.end?' – '+e.end:''))+'</div>'+
+        '<div class="cx-ev-title">'+esc(e.title||'')+'</div>'+
+        (e.location?'<div class="cx-ev-loc">'+esc(e.location)+'</div>':'')+
+      '</div>'+
+    '</div>';
+  }).join('');
+
+  return '<div class="sw-card sw-cal">'+
+    (p.date||p.day_name?'<div class="cx-date">'+esc(p.day_name||'')+(p.date?'<span class="cx-date-num">'+esc(p.date)+'</span>':'')+'</div>':'')+
+    allDayHtml+
+    '<div class="cx-timeline">'+
+      '<div class="cx-hours">'+hourLabels.join('')+'</div>'+
+      '<div class="cx-track">'+eventsHtml+(nowPct!==null?'<div class="cx-now" style="top:'+nowPct.toFixed(2)+'%"><div class="cx-now-dot"></div><div class="cx-now-line"></div></div>':'')+'</div>'+
+    '</div>'+
+  '</div>';
+}
+
+// Orchestrator: turn a `show_widget` SSE event into a draggable HUD window.
+function renderWidget(d){
+  const type=(d.type||'').toLowerCase();
+  const title=d.title||((type||'').charAt(0).toUpperCase()+(type||'').slice(1));
+  const data=d.data||{};
+  // Build a synthetic panel payload so buildPanelInner does the work.
+  const p={panel:type, title:title, ...data};
+  const inner=buildPanelInner(p);
+  const layer=$('#windowLayer');
+  if(!inner){ return; }
+  const idx=_winCascade;
+  const pos=_nextWinPos();
+  const win=document.createElement('div'); win.className='hud-window sw-window sw-'+type;
+  win.style.cssText='left:'+pos.x+'px;top:'+pos.y+'px;--i:'+idx;
+  win.innerHTML='<div class="hud-win-head"><span class="hud-win-title">'+esc(title)+'</span>'+
+    '<button class="hud-win-close" title="Close">&times;</button></div>'+
+    '<div class="hud-win-body sw-body">'+inner+'</div>'+
+    '<div class="hud-win-resize"></div>';
+  win.querySelector('.hud-win-close').addEventListener('pointerdown',e=>{e.stopPropagation();_closeWindow(win);});
+  layer.appendChild(win);
+  _initWindow(win);
 }
 
 // ---- FLOATING HUD WINDOWS ----------------------------------------------------
@@ -1874,9 +3739,13 @@ let _winCascade = 0;
 function _nextWinPos(){
   const layer=$('#windowLayer');
   const lw=layer.clientWidth, lh=layer.clientHeight;
-  const off=(_winCascade%8)*30;
+  const cols=Math.max(1, Math.floor((lw-40)/280));
+  const rows=Math.max(1, Math.floor((lh-40)/240));
+  const col=_winCascade%cols, row=Math.floor(_winCascade/cols)%rows;
+  const cellW=(lw-40)/cols, cellH=(lh-40)/rows;
+  const x=20+col*cellW+20, y=20+row*cellH+20;
   _winCascade++;
-  return {x: Math.min(lw-260, 40+off), y: Math.min(lh-200, 60+off)};
+  return {x: Math.min(x, lw-260), y: Math.min(y, lh-200)};
 }
 // One shared pointer manager drives every window's drag + resize, so windows
 // don't each leak a set of document-level listeners. Pointer events unify
@@ -1913,11 +3782,54 @@ document.addEventListener('pointerup',()=>{
   _drag.win.classList.remove('dragging','resizing');
   _drag=null;
 });
+function _closeWindow(win){
+  win.style.display='none';
+  state.closedWindows.push(win);
+  _updateRestorePill();
+}
+function _restoreWindow(win){
+  win.style.display='';
+  state.closedWindows=state.closedWindows.filter(w=>w!==win);
+  // Re-trigger entrance animation
+  win.style.animation='none'; win.offsetHeight; win.style.animation='';
+  _updateRestorePill();
+}
+function _updateRestorePill(){
+  const pill=$('#restorePill');
+  const dd=$('#restoreDropdown');
+  if(!pill) return;
+  if(state.closedWindows.length===0){
+    pill.style.display='none';
+    pill.classList.remove('open');
+    return;
+  }
+  pill.style.display='';
+  pill.querySelector('.restore-pill-count').textContent=state.closedWindows.length;
+  dd.innerHTML=state.closedWindows.map((w,i)=>{
+    const t=w.querySelector('.hud-win-title');
+    const label=t?t.textContent:('Panel '+(i+1));
+    return '<div class="restore-item" data-ri="'+i+'">↩ '+esc(label)+'</div>';
+  }).join('');
+  dd.querySelectorAll('.restore-item').forEach(el=>{
+    el.onclick=()=>{ const idx=+el.dataset.ri; _restoreWindow(state.closedWindows[idx]); };
+  });
+}
+$('#restorePill').addEventListener('click',e=>{
+  if(e.target.closest('.restore-item')) return;
+  e.currentTarget.classList.toggle('open');
+});
+// Close dropdown when clicking outside
+document.addEventListener('pointerdown',e=>{
+  const pill=$('#restorePill');
+  if(pill && !pill.contains(e.target)) pill.classList.remove('open');
+});
 function clearViewport(){
   state.renderedPanels.clear();
+  state.closedWindows=[];
   _winCascade=0;
   const layer=$('#windowLayer');
   if(layer) layer.innerHTML='';
+  _updateRestorePill();
 }
 
 // bring window to front on interaction
@@ -1959,12 +3871,12 @@ function wireMsgActions(row, idx, text){
   row.querySelector('[data-act="delete"]').onclick=()=>deleteMsg(idx,row);
 }
 function addUser(text){
-  const idx=_userMsgIdx++;
-  const r=document.createElement('div'); r.className='msg-row user'; r.dataset.idx=idx;
-  r.innerHTML='<div class="bubble">'+esc(text)+'</div><div class="msg-actions">'+MSG_ACTIONS_HTML+'</div>';
-  wireMsgActions(r, idx, text);
-  getThread().appendChild(r); scrollDown();
-}
+    const idx=_userMsgIdx++;
+    const r=document.createElement('div'); r.className='msg-row user'; r.dataset.idx=idx;
+    r.innerHTML='<div class="bubble">'+esc(text)+'</div><div class="msg-actions">'+MSG_ACTIONS_HTML+'</div>';
+    wireMsgActions(r, idx, text);
+    getThread().appendChild(r); scrollDown(); return r;
+  }
 // ---- DOM HELPERS (shared) ---------------------------------------------------
 function truncateAfter(row, includeSelf){
   // Remove all DOM siblings after (and optionally including) the given row.
@@ -1986,9 +3898,8 @@ function resendMsg(idx,row){
   streamEdit(idx,text);
 }
 function streamEdit(idx,text){
-  setBusy(true); compactOrb(true);
-  live={body:null,raw:'',toolRow:null,thinking:null,turnStart:null};
-  showThinking(); setOrbLabel('Thinking\u2026');
+  live={body:null,raw:'',toolRow:null,thinking:null,turnStart:null,tokensIn:0,tokensOut:0};
+  showThinking(); setOrbLabel(_curVerb+'\u2026'); setBusy(true); compactOrb(true);
   fetch('/api/chat/edit',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({index:idx,message:text})})
   .then(r=>{ if(!r.ok||!r.body) throw new Error(r.status); return readSSE(r,handle); })
   .then(()=>{clearThinking();if(state.busy)finishTurn();})
@@ -2040,12 +3951,12 @@ function editMsg(idx,row,origText){
   });
 }
 function addAssistant(html, tools){
-  const r=document.createElement('div'); r.className='msg-row assistant';
-  r.innerHTML=avatarHTML()+'<div class="msg-body">'+(html||'')+'</div>';
-  getThread().appendChild(r);
-  (tools||[]).forEach(t=>addToolRow({name:t},true));
-  scrollDown(); return r.querySelector('.msg-body');
-}
+    const r=document.createElement('div'); r.className='msg-row assistant';
+    r.innerHTML=avatarHTML()+'<div class="msg-body">'+(html||'')+'</div>';
+    getThread().appendChild(r);
+    (tools||[]).forEach(t=>addToolRow({name:t},true));
+    scrollDown(); return r;
+  }
 function addToolRow(t, done){
   // Collapse same-name tool calls, skipping over non-tool-row elements
   // (info notes, assistant text, etc.) so that calls across iterations
@@ -2110,28 +4021,33 @@ async function readSSE(response, onEvent){
 }
 
 // ---- LIVE TURN --------------------------------------------------------------
-let live={body:null,raw:'',toolRow:null,thinking:null,turnStart:null};
+let live={body:null,raw:'',toolRow:null,thinking:null,turnStart:null,tokensIn:0,tokensOut:0};
 let _thinkTimer=null;
+const _VERBS=['hatching','orbiting','pondering','brewing','simmering','marinating','percolating','crystallizing','weaving','conjuring','manifesting','distilling','synthesizing','calculating','reverberating','catalyzing','assembling','composting','fermenting','spinning','dreaming','musing','ruminating','cooking','germinating','blossoming','incubating','metabolizing','transmuting','alchemizing'];
+let _curVerb='thinking';
+function randomVerb(){ return _VERBS[Math.floor(Math.random()*_VERBS.length)]; }
 function showThinking(){
+  _curVerb=randomVerb();
   const t=document.createElement('div'); t.className='thinking-row';
-  t.innerHTML=avatarHTML()+'<span>Thinking\u2026</span><div class="thinking-dots"><span></span><span></span><span></span></div><span class="thinking-timer" id="thinkTimer"></span>';
+  t.innerHTML=avatarHTML()+'<span>'+_curVerb+'\u2026</span><div class="thinking-dots"><span></span><span></span><span></span></div><span class="thinking-timer" id="thinkTimer"></span>';
   getThread().appendChild(t); scrollDown(); live.thinking=t;
-  live.turnStart=Date.now();
+  live.turnStart=Date.now(); live.tokensIn=0; live.tokensOut=0;
   const timerEl=t.querySelector('#thinkTimer');
-  _thinkTimer=setInterval(()=>{ if(!live.turnStart){clearInterval(_thinkTimer);_thinkTimer=null;return;} const s=((Date.now()-live.turnStart)/1000).toFixed(1); if(timerEl) timerEl.textContent=s+'s'; },100);
+  _thinkTimer=setInterval(()=>{ if(!live.turnStart){clearInterval(_thinkTimer);_thinkTimer=null;return;} const s=((Date.now()-live.turnStart)/1000).toFixed(1); let parts=[s+'s']; if(live.tokensIn) parts.push('\u2193'+live.tokensIn); if(live.tokensOut) parts.push('\u2191'+live.tokensOut); if(timerEl) timerEl.textContent=parts.join(' \u00b7 '); },100);
 }
 function clearThinking(){ if(live.thinking){live.thinking.remove();live.thinking=null;} if(_thinkTimer){clearInterval(_thinkTimer);_thinkTimer=null;} }
 function handle(ev){
   const k=ev.kind, d=ev.data||{};
   if(k!=='user') clearThinking();
   if(k==='delta'){
-    if(!live.body){live.body=addAssistant('');live.raw='';}
+    if(!live.body){const _r=addAssistant('');live.body=_r.querySelector('.msg-body');live.raw='';}
     live.raw+=d.text||'';
+    live.tokensOut+=Math.round((d.text||'').length/4);
     live.body.innerHTML=md(stripHud(live.raw));
     live.body.classList.add('cursor'); scrollDown();
   } else if(k==='assistant'){
     const txt=(d.text||'');
-    if(!live.body&&stripHud(txt).trim()){live.body=addAssistant(md(stripHud(txt)));live.raw=txt;}
+    if(!live.body&&stripHud(txt).trim()){const _r=addAssistant(md(stripHud(txt)));live.body=_r.querySelector('.msg-body');live.raw=txt;}
     else if(live.body){ live.raw=txt; live.body.innerHTML=md(stripHud(txt)); }
     if(live.body) live.body.classList.remove('cursor');
     renderPanels(txt);
@@ -2151,7 +4067,16 @@ function handle(ev){
     }
   } else if(k==='permission'){ live.body=null; showPermission(d);
   } else if(k==='info'||k==='warn'){ addNote(d.text,false); live.body=null;
+    /* If the info message mentions tokens, update live.tokensIn */
+    const m=d.text&&d.text.match(/~(\d[\d,]*)\s*tokens/);
+    if(m) live.tokensIn=parseInt(m[1].replace(/,/g,''),10);
   } else if(k==='error'){ addNote(d.text||'ERROR: SYSTEM FAULT',true); live.body=null;
+  } else if(k==='widget'){
+    // show_widget SSE event — render a dedicated specialty card. We translate
+    // the (type, title, data) payload into a HUD panel so it benefits from
+    // dragging/resizing like the inline ```hud``` panels.
+    live.body=null;
+    renderWidget(d);
   } else if(k==='done'){
     if(live.body) live.body.classList.remove('cursor'); live.body=null;
     if(_thinkTimer){clearInterval(_thinkTimer);_thinkTimer=null;}
@@ -2166,9 +4091,12 @@ function handle(ev){
         const elapsed=((Date.now()-live.turnStart)/1000).toFixed(1);
         parts.push(elapsed+'s');
       }
-      row.innerHTML=parts.join('<span class="ds-sep">·</span>');
+      row.innerHTML=parts.join('<span class="ds-sep">\u00b7</span>');
       getThread().appendChild(row); scrollDown();
     }
+    /* Show token stats in footer */
+    const ts=$('#tokenStats');
+    if(ts){ let tp=[]; if(usage.input) tp.push('\u2193'+usage.input); if(usage.output) tp.push('\u2191'+usage.output); if(tp.length){ts.textContent=tp.join(' ');ts.classList.remove('hidden');}else{ts.classList.add('hidden');} }
     live.turnStart=null;
   } else if(k==='end'){ finishTurn(); }
   scrollDown();
@@ -2460,14 +4388,17 @@ function setCurrent(cur){
   clearLog();
   if(!cur.messages||!cur.messages.length){ showEmpty(); compactOrb(false); return; }
   compactOrb(true);
+  let idx=0;
   cur.messages.forEach(m=>{
-    if(m.role==='user') addUser(m.content);
+    let row;
+    if(m.role==='user'){ row=addUser(m.content); idx++; }
     else {
       const html=md(stripHud(m.content));
       const hasContent=html&&html.trim();
-      if(hasContent){ addAssistant(html,m.tools); renderPanels(m.content); }
-      else { (m.tools||[]).forEach(t=>addToolRow({name:t},true)); }
+      if(hasContent){ row=addAssistant(html,m.tools); renderPanels(m.content); idx++; }
+      else { (m.tools||[]).forEach(t=>{ const tr=addToolRow({name:t},true); if(tr) tr.style.setProperty('--i',idx++); }); }
     }
+    if(row) row.style.setProperty('--i',idx-1);
   });
   scrollDown();
 }
@@ -2531,6 +4462,9 @@ function openSettings(){
   $('#setName').value=s.user_name||'';
   $('#setTemp').value=s.temperature; $('#tempVal').textContent=(+s.temperature).toFixed(2);
   $('#setStream').checked=!!s.stream; $('#setYolo').checked=!!s.yolo;
+  $('#setGwPort').value=s.gateway_port||8700;
+  $('#setGwAuto').checked=!!(s.gateway_auto_start!==false);
+  $('#setSysPrompt').value=s.system_prompt||'';
   populateVoiceSelect();
   $('#settingsModal').classList.remove('hidden');
 }
@@ -2540,7 +4474,10 @@ async function saveSettings(){
   try{ localStorage.setItem('cagentic_voice',state.voiceName); }catch(e){}
   state.settings=await api('/api/settings',{
     model:$('#setModel').value, user_name:$('#setName').value, temperature:parseFloat($('#setTemp').value),
-    stream:$('#setStream').checked, yolo:$('#setYolo').checked });
+    stream:$('#setStream').checked, yolo:$('#setYolo').checked,
+    gateway_port:parseInt($('#setGwPort').value)||8700,
+    gateway_auto_start:$('#setGwAuto').checked,
+    system_prompt:$('#setSysPrompt').value });
   setModelBadge(state.settings.model); renderModelMenu(); closeSettings();
 }
 
@@ -2554,18 +4491,42 @@ function toggleVoiceOut(){
 }
 
 // ---- SEND -------------------------------------------------------------------
-function setBusy(on){ state.busy=on; sendBtn.disabled=on; input.disabled=on; $('#busyLabel').classList.toggle('hidden',!on); }
-function finishTurn(){ setBusy(false); input.focus(); refreshChats(); }
+function setBusy(on){ state.busy=on; sendBtn.disabled=on; input.disabled=on; const bl=$('#busyLabel'); if(bl){bl.textContent='\u25CF '+_curVerb+'\u2026';bl.classList.toggle('hidden',!on);} $('#stopBtn').classList.toggle('hidden',!on); }
+function finishTurn(){ setBusy(false); const ts=$('#tokenStats'); if(ts) ts.classList.add('hidden'); input.focus(); refreshChats(); }
+let _abortCtrl=null;
+async function abortGeneration(){
+  if(!state.busy) return;
+  try{ await fetch('/api/abort',{method:'POST'}); }catch(e){}
+  if(_abortCtrl) try{ _abortCtrl.abort(); }catch(e){}
+  clearThinking(); addNote('Generation stopped.',false); finishTurn();
+}
 async function send(text){
   if(state.busy) return;
-  setBusy(true); compactOrb(true);
+  // Slash commands → /api/cmd instead of /api/chat
+  if(text.startsWith('/')){
+    const parts=text.split(/\s+/);
+    const cmd=parts[0].slice(1);
+    const arg1=parts[1]||'';
+    const arg2=parts.slice(2).join(' ')||'';
+    showThinking(); setOrbLabel(_curVerb+'\u2026'); setBusy(true);
+    try{
+      const r=await fetch('/api/cmd',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({cmd,arg1,arg2})});
+      const d=await r.json();
+      if(d.current) setCurrent(d.current);
+      if(d.model) { state.settings.model=d.model; setModelBadge(d.model); renderModelMenu(); }
+      addNote(d.text||'Done',!d.ok);
+    }catch(e){ addNote('Command failed: '+e,true); }
+    clearThinking(); setBusy(false);
+    return;
+  }
   if(log.querySelector('.j-empty')) clearLog();
   addUser(text);
-  live={body:null,raw:'',toolRow:null,thinking:null,turnStart:null};
-  showThinking(); setOrbLabel('Thinking\u2026');
+  live={body:null,raw:'',toolRow:null,thinking:null,turnStart:null,tokensIn:0,tokensOut:0};
+  showThinking(); setOrbLabel(_curVerb+'\u2026'); setBusy(true); compactOrb(true);
+  _abortCtrl=new AbortController();
   let res;
-  try{ res=await fetch('/api/chat',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({message:text})}); }
-  catch(e){ clearThinking(); addNote('CONNECTION FAILURE',true); finishTurn(); return; }
+  try{ res=await fetch('/api/chat',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({message:text}),signal:_abortCtrl.signal}); }
+  catch(e){ if(e.name==='AbortError'){finishTurn();return;} clearThinking(); addNote('CONNECTION FAILURE',true); finishTurn(); return; }
   if(!res||!res.ok||!res.body){ clearThinking(); addNote('REQUEST FAILED: '+(res?res.status:'no response'),true); finishTurn(); return; }
   try{
     await readSSE(res, handle);
@@ -2579,6 +4540,7 @@ function submit(){ const t=input.value.trim(); if(!t||state.busy)return; input.v
 input.addEventListener('input', autoGrow);
 input.addEventListener('keydown', e=>{ if(e.key==='Enter'&&!e.shiftKey){e.preventDefault();submit();} });
 sendBtn.onclick=submit;
+$('#stopBtn').onclick=abortGeneration;
 $('#micBtn').onclick=toggleMic;
 $('#logsBtn').onclick=openSessions;
 $('#newMissionBtn').onclick=newChat;
@@ -2604,6 +4566,7 @@ $('#settingsModal').addEventListener('click',e=>{if(e.target.id==='settingsModal
 document.addEventListener('keydown',e=>{
   if((e.ctrlKey||e.metaKey)&&e.key==='k'){ e.preventDefault(); newChat(); return; }
   if((e.ctrlKey||e.metaKey)&&e.key==='m'){ e.preventDefault(); toggleMic(); return; }
+  if((e.ctrlKey||e.metaKey)&&e.key==='s'){ e.preventDefault(); openSettings(); return; }
   if(e.key==='Escape'){
     if(!$('#confirmModal').classList.contains('hidden')){ $('#confirmModal').classList.add('hidden'); _confirmCb=null; }
     else if(!$('#newProjectModal').classList.contains('hidden')) closeNewProjectModal();
