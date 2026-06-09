@@ -102,10 +102,21 @@ class Agent:
     _refresh_system_prompt = refresh_system_prompt
 
     def turn(self, user_input: str) -> str:
+        pre_ctx = sum(len(str(m.get("content") or "")) // 4 for m in self.engine.messages)
+        bar = ui.StatusBar(ctx_tokens=pre_ctx)
+        bar.start()
         rs = _RenderState()
         gen = self.engine.submit_message(user_input)
         try:
             for msg in gen:
+                if msg.kind == "delta":
+                    bar.on_delta(msg.data.get("text", ""))
+                elif msg.kind == "done":
+                    post_ctx = sum(
+                        len(str(m.get("content") or "")) // 4
+                        for m in self.engine.messages
+                    )
+                    bar.on_done(post_ctx)
                 render_event(msg, rs)
         except KeyboardInterrupt:
             gen.close()
@@ -113,6 +124,7 @@ class Agent:
             print()
             ui.warn("turn interrupted — back to prompt")
         finally:
+            bar.stop()
             if self.on_turn_complete:
                 try:
                     self.on_turn_complete(self)

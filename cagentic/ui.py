@@ -140,6 +140,8 @@ _MD_BULLET_RX = re.compile(r"^(\s*)[-*]\s+", re.MULTILINE)
 # <step N> markers the model emits to signal progress through its plan —
 # rendered as a visible 'on step N' header so the user sees what's happening.
 _MD_STEP_RX = re.compile(r"<step\s+(\d+)(?:\s*/\s*(\d+))?\s*>", re.IGNORECASE)
+# Same pattern used by StatusBar to extract step markers from raw delta chunks.
+_BAR_STEP_RX = _MD_STEP_RX
 _MD_LINK_RX = re.compile(r"\[([^\]\n]+)\]\(([^)\s]+)\)")
 
 
@@ -548,6 +550,11 @@ _SPIN_FRAMES = _default_frames()
 # Track any live spinner so we can force-stop it before reading user input.
 _active_spinners: list["Spinner"] = []
 
+# Serializes all terminal writes that involve cursor save/restore so the
+# spinner thread and the status-bar thread never interleave their escape
+# sequences and leave the cursor on the wrong row.
+_PAINT_LOCK = threading.Lock()
+
 
 def stop_all_spinners() -> None:
     for s in list(_active_spinners):
@@ -619,9 +626,9 @@ class Spinner:
         self._thread = None
         if self in _active_spinners:
             _active_spinners.remove(self)
-        # Clear the spinner line.
-        sys.stdout.write("\r\033[2K")
-        sys.stdout.flush()
+        with _PAINT_LOCK:
+            sys.stdout.write("\r\033[2K")
+            sys.stdout.flush()
 
     def _run(self) -> None:
         # 150ms grace period — if the work finishes fast (most tool dispatches
@@ -651,8 +658,9 @@ class Spinner:
                 + "  "
                 + color(timer, SOFT)
             )
-            sys.stdout.write("\r\033[2K" + line)
-            sys.stdout.flush()
+            with _PAINT_LOCK:
+                sys.stdout.write("\r\033[2K" + line)
+                sys.stdout.flush()
             i += 1
             # Wait in small increments so .stop() reacts quickly.
             self._stop.wait(0.08)
@@ -890,3 +898,141 @@ def _short_path(p: str) -> str:
 def _os_home() -> str:
     from pathlib import Path
     return str(Path.home())
+
+
+# ---------------------------------------------------------------------------
+# Status bar
+# ---------------------------------------------------------------------------
+
+class StatusBar:
+    """One-row status bar pinned to the terminal's last line via DECSTBM.
+
+    The scroll region is set to rows 1..(N-1) so normal output scrolls
+    naturally above the bar without overwriting it.  The bar itself lives
+    on row N and is painted every 200 ms from a daemon thread.
+
+    Disabled automatically when stdout is not a tty or when the env var
+    COLLAMA_STATUS_BAR=off is set.
+
+    Lifecycle (called from agent.turn()):
+        bar = StatusBar(ctx_tokens=pre_turn_ctx)
+        bar.start()
+        # … on each delta event:  bar.on_delta(text)
+        # … on each done  event:  bar.on_done(post_turn_ctx)
+        bar.stop()   # always in a finally block
+    """
+
+    def __init__(self, ctx_tokens: int = 0) -> None:
+        self._t0 = time.monotonic()
+        self._tok = 0            # output chars seen this turn ÷ 4 ≈ tokens
+        self._ctx = ctx_tokens   # running context estimate, updated on done
+        self._step_n: int | None = None
+        self._step_m: int | None = None
+        self._stop = threading.Event()
+        self._thread: threading.Thread | None = None
+        self._lock = threading.Lock()
+        self._active = False
+
+    # ------------------------------------------------------------------
+    # Public API
+    # ------------------------------------------------------------------
+
+    def start(self) -> None:
+        if not sys.stdout.isatty() or os.environ.get("COLLAMA_STATUS_BAR") == "off":
+            return
+        rows = shutil.get_terminal_size((80, 24)).lines
+        # Reserve the last row from the scroll region.
+        sys.stdout.write(f"\033[1;{rows - 1}r")
+        sys.stdout.flush()
+        self._active = True
+        self._stop.clear()
+        self._thread = threading.Thread(target=self._run, daemon=True)
+        self._thread.start()
+
+    def on_delta(self, text: str) -> None:
+        if not self._active:
+            return
+        with self._lock:
+            self._tok += len(text) // 4
+            m = _BAR_STEP_RX.search(text)
+            if m:
+                self._step_n = int(m.group(1))
+                if m.group(2):
+                    self._step_m = int(m.group(2))
+
+    def on_done(self, ctx_tokens: int) -> None:
+        if not self._active:
+            return
+        with self._lock:
+            self._ctx = ctx_tokens
+
+    def stop(self) -> None:
+        if not self._active or self._thread is None:
+            return
+        self._stop.set()
+        self._thread.join()
+        self._thread = None
+        self._active = False
+        rows = shutil.get_terminal_size((80, 24)).lines
+        with _PAINT_LOCK:
+            sys.stdout.write(
+                "\0337"               # ESC 7: save cursor (DEC DECSC)
+                + f"\033[{rows};1H"   # move to bar row
+                + "\033[2K"           # clear it
+                + "\0338"             # ESC 8: restore cursor (DEC DECRC)
+                + "\033[r"            # reset scroll region to full terminal
+            )
+            sys.stdout.flush()
+
+    # ------------------------------------------------------------------
+    # Internal
+    # ------------------------------------------------------------------
+
+    def _compose(self) -> str:
+        with self._lock:
+            elapsed = time.monotonic() - self._t0
+            tok = self._tok
+            ctx = self._ctx
+            step_n = self._step_n
+            step_m = self._step_m
+
+        if elapsed < 60:
+            time_str = f"⏱ {elapsed:.1f}s"
+        else:
+            mins = int(elapsed) // 60
+            secs = int(elapsed) % 60
+            time_str = f"⏱ {mins}m{secs:02d}s"
+
+        parts = [time_str]
+        if step_n is not None:
+            parts.append(f"step {step_n}/{step_m}" if step_m else f"step {step_n}")
+        if tok > 0:
+            parts.append(f"~{tok:,} tok")
+        if ctx > 0:
+            parts.append(f"ctx ~{ctx:,}")
+
+        row = "  " + " · ".join(parts)
+        cols = shutil.get_terminal_size((80, 24)).columns
+        if len(row) > cols - 1:
+            row = row[:max(0, cols - 2)] + "…"
+        return row
+
+    def _paint(self) -> None:
+        text = self._compose()
+        rows = shutil.get_terminal_size((80, 24)).lines
+        with _PAINT_LOCK:
+            sys.stdout.write(
+                "\0337"                          # ESC 7: save cursor
+                + f"\033[{rows};1H"              # move to bottom row
+                + "\033[2K"                      # clear line
+                + f"\033[38;5;246m{text}\033[0m" # muted gray (256-color 246)
+                + "\0338"                        # ESC 8: restore cursor
+            )
+            sys.stdout.flush()
+
+    def _run(self) -> None:
+        while not self._stop.wait(0.2):
+            try:
+                self._paint()
+            except Exception:
+                pass
