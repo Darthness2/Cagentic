@@ -45,11 +45,30 @@ def _in_project_venv() -> bool:
 
 
 def _ensure_venv() -> None:
-    """Create the project venv if it doesn't exist yet."""
+    """Create the project venv if it doesn't exist yet, ensuring pip is present."""
     if not VENV_DIR.exists():
         print(f"Creating virtual environment in {VENV_DIR} …")
         subprocess.check_call([sys.executable, "-m", "venv", str(VENV_DIR)])
-        print("Virtual environment ready.\n")
+
+    # On Debian/Ubuntu (and WSL), pip is not included in the venv by default.
+    # Bootstrap it with ensurepip if it's missing.
+    venv_py = str(_venv_python())
+    if subprocess.call(
+        [venv_py, "-m", "pip", "--version"],
+        stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL,
+    ) != 0:
+        result = subprocess.run(
+            [venv_py, "-m", "ensurepip", "--upgrade"],
+            stderr=subprocess.PIPE, text=True,
+        )
+        if result.returncode != 0:
+            sys.exit(
+                "\nERROR: pip is missing from the venv and ensurepip is unavailable.\n"
+                "On Debian/Ubuntu/WSL, install the missing packages and retry:\n"
+                "  sudo apt install python3-pip python3-venv python3-full\n"
+                "Then delete .venv/ and re-run:\n"
+                "  rm -rf .venv && python3 run.py\n"
+            )
 
 
 def _reexec_in_venv() -> None:
