@@ -143,9 +143,9 @@ class Gateway:
         if self._server is not None:
             return True
         try:
-            server = ThreadingHTTPServer(("127.0.0.1", self.port), _Handler)
+            server = ThreadingHTTPServer(("0.0.0.0", self.port), _Handler)
         except OSError as e:
-            self.error = f"could not bind 127.0.0.1:{self.port} ({e})"
+            self.error = f"could not bind 0.0.0.0:{self.port} ({e})"
             return False
         server.gateway = self            # type: ignore[attr-defined]
         server.daemon_threads = True
@@ -298,7 +298,6 @@ IMPORTANT: When you use show_widget, do NOT repeat the widget title or type in y
                 self.engine.state.tool_groups = groups
         self.engine.system_suffix = suffix
         self.engine.refresh_system_prompt()
-        self.engine.refresh_tool_cache()
 
     def _setup_phone_action(self) -> None:
         """Wire up the phone_action callback on the engine's tool executor."""
@@ -661,9 +660,9 @@ IMPORTANT: When you use show_widget, do NOT repeat the widget title or type in y
         self._active_emit = emit
         self._active_source = source
         self.engine.model = self.agent.model
-        # Inject device context into system prompt
-        self._inject_device_context(source)
         try:
+            # Inject device context into system prompt
+            self._inject_device_context(source)
             for ev in self.engine.submit_message(message):
                 emit(ev.kind, ev.data)
         except _ClientGone:

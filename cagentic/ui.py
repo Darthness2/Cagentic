@@ -1,4 +1,4 @@
-"""Terminal UI helpers — teal palette, blocky panels, no external deps."""
+"""Terminal UI helpers — warm dusk palette, blocky panels, no external deps."""
 from __future__ import annotations
 
 import os
@@ -70,12 +70,6 @@ SOFT    = "\033[38;5;240m"  # faint grey — timers, hints, rules
 WARN    = "\033[38;5;215m"  # warm amber — warnings
 ERR     = "\033[38;5;174m"  # dusty rose — errors
 OK      = "\033[38;5;108m"  # sage — success marks
-
-# Back-compat aliases so any stray TEAL* reference still resolves. New code
-# should use DUSK / GLOW / PLUM / GOLD directly.
-TEAL = DUSK
-TEAL_BRIGHT = GLOW
-TEAL_DIM = PLUM
 
 
 def _supports_color() -> bool:

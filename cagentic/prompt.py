@@ -81,7 +81,7 @@ def _build_pt_session():
 
     # Slash-command popup styled in Cagentic's warm-dusk palette — dark
     # plum menu, soft mauve text, a copper-peach highlight on the selected
-    # row (no leftover teal/blue from the Collama days).
+    # row.
     style = Style.from_dict({
         "completion-menu":                    "bg:#241c2e #cdbbd8",
         "completion-menu.completion":         "bg:#241c2e #cdbbd8",

@@ -2,9 +2,7 @@
 
 Your local personal AI assistant — a terminal companion like Claude or ChatGPT, but powered by [Ollama](https://ollama.com) running on your own machine. Everything stays local.
 
-Cagentic **remembers things about you** across sessions, keeps a persistent reminder list, searches the web, edits files, runs shell commands, and bridges out to external services like Notion, Google Drive, and Slack through MCP (Model Context Protocol) servers. It's the friend who keeps your calendar straight and remembers the small things — and it never sends your life to someone else's cloud.
-
-<sub>Cagentic began as a fork of [Collama](https://github.com/Darthness2/Collama), a local coding agent, and grew its own shape, palette, and personality from there.</sub>
+Cagentic **remembers things about you** across sessions, keeps a persistent reminder list, searches the web, edits files, runs shell commands, and bridges out to external services like Notion, Google Drive, and Slack through MCP (Model Context Protocol) servers. It's the friend who keeps your calendar straight and remembers the small things — and it never sends your data to someone else's cloud.
 
 ## What it can do
 
@@ -19,6 +17,7 @@ Cagentic **remembers things about you** across sessions, keeps a persistent remi
 - **Conversations persist** — sessions auto-save to `~/.config/cagentic/sessions/`. `/resume` to come back to one.
 - **Background jobs** — slow shell commands run in the background; their output gets injected back into the conversation when they finish.
 - **GitHub integration** (optional) — list repos, read files, browse issues/PRs with a personal access token.
+- **Multi-provider** — use Ollama locally, or connect OpenAI and Anthropic for cloud models when you need more power.
 
 ## Requirements
 
@@ -35,10 +34,24 @@ ollama pull llama3.1:8b
 
 ## Install
 
+### One-liner (macOS & Linux)
+
 ```bash
-git clone https://github.com/Darthness2/Cagentic.git ~/Cagentic
-cd ~/Cagentic
+curl -fsSL https://raw.githubusercontent.com/YOUR_USERNAME/cagentic/main/install.sh | bash
+```
+
+### From source
+
+```bash
+git clone https://github.com/YOUR_USERNAME/cagentic.git ~/cagentic
+cd ~/cagentic
 pip install -e .
+```
+
+### From PyPI (coming soon)
+
+```bash
+pip install cagentic
 ```
 
 ## Quickstart
@@ -183,6 +196,8 @@ Cagentic launches each server as a subprocess on first use and keeps a long-live
 | `/host [url]` | switch Ollama host |
 | `/config`, `/set <key> <value>` | view / edit saved config |
 | `/login github <token>` | save a GitHub PAT |
+| `/login openai <key>` | save OpenAI API key |
+| `/login anthropic <key>` | save Anthropic API key |
 | `/whoami` | show authenticated GitHub user |
 | `/stream on\|off` | toggle token streaming |
 | `/help` | show this list in the REPL |
@@ -271,6 +286,37 @@ Cagentic ships with its own character: warm, attentive, unflappable — the frie
 
 You can amend it for a given workspace by dropping a `CAGENTIC.md` or `AGENTS.md` in any parent directory, or attach a skill from `~/.config/cagentic/skills/`. Tell it your name with `/name` (or `cagentic --name Alex`) and it'll use it naturally.
 
+## Cloud providers (OpenAI & Anthropic)
+
+Cagentic works with Ollama by default, but you can also use cloud models:
+
+```bash
+# Set your API key
+cagentic -p "/login openai sk-..."
+
+# Switch to a cloud model
+cagentic -m openai:gpt-4o
+cagentic -m anthropic:claude-sonnet-4-20250514
+```
+
+Keys are stored in `~/.config/cagentic/config.json` (chmod 600). You can also use environment variables: `OPENAI_API_KEY`, `ANTHROPIC_API_KEY`.
+
+## Support & Licensing
+
+Cagentic is MIT-licensed. You're free to use it, modify it, and redistribute it.
+
+For commercial licensing, priority support, or custom integrations, contact the maintainer.
+
+## Contributing
+
+Contributions are welcome. Please open an issue to discuss what you'd like to change before submitting a pull request.
+
+1. Fork the repository
+2. Create a feature branch (`git checkout -b feature/amazing-feature`)
+3. Commit your changes (`git commit -m 'Add amazing feature'`)
+4. Push to the branch (`git push origin feature/amazing-feature`)
+5. Open a Pull Request
+
 ## License
 
-MIT
+MIT — see [LICENSE](LICENSE) for details.
