@@ -3,7 +3,7 @@
 # Supports: macOS (Apple Silicon + Intel), Linux (x86_64, arm64)
 #
 # Usage:
-#   curl -fsSL https://raw.githubusercontent.com/Darthness2/Cagentic/main/install.sh | bash
+#   curl -fsSL https://raw.githubusercontent.com/YOUR_USERNAME/cagentic/main/install.sh | bash
 #   — or —
 #   bash install.sh [--model <name>] [--no-ollama] [--cloud-only]
 

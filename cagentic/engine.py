@@ -1,7 +1,6 @@
 """QueryEngine — the core agent loop, decoupled from any UI.
 
-Adapted from Collama for a personal-assistant context: same event-stream
-architecture, different system prompt, no teams/coordinator.
+Event-stream architecture with a personal-assistant system prompt.
 """
 from __future__ import annotations
 

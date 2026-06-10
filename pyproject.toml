@@ -10,11 +10,32 @@ readme = "README.md"
 requires-python = ">=3.9"
 license = { text = "MIT" }
 authors = [{ name = "Cagentic" }]
+keywords = ["ai", "assistant", "ollama", "llm", "cli", "terminal"]
+classifiers = [
+    "Development Status :: 4 - Beta",
+    "Environment :: Console",
+    "Intended Audience :: End Users/Desktop",
+    "License :: OSI Approved :: MIT License",
+    "Operating System :: OS Independent",
+    "Programming Language :: Python :: 3",
+    "Programming Language :: Python :: 3.9",
+    "Programming Language :: Python :: 3.10",
+    "Programming Language :: Python :: 3.11",
+    "Programming Language :: Python :: 3.12",
+    "Topic :: Communications :: Chat",
+    "Topic :: Office/Business :: Scheduling",
+]
 dependencies = [
     "requests>=2.31",
     "prompt_toolkit>=3.0",
-    "pypdf>=4.0",          # PDF text extraction (.docx uses only the stdlib)
+    "pypdf>=4.0",
 ]
+
+[project.urls]
+Homepage = "https://github.com/YOUR_USERNAME/cagentic"
+Documentation = "https://github.com/YOUR_USERNAME/cagentic#readme"
+Repository = "https://github.com/YOUR_USERNAME/cagentic"
+Issues = "https://github.com/YOUR_USERNAME/cagentic/issues"
 
 [project.scripts]
 cagentic = "cagentic.cli:main"

@@ -27,6 +27,14 @@ def parse_args(argv: list[str]) -> argparse.Namespace:
     p.add_argument("-t", "--temperature", type=float)
     p.add_argument("--name", help="What the assistant should call you (e.g. --name Alex).")
     p.add_argument("--reset-config", action="store_true")
+    p.add_argument("--serve", action="store_true",
+                   help="Run the gateway web UI headless (no REPL) until killed.")
+    p.add_argument("--port", type=int,
+                   help="Gateway port for --serve (default: config or 8700).")
+    p.add_argument("--install-service", action="store_true",
+                   help="Install the gateway as a background service that runs at login.")
+    p.add_argument("--uninstall-service", action="store_true",
+                   help="Remove the background gateway service.")
     p.add_argument("-V", "--version", action="version", version=f"cagentic {__version__}")
     return p.parse_args(argv)
 
@@ -43,6 +51,7 @@ Slash commands:
   /mcp [server]          list MCP servers, or list tools on one
   /browser               Chrome extension status + setup steps
   /gateway [off]         start (or stop) the Cagentic web UI
+                         (cagentic --install-service keeps it running 24/7)
   /plan on|off           toggle plan mode (read-only)
   /todo [add|done|clear] session todo list
   /stream on|off         toggle token streaming
@@ -867,6 +876,10 @@ def repl(agent: Agent, cfg: dict, gateway_holder: dict | None = None) -> int:
 def main(argv: list[str] | None = None) -> int:
     args = parse_args(argv if argv is not None else sys.argv[1:])
 
+    if args.install_service or args.uninstall_service:
+        from . import service
+        return service.install() if args.install_service else service.uninstall()
+
     if args.reset_config:
         try:
             config.config_path().unlink()
@@ -906,6 +919,10 @@ def main(argv: list[str] | None = None) -> int:
 
     model = model_raw
     if not model:
+        if args.serve:
+            # Headless — can't prompt for a model. Run interactively once.
+            ui.error("no model configured — run `cagentic` once to choose one.")
+            return 1
         chosen = _pick_model_interactive(client)
         if not chosen:
             ui.error("No model selected. Exiting.")
@@ -930,10 +947,16 @@ def main(argv: list[str] | None = None) -> int:
     try:
         models = client.list_models()
     except OllamaError as e:
-        ui.error(str(e))
-        if isinstance(client, OllamaClient):
-            ui.warn("Is `ollama serve` running?")
-        return 1
+        if args.serve:
+            # Headless service may start before Ollama does — keep the
+            # gateway up; chats will error until the provider is reachable.
+            ui.warn(f"model list unavailable at startup: {e}")
+            models = []
+        else:
+            ui.error(str(e))
+            if isinstance(client, OllamaClient):
+                ui.warn("Is `ollama serve` running?")
+            return 1
     if model not in models and models:
         if isinstance(client, OllamaClient):
             ui.warn(f"model '{model}' not installed locally. Available: {', '.join(models[:8])}")
@@ -1029,6 +1052,23 @@ def main(argv: list[str] | None = None) -> int:
             signal.signal(sig, lambda *_: (_shutdown(), sys.exit(0)))
         except (ValueError, OSError):
             pass
+
+    if args.serve:
+        from .gateway import Gateway
+        port = args.port or int((cfg.get("gateway") or {}).get("port", 8700))
+        gw = Gateway(agent, cfg, port=port)
+        if not gw.start():
+            ui.error(f"gateway couldn't start: {gw.error}")
+            return 1
+        gateway_holder["server"] = gw
+        ui.info(f"gateway running at {gw.url()} — press Ctrl-C to stop.")
+        try:
+            import threading
+            threading.Event().wait()
+        except KeyboardInterrupt:
+            pass
+        _shutdown()
+        return 0
 
     if args.prompt:
         agent.turn(args.prompt)

@@ -243,7 +243,7 @@ class OllamaClient:
 
         Ollama unloads a model when a request specifies keep_alive=0. We POST
         a no-op generate request with that flag. Best-effort: returns True on
-        success, False otherwise. Used by Collama on shutdown so closing the
+        success, False otherwise. Used on shutdown so closing the
         window doesn't leave a 14B model resident in your GPU.
         """
         try:

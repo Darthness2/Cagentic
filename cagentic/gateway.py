@@ -39,6 +39,58 @@ def _clean(text: str) -> str:
     return text.strip()
 
 
+def _tool_details(tool_calls: list[dict], messages: list[dict], start: int) -> list[dict]:
+    """Pair an assistant message's stored tool_calls with the result
+    messages recorded right after it, in call order.
+
+    Results are stored as {"role": "tool", "name": ..., "content": ...} or
+    user messages of the form "Tool result for <name>:\\n<result>". Returns
+    one {name, summary, ok, first_line} dict per call; ok is None when no
+    result was found (e.g. the turn was aborted mid-call).
+    """
+    from .engine import _summarize_args
+
+    results: list[tuple[str, str]] = []  # (tool name, result text)
+    for m in messages[start:start + len(tool_calls) * 2]:
+        role = m.get("role")
+        content = m.get("content") or ""
+        if role == "tool":
+            results.append((m.get("name", "?"), content))
+        elif role == "user" and content.startswith("Tool result for "):
+            header, _, rest = content.partition("\n")
+            results.append((header[len("Tool result for "):].rstrip(":"), rest))
+        elif role == "system":
+            continue  # loop-steering notes interleave with results
+        else:
+            break  # next conversation turn — stop pairing
+
+    details = []
+    for tc in tool_calls:
+        fn = tc.get("function") or {}
+        name = fn.get("name", "?")
+        args = fn.get("arguments") or {}
+        if isinstance(args, str):  # OpenAI-style JSON-encoded arguments
+            try:
+                args = json.loads(args)
+            except json.JSONDecodeError:
+                args = {}
+        ok = None
+        first_line = ""
+        for j, (rname, result) in enumerate(results):
+            if rname == name:
+                ok = not result.startswith("ERROR")
+                first_line = result.splitlines()[0][:120] if result else ""
+                results.pop(j)
+                break
+        details.append({
+            "name": name,
+            "summary": _summarize_args(name, args),
+            "ok": ok,
+            "first_line": first_line,
+        })
+    return details
+
+
 # Taught to the gateway's engine only — lets the model "summon" panels as
 # floating windows by emitting fenced ```hud blocks of JSON. The web
 # UI parses these out of the reply, renders them as draggable cards, and
@@ -143,9 +195,9 @@ class Gateway:
         if self._server is not None:
             return True
         try:
-            server = ThreadingHTTPServer(("127.0.0.1", self.port), _Handler)
+            server = ThreadingHTTPServer(("0.0.0.0", self.port), _Handler)
         except OSError as e:
-            self.error = f"could not bind 127.0.0.1:{self.port} ({e})"
+            self.error = f"could not bind 0.0.0.0:{self.port} ({e})"
             return False
         server.gateway = self            # type: ignore[attr-defined]
         server.daemon_threads = True
@@ -298,7 +350,6 @@ IMPORTANT: When you use show_widget, do NOT repeat the widget title or type in y
                 self.engine.state.tool_groups = groups
         self.engine.system_suffix = suffix
         self.engine.refresh_system_prompt()
-        self.engine.refresh_tool_cache()
 
     def _setup_phone_action(self) -> None:
         """Wire up the phone_action callback on the engine's tool executor."""
@@ -359,7 +410,7 @@ IMPORTANT: When you use show_widget, do NOT repeat the widget title or type in y
     def render_messages(self, messages: list[dict]) -> list[dict]:
         """Turn stored messages into display items for the web UI."""
         out: list[dict] = []
-        for m in messages:
+        for i, m in enumerate(messages):
             role = m.get("role")
             if role == "system":
                 continue
@@ -372,13 +423,19 @@ IMPORTANT: When you use show_widget, do NOT repeat the widget title or type in y
                 if content:
                     out.append({"role": "user", "content": content})
             elif role == "assistant":
+                tool_calls = m.get("tool_calls") or []
                 tools = [
                     (tc.get("function") or {}).get("name", "?")
-                    for tc in (m.get("tool_calls") or [])
+                    for tc in tool_calls
                 ]
                 cleaned = _clean(content)
                 if cleaned or tools:
-                    out.append({"role": "assistant", "content": cleaned, "tools": tools})
+                    msg = {"role": "assistant", "content": cleaned, "tools": tools}
+                    if tool_calls:
+                        # Rich per-call info (args summary + outcome) so
+                        # clients can re-render tool chips after a reload.
+                        msg["tool_details"] = _tool_details(tool_calls, messages, i + 1)
+                    out.append(msg)
         return out
 
     def current_chat(self) -> dict:
@@ -661,9 +718,9 @@ IMPORTANT: When you use show_widget, do NOT repeat the widget title or type in y
         self._active_emit = emit
         self._active_source = source
         self.engine.model = self.agent.model
-        # Inject device context into system prompt
-        self._inject_device_context(source)
         try:
+            # Inject device context into system prompt
+            self._inject_device_context(source)
             for ev in self.engine.submit_message(message):
                 emit(ev.kind, ev.data)
         except _ClientGone:
