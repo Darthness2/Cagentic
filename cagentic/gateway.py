@@ -383,8 +383,6 @@ IMPORTANT: When you use show_widget, do NOT repeat the widget title or type in y
         self.engine.executor.widget_action = widget_action
 
     # -- chats --------------------------------------------------------------
-    # -- chats --------------------------------------------------------------
-    # -- chats --------------------------------------------------------------
 
     def _save_current(self) -> None:
         msgs = [m for m in self.engine.messages if m.get("role") != "system"]
@@ -393,6 +391,23 @@ IMPORTANT: When you use show_widget, do NOT repeat the widget title or type in y
         self.session["model"] = self.agent.model
         self.session["messages"] = msgs
         sessions.save(self.session)
+
+    def _interrupt_turn(self, timeout: float = 15.0) -> bool:
+        """Abort any in-flight turn and wait for it to finish saving into the
+        current session. Chat switching must hold the turn lock — otherwise a
+        live turn keeps appending into the freshly swapped-in session and its
+        final save writes the old conversation into the new chat.
+
+        Returns True when the lock was acquired (caller must release)."""
+        if self._turn_lock.acquire(blocking=False):
+            return True  # no turn running
+        self.engine._abort_turn = True
+        # Unblock a pending permission wait too, or the lock acquisition
+        # below would time out against its 300s wait.
+        self.deliver_permission("no")
+        got = self._turn_lock.acquire(timeout=timeout)
+        self.engine._abort_turn = False
+        return got
 
     def list_chats(self) -> list[dict]:
         self._save_current()
@@ -447,6 +462,14 @@ IMPORTANT: When you use show_widget, do NOT repeat the widget title or type in y
         }
 
     def new_chat(self) -> dict:
+        locked = self._interrupt_turn()
+        try:
+            return self._new_chat_unlocked()
+        finally:
+            if locked:
+                self._turn_lock.release()
+
+    def _new_chat_unlocked(self) -> dict:
         self._save_current()
         self.session = sessions.make(self.agent.model)
         self.engine.project_system_prompt = ""
@@ -456,6 +479,14 @@ IMPORTANT: When you use show_widget, do NOT repeat the widget title or type in y
         return self.current_chat()
 
     def load_chat(self, chat_id: str) -> dict:
+        locked = self._interrupt_turn()
+        try:
+            return self._load_chat_unlocked(chat_id)
+        finally:
+            if locked:
+                self._turn_lock.release()
+
+    def _load_chat_unlocked(self, chat_id: str) -> dict:
         self._save_current()
         data = sessions.load(chat_id)
         if not data:
@@ -482,14 +513,19 @@ IMPORTANT: When you use show_widget, do NOT repeat the widget title or type in y
         return self.current_chat()
 
     def delete_chat(self, chat_id: str) -> dict:
-        sessions.delete(chat_id)
-        # Remove from any project
-        for proj in projects.list_all():
-            if chat_id in proj.get("chats", []):
-                projects.remove_chat(proj["id"], chat_id)
-        if chat_id == self.session.get("id"):
-            self.new_chat()
-        return {"chats": self.list_chats(), "current": self.current_chat(), "projects": self.list_projects()}
+        locked = self._interrupt_turn()
+        try:
+            sessions.delete(chat_id)
+            # Remove from any project
+            for proj in projects.list_all():
+                if chat_id in proj.get("chats", []):
+                    projects.remove_chat(proj["id"], chat_id)
+            if chat_id == self.session.get("id"):
+                self._new_chat_unlocked()
+            return {"chats": self.list_chats(), "current": self.current_chat(), "projects": self.list_projects()}
+        finally:
+            if locked:
+                self._turn_lock.release()
 
     def rename_chat(self, chat_id: str, title: str) -> dict:
         title = (title or "").strip()
@@ -583,6 +619,9 @@ IMPORTANT: When you use show_widget, do NOT repeat the widget title or type in y
     def abort_generation(self) -> None:
         """Abort the current streaming generation."""
         self.engine._abort_turn = True
+        # A turn blocked in a permission wait holds the turn lock for up to
+        # 300s — answer "no" so it wakes up and winds down immediately.
+        self.deliver_permission("no")
 
     def update_settings(self, data: dict) -> dict:
         cfg = self.config
@@ -702,14 +741,19 @@ IMPORTANT: When you use show_widget, do NOT repeat the widget title or type in y
 
     def delete_message(self, index: int) -> dict:
         """Delete the *index*-th user message and everything after it."""
-        user_indices = [i for i, m in enumerate(self.engine.messages) if m.get("role") == "user"]
-        if index < 0 or index >= len(user_indices):
-            return {"error": f"invalid message index {index}"}
-        target = user_indices[index]
-        # Truncate everything from this user message onward
-        self.engine.messages = self.engine.messages[:target]
-        self._save_current()
-        return self.current_chat()
+        locked = self._interrupt_turn()
+        try:
+            user_indices = [i for i, m in enumerate(self.engine.messages) if m.get("role") == "user"]
+            if index < 0 or index >= len(user_indices):
+                return {"error": f"invalid message index {index}"}
+            target = user_indices[index]
+            # Truncate everything from this user message onward
+            self.engine.messages = self.engine.messages[:target]
+            self._save_current()
+            return self.current_chat()
+        finally:
+            if locked:
+                self._turn_lock.release()
 
     def run_turn(self, message: str, emit, source: str = "pc") -> None:
         if not self._turn_lock.acquire(blocking=False):
@@ -1102,6 +1146,17 @@ class _Handler(BaseHTTPRequestHandler):
         if path == "/api/cmd":
             b = self._body()
             self._json(gw.handle_cmd(str(b.get("cmd", "")), str(b.get("arg1", "")), str(b.get("arg2", ""))))
+            return
+        if path == "/api/email/verification":
+            from . import emailer
+            b = self._body()
+            err = emailer.send_verification(
+                gw.config,
+                str(b.get("to", "")).strip(),
+                str(b.get("code", "")).strip(),
+                str(b.get("name", "")).strip(),
+            )
+            self._json({"ok": True} if err is None else {"ok": False, "error": err})
             return
         self._send(b"not found", "text/plain", status=404)
 
