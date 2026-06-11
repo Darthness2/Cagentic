@@ -527,6 +527,39 @@ IMPORTANT: When you use show_widget, do NOT repeat the widget title or type in y
             if locked:
                 self._turn_lock.release()
 
+    def autotitle_chat(self) -> dict:
+        """Ask the model itself for a short title for the current chat."""
+        msgs = [m for m in self.engine.messages
+                if m.get("role") in ("user", "assistant") and (m.get("content") or "").strip()]
+        if not msgs:
+            return {"title": self.session.get("title") or "New chat"}
+
+        convo = "\n".join(
+            f"{m['role']}: {_clean(m.get('content') or '')[:300]}" for m in msgs[:4]
+        )
+        ask = [{
+            "role": "user",
+            "content": (
+                "Give this conversation a short title: 3-6 plain words, no "
+                "quotes, no trailing punctuation. Reply with the title only.\n\n"
+                + convo
+            ),
+        }]
+        title = ""
+        try:
+            reply = self.agent.client.chat(self.agent.model, ask,
+                                           options={"temperature": 0.2})
+            lines = _clean(reply.get("content") or "").strip().strip('"\'').splitlines()
+            title = lines[0].strip()[:60] if lines else ""
+        except Exception:
+            title = ""
+        if not title:
+            # Model unavailable — fall back to the first user message
+            title = sessions.derive_title(self.session.get("messages") or [])
+        self.session["title"] = title
+        self._save_current()
+        return {"title": title, "chats": self.list_chats()}
+
     def rename_chat(self, chat_id: str, title: str) -> dict:
         title = (title or "").strip()
         if chat_id == self.session.get("id"):
@@ -1113,6 +1146,9 @@ class _Handler(BaseHTTPRequestHandler):
         if path == "/api/chats/rename":
             b = self._body()
             self._json(gw.rename_chat(str(b.get("id", "")), str(b.get("title", ""))))
+            return
+        if path == "/api/chats/autotitle":
+            self._json(gw.autotitle_chat())
             return
         if path == "/api/settings":
             self._json(gw.update_settings(self._body()))

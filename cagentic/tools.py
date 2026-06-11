@@ -516,6 +516,61 @@ def t_note_delete(args: dict, ctx: ToolContext) -> str:
     return "OK: deleted" if _notes.delete(name) else f"ERROR: no note named '{name}'"
 
 
+def t_chat_search(args: dict, ctx: ToolContext) -> str:
+    """Search the user's previous conversations for a phrase."""
+    from . import sessions as _sessions
+    query = (args.get("query") or args.get("q") or "").strip()
+    if not query:
+        return "ERROR: chat_search requires 'query'"
+    q = query.lower()
+    out: list[str] = []
+    for meta in _sessions.list_all():  # newest first
+        data = _sessions.load(meta["id"])
+        if not data:
+            continue
+        hits: list[str] = []
+        for m in data.get("messages", []):
+            if m.get("role") not in ("user", "assistant"):
+                continue
+            content = m.get("content") or ""
+            idx = content.lower().find(q)
+            if idx < 0:
+                continue
+            start = max(0, idx - 80)
+            snippet = " ".join(content[start:idx + len(query) + 160].split())
+            hits.append(f"  [{m['role']}] …{snippet}…")
+            if len(hits) >= 3:
+                break
+        if hits:
+            out.append(
+                f"--- chat '{meta['title']}' "
+                f"({_sessions.fmt_time(meta['updated_at'])}, id {meta['id']}) ---"
+            )
+            out.extend(hits)
+        if len(out) >= 40:
+            break
+    if not out:
+        return f"(no previous chats mention '{query}')"
+    return _truncate("\n".join(out))
+
+
+def t_chat_get(args: dict, ctx: ToolContext) -> str:
+    """Read one previous conversation in full (by id from chat_search)."""
+    from . import sessions as _sessions
+    sid = (args.get("id") or "").strip()
+    if not sid:
+        return "ERROR: chat_get requires 'id' (from chat_search results)"
+    data = _sessions.load(sid)
+    if not data:
+        return f"ERROR: no chat with id '{sid}'"
+    lines = [f"# {data.get('title') or 'untitled'}"]
+    for m in data.get("messages", []):
+        content = (m.get("content") or "").strip()
+        if m.get("role") in ("user", "assistant") and content:
+            lines.append(f"[{m['role']}] {content[:600]}")
+    return _truncate("\n".join(lines))
+
+
 # ============================================================================
 # Reminders — persistent to-do across sessions
 # ============================================================================
@@ -1444,6 +1499,9 @@ TOOLS: dict[str, ToolFn] = {
     "note_list": t_note_list,
     "note_search": t_note_search,
     "note_delete": t_note_delete,
+    # past conversations
+    "chat_search": t_chat_search,
+    "chat_get": t_chat_get,
     # reminders
     "reminder_add": t_reminder_add,
     "reminder_list": t_reminder_list,
@@ -1593,6 +1651,16 @@ TOOL_SCHEMAS: list[dict[str, Any]] = [
         "name": "note_delete",
         "description": "Delete a saved note. Asks for approval.",
         "parameters": {"type": "object", "properties": {"name": {"type": "string"}}, "required": ["name"]},
+    }},
+    {"type": "function", "function": {
+        "name": "chat_search",
+        "description": "Search the user's previous conversations for a phrase. Returns matching chats with snippets and ids.",
+        "parameters": {"type": "object", "properties": {"query": {"type": "string"}}, "required": ["query"]},
+    }},
+    {"type": "function", "function": {
+        "name": "chat_get",
+        "description": "Read one previous conversation in full, by id from chat_search.",
+        "parameters": {"type": "object", "properties": {"id": {"type": "string"}}, "required": ["id"]},
     }},
 
     # ---------- reminders ----------
@@ -1912,7 +1980,8 @@ TOOL_GROUPS: dict[str, list[str]] = {
     "files": ["read_file", "write_file", "edit_file", "replace_lines",
               "list_dir", "grep", "glob", "set_workspace"],
     "web": ["web_fetch", "web_search"],
-    "notes": ["note_write", "note_get", "note_list", "note_search", "note_delete"],
+    "notes": ["note_write", "note_get", "note_list", "note_search", "note_delete",
+              "chat_search", "chat_get"],
     "reminders": ["reminder_add", "reminder_list", "reminder_done",
                   "reminder_delete", "reminder_update"],
     "mcp": ["mcp_list_servers", "mcp_list_tools", "mcp_call",
