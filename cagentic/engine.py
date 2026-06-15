@@ -5,6 +5,7 @@ Event-stream architecture with a personal-assistant system prompt.
 from __future__ import annotations
 
 import json
+import logging
 import re
 from concurrent.futures import ThreadPoolExecutor, as_completed
 from dataclasses import dataclass, field
@@ -16,11 +17,17 @@ from .background import BackgroundExecutor
 from .config import set_value
 from .ollama_client import OllamaClient, OllamaError, ToolsUnsupportedError
 from .permissions import CONCURRENT_SAFE, Resolver, auto_deny_resolver, can_use_tool
-from .services.compact import BOUNDARY_MARKER, manage_context
+from .services.compact import (
+    BOUNDARY_MARKER,
+    approx_tokens as estimate_tokens,
+    manage_context,
+)
 from .services.transcript import record as record_transcript
 from .state import AppState
 from .tasks import TaskGraph, TaskKind, new_id
 from .tools import ToolContext, all_tool_schemas, dispatch
+
+_log = logging.getLogger(__name__)
 
 
 MAX_TOOL_ITERATIONS = 1000
@@ -479,20 +486,35 @@ class StreamingToolExecutor:
     def execute(self, calls):
         if not calls:
             return
-        concurrent_calls = [c for c in calls if c[0] in CONCURRENT_SAFE]
-        serial_calls = [c for c in calls if c[0] not in CONCURRENT_SAFE]
-
-        if len(concurrent_calls) > 1:
-            with ThreadPoolExecutor(max_workers=self.max_workers) as pool:
-                futures = [pool.submit(self._run_one_collect, c) for c in concurrent_calls]
-                for fut in as_completed(futures):
-                    yield from fut.result()
-        else:
-            for c in concurrent_calls:
-                yield from self._run_one(c)
-
-        for c in serial_calls:
-            yield from self._run_one(c)
+        # Preserve the model's intended call ORDER. Globally partitioning into
+        # "concurrent" then "serial" reorders sequences the model meant to run
+        # in order (e.g. write_file then read_file would run read first because
+        # read is concurrent-safe). Instead, walk the list once and parallelize
+        # only ADJACENT runs of concurrent-safe calls; everything else runs
+        # serially in place.
+        i = 0
+        n = len(calls)
+        while i < n:
+            if calls[i][0] in CONCURRENT_SAFE:
+                # Gather the maximal adjacent run of concurrent-safe calls.
+                j = i
+                while j < n and calls[j][0] in CONCURRENT_SAFE:
+                    j += 1
+                group = calls[i:j]
+                if len(group) > 1:
+                    with ThreadPoolExecutor(max_workers=self.max_workers) as pool:
+                        # Submit in order; collect results in submission order so
+                        # output ordering within the group is deterministic
+                        # rather than completion-order.
+                        futures = [pool.submit(self._run_one_collect, c) for c in group]
+                        for fut in futures:
+                            yield from fut.result()
+                else:
+                    yield from self._run_one(group[0])
+                i = j
+            else:
+                yield from self._run_one(calls[i])
+                i += 1
 
     def _run_one(self, call):
         name, args, role = call
@@ -636,7 +658,7 @@ class QueryEngine:
         record_transcript(self.session_id or "", "user", prompt)
         self.messages.append(user_msg)
 
-        _pre = sum(len(str(m.get("content") or "")) // 4 for m in self.messages)
+        _pre = estimate_tokens(self.messages)
         will_compact = _pre > COMPACT_TOKENS
         if will_compact:
             yield Message("info", {
@@ -666,9 +688,7 @@ class QueryEngine:
                 )
                 self.messages.append({"role": "user", "content": inject})
                 yield Message("warn", {"text": f"background {note['id']} {note['status']} — injected"})
-            est_tokens = sum(
-                len(str(m.get("content") or "")) // 4 for m in self.messages
-            )
+            est_tokens = estimate_tokens(self.messages)
             if est_tokens >= 4000:
                 tool_count = len(all_tool_schemas(self.state.tool_groups)) if self.state.tools_enabled else 0
                 yield Message("info", {

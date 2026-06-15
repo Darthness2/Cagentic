@@ -5,6 +5,7 @@ fed back to the model as the tool's output.
 """
 from __future__ import annotations
 
+import logging
 import os
 import re
 import subprocess
@@ -18,6 +19,8 @@ from . import notes as _notes
 from . import reminders as _reminders
 from . import ui
 
+logger = logging.getLogger(__name__)
+
 MAX_OUTPUT_CHARS = 16000
 
 
@@ -27,12 +30,58 @@ def _truncate(s: str, limit: int = MAX_OUTPUT_CHARS) -> str:
     return s[:limit] + f"\n…[truncated, {len(s) - limit} more chars]"
 
 
+class PathEscapeError(Exception):
+    """Raised when a resolved path would escape the workspace root."""
+
+
+def _is_within(child: Path, root: Path) -> bool:
+    """True if `child` is `root` or lives somewhere underneath it.
+
+    Both arguments must already be resolved (real, absolute) paths. We avoid
+    Path.is_relative_to (3.9+ and historically buggy on some builds) and use a
+    normalized string-prefix check that is robust across platforms.
+    """
+    root_s = str(root)
+    child_s = str(child)
+    if child_s == root_s:
+        return True
+    # Ensure we compare on a path-component boundary so that e.g.
+    # /home/user/work-evil is not considered inside /home/user/work.
+    prefix = root_s if root_s.endswith(os.sep) else root_s + os.sep
+    return child_s.startswith(prefix)
+
+
+def _contain(p: Path, root: Path) -> Path:
+    """Resolve `p` and require the real path stays inside `root`.
+
+    Resolves symlinks (Path.resolve(strict=False)) so a symlink that points
+    outside the workspace is rejected even if the link itself sits inside.
+    Raises PathEscapeError when the target escapes `root`.
+    """
+    root_real = root.resolve()
+    target_real = p.resolve()
+    if not _is_within(target_real, root_real):
+        raise PathEscapeError(
+            f"path escapes workspace: {p} resolves to {target_real}, "
+            f"which is outside {root_real}"
+        )
+    return target_real
+
+
 def _resolve(path: str, root: Path) -> Path:
     expanded = os.path.expanduser(os.path.expandvars(path))
     p = Path(expanded)
     if not p.is_absolute():
         p = root / p
     return p
+
+
+def _resolve_contained(path: str, root: Path) -> Path:
+    """_resolve + containment check. Raises PathEscapeError on escape.
+
+    Returns the resolved (real) path, which callers may use directly.
+    """
+    return _contain(_resolve(path, root), root)
 
 
 @dataclass
@@ -73,7 +122,10 @@ def t_read_file(args: dict, ctx: ToolContext) -> str:
     path = args["path"]
     start = int(args.get("start_line", 1))
     end = args.get("end_line")
-    p = _resolve(path, ctx.root)
+    try:
+        p = _resolve_contained(path, ctx.root)
+    except PathEscapeError as e:
+        return f"ERROR: {e}"
     if not p.exists():
         return f"ERROR: file not found: {path}"
     if not p.is_file():
@@ -161,7 +213,10 @@ def t_write_file(args: dict, ctx: ToolContext) -> str:
         return "ERROR: missing argument 'content'"
     if not isinstance(content, str):
         return f"ERROR: 'content' must be a string, got {type(content).__name__}"
-    p = _resolve(path, ctx.root)
+    try:
+        p = _resolve_contained(path, ctx.root)
+    except PathEscapeError as e:
+        return f"ERROR: {e}"
     existed = p.exists()
     old_text = p.read_text(errors="replace") if existed else ""
     if existed and old_text.strip() and not content.strip() and not args.get("allow_empty"):
@@ -184,6 +239,14 @@ def _norm_eol(s: str) -> str:
 
 
 def _fuzzy_span(text: str, old: str):
+    """Locate the single line range matching `old` (whitespace-tolerant).
+
+    Returns (start, end, exact) where `exact` is True only if the matched
+    region is byte-identical to `old` (no whitespace normalization was needed).
+    Returns None if there is not exactly one match. Callers should refuse a
+    non-exact (`exact is False`) match rather than silently rewriting a region
+    whose whitespace differs from what the model supplied.
+    """
     text_lines = text.split("\n")
     old_lines = old.split("\n")
     while len(old_lines) > 1 and old_lines[-1] == "":
@@ -198,7 +261,12 @@ def _fuzzy_span(text: str, old: str):
         i for i in range(len(text_lines) - n + 1)
         if [ln.rstrip() for ln in text_lines[i:i + n]] == norm_old
     ]
-    return (hits[0], hits[0] + n) if len(hits) == 1 else None
+    if len(hits) != 1:
+        return None
+    start = hits[0]
+    region = text_lines[start:start + n]
+    exact = region == old_lines
+    return (start, start + n, exact)
 
 
 def _closest_region(text: str, old: str) -> str:
@@ -237,7 +305,10 @@ def t_edit_file(args: dict, ctx: ToolContext) -> str:
     old = args["old_string"]
     new = args["new_string"]
     replace_all = bool(args.get("replace_all", False))
-    p = _resolve(path, ctx.root)
+    try:
+        p = _resolve_contained(path, ctx.root)
+    except PathEscapeError as e:
+        return f"ERROR: {e}"
     if not p.exists():
         return f"ERROR: file not found: {path}"
     raw = _read_text_robust(p)
@@ -289,7 +360,18 @@ def t_edit_file(args: dict, ctx: ToolContext) -> str:
                     f"— surgical line-range edit, no string matching."
                 )
             return msg
-        i, j = span
+        i, j, exact = span
+        if not exact:
+            # The only match differs from old_string by whitespace alone.
+            # Refuse rather than silently rewriting a region the model didn't
+            # supply verbatim — point it at the surgical line-range tool.
+            return (
+                f"ERROR: no exact match for old_string in {path}; the closest "
+                f"region (lines {i + 1}-{j}) differs only in whitespace. "
+                f"Re-supply old_string matching the file EXACTLY (including "
+                f"indentation), or use replace_lines(path, start_line, end_line, "
+                f"new_content) for a surgical edit."
+            )
         if not ctx.confirm("file edit", f"{path}: replace lines {i + 1}-{j} (whitespace-tolerant)"):
             return "ERROR: user denied edit"
         file_lines = text.split("\n")
@@ -310,7 +392,10 @@ def t_replace_lines(args: dict, ctx: ToolContext) -> str:
     new_content = args.get("new_content", "")
     if start is None or end is None:
         return "ERROR: replace_lines requires start_line and end_line (1-indexed, inclusive)"
-    p = _resolve(path, ctx.root)
+    try:
+        p = _resolve_contained(path, ctx.root)
+    except PathEscapeError as exc:
+        return f"ERROR: {exc}"
     if not p.exists():
         return f"ERROR: file not found: {path}"
     raw = _read_text_robust(p)
@@ -323,7 +408,20 @@ def t_replace_lines(args: dict, ctx: ToolContext) -> str:
         return f"ERROR: end_line ({end}) must be >= start_line ({start})"
     if not ctx.confirm("file edit (replace_lines)", f"{path}: lines {s + 1}-{e}"):
         return "ERROR: user denied edit"
-    eol = "\r\n" if (raw and "\r\n" in raw and raw.count("\r\n") >= raw.count("\n") / 2) else "\n"
+    # Preserve the original per-line EOL of the replaced region rather than
+    # forcing a whole-file CRLF heuristic (which corrupts mixed-EOL files).
+    # We look at the first line being replaced; fall back to the dominant EOL
+    # only when the replaced region has no detectable line ending of its own.
+    eol = "\n"
+    first_replaced = lines[s] if s < len(lines) else ""
+    if first_replaced.endswith("\r\n"):
+        eol = "\r\n"
+    elif first_replaced.endswith("\r"):
+        eol = "\r"
+    elif first_replaced.endswith("\n"):
+        eol = "\n"
+    elif raw and "\r\n" in raw and raw.count("\r\n") >= raw.count("\n") / 2:
+        eol = "\r\n"
     new_chunk = new_content if new_content.endswith(("\n", "\r")) else new_content + eol
     new_lines = lines[:s] + [new_chunk] + lines[e:]
     new_text = "".join(new_lines)
@@ -337,7 +435,10 @@ def t_replace_lines(args: dict, ctx: ToolContext) -> str:
 
 def t_list_dir(args: dict, ctx: ToolContext) -> str:
     path = args.get("path", ".")
-    p = _resolve(path, ctx.root).resolve()
+    try:
+        p = _resolve_contained(path, ctx.root)
+    except PathEscapeError as exc:
+        return f"ERROR: {exc}"
     if not p.exists():
         return f"ERROR: not found: {path}"
     if not p.is_dir():
@@ -363,7 +464,10 @@ def t_grep(args: dict, ctx: ToolContext) -> str:
         return "ERROR: missing argument 'pattern'"
     path = args.get("path", ".")
     case_insensitive = bool(args.get("case_insensitive", False))
-    p = _resolve(path, ctx.root)
+    try:
+        p = _resolve_contained(path, ctx.root)
+    except PathEscapeError as exc:
+        return f"ERROR: {exc}"
 
     home = Path.home().resolve()
     target = p.resolve()
@@ -425,7 +529,10 @@ def t_grep(args: dict, ctx: ToolContext) -> str:
 def t_glob(args: dict, ctx: ToolContext) -> str:
     import fnmatch
     pattern = args["pattern"]
-    base = _resolve(args.get("path", "."), ctx.root)
+    try:
+        base = _resolve_contained(args.get("path", "."), ctx.root)
+    except PathEscapeError as exc:
+        return f"ERROR: {exc}"
     if not base.exists() or not base.is_dir():
         return f"ERROR: not a directory: {base}"
     skip_dirs = {".git", "node_modules", "__pycache__", ".venv", "venv", "dist", "build"}
@@ -1098,43 +1205,145 @@ def t_browser_click_at(args: dict, ctx: ToolContext) -> str:
 # Web — fetch + search
 # ============================================================================
 
+def _ip_is_blocked(ip: str) -> bool:
+    """True if `ip` is loopback/link-local/private/reserved/multicast.
+
+    Reusable SSRF guard: refuses 127/8, 10/8, 172.16/12, 192.168/16,
+    169.254/16, ::1, fc00::/7, etc. so a URL (or a redirect hop) can't be
+    used to reach internal services.
+    """
+    import ipaddress
+    try:
+        addr = ipaddress.ip_address(ip)
+    except ValueError:
+        # Not a literal IP — treat as unsafe; we only ever pass resolved IPs.
+        return True
+    # ipaddress flags cover loopback, link-local, private, reserved,
+    # multicast and the unspecified address (0.0.0.0 / ::).
+    return (
+        addr.is_loopback
+        or addr.is_link_local
+        or addr.is_private
+        or addr.is_reserved
+        or addr.is_multicast
+        or addr.is_unspecified
+    )
+
+
+def _host_is_blocked(host: str) -> tuple[bool, str]:
+    """Resolve `host` and report whether any resolved IP is in a blocked range.
+
+    Returns (blocked, detail). Blocks when resolution fails or any address
+    falls in a private/loopback/link-local/reserved range. We block if *any*
+    resolved address is unsafe (DNS rebinding / multi-record defence).
+    """
+    import socket
+    if not host:
+        return True, "missing host"
+    try:
+        infos = socket.getaddrinfo(host, None)
+    except OSError as exc:
+        logger.warning("web_fetch: DNS resolution failed for %r", host, exc_info=True)
+        return True, f"could not resolve host {host!r}: {exc}"
+    for info in infos:
+        ip = info[4][0]
+        if _ip_is_blocked(ip):
+            return True, f"host {host!r} resolves to blocked address {ip}"
+    return False, ""
+
+
 def t_web_fetch(args: dict, ctx: ToolContext) -> str:
     import requests
+    from urllib.parse import urlparse, urljoin
+
     url = args["url"]
     if not url.startswith(("http://", "https://")):
         return "ERROR: url must be http:// or https://"
     timeout = int(args.get("timeout", 20))
     max_bytes = int(args.get("max_bytes", 200_000))
     headers = {"User-Agent": "cagentic/0.1"}
-    try:
-        r = requests.get(url, timeout=timeout, headers=headers,
-                         verify=not ctx.insecure_ssl, stream=True)
-    except requests.RequestException as e:
-        return f"ERROR: fetch failed: {e}"
+    max_redirects = 5
+
+    # Disable automatic redirect following so we can re-validate every hop
+    # against the SSRF guard (a public URL can 30x to a private one).
+    current = url
+    r = None
+    for _ in range(max_redirects + 1):
+        parsed = urlparse(current)
+        if parsed.scheme not in ("http", "https"):
+            return f"ERROR: refusing non-http(s) redirect target: {current}"
+        blocked, detail = _host_is_blocked(parsed.hostname or "")
+        if blocked:
+            return f"ERROR: refusing to fetch internal/blocked address ({detail})"
+        try:
+            r = requests.get(
+                current, timeout=timeout, headers=headers,
+                verify=not ctx.insecure_ssl, stream=True, allow_redirects=False,
+            )
+        except requests.RequestException as e:
+            logger.warning("web_fetch: request to %r failed", current, exc_info=True)
+            return f"ERROR: fetch failed: {e}"
+        if r.is_redirect or r.status_code in (301, 302, 303, 307, 308):
+            location = r.headers.get("Location")
+            try:
+                r.close()
+            except Exception:
+                logger.warning("web_fetch: failed closing redirect response", exc_info=True)
+            if not location:
+                return f"ERROR: redirect with no Location header from {current}"
+            current = urljoin(current, location)
+            continue
+        break
+    else:
+        return f"ERROR: too many redirects (>{max_redirects})"
+
+    if r is None:
+        return "ERROR: fetch failed: no response"
+
     chunks: list[bytes] = []
     seen = 0
     for chunk in r.iter_content(8192):
+        if not chunk:
+            continue
+        # Hard total ceiling: never keep more than max_bytes overall.
+        remaining = max_bytes - seen
+        if remaining <= 0:
+            break
+        if len(chunk) > remaining:
+            chunk = chunk[:remaining]
         chunks.append(chunk)
         seen += len(chunk)
         if seen >= max_bytes:
             break
+    try:
+        r.close()
+    except Exception:
+        logger.warning("web_fetch: failed closing response", exc_info=True)
     raw = b"".join(chunks)
     try:
         body = raw.decode(r.encoding or "utf-8", errors="replace")
     except Exception:
+        logger.warning("web_fetch: decode with declared encoding failed", exc_info=True)
         body = raw.decode("utf-8", errors="replace")
     # Optional: strip HTML tags for readability.
     if args.get("text_only") and ("<html" in body.lower() or "<body" in body.lower()):
         body = _strip_html(body)
-    return _truncate(f"HTTP {r.status_code}  {url}\n{body}")
+    return _truncate(f"HTTP {r.status_code}  {current}\n{body}")
 
 
 _HTML_TAG_RX = re.compile(r"<[^>]+>")
 _HTML_SCRIPT_RX = re.compile(r"<(script|style)[^>]*>.*?</\1>", re.DOTALL | re.IGNORECASE)
 _HTML_WS_RX = re.compile(r"\n[ \t]*\n[ \t]*\n+")
 
+# Cap the input handed to backtracking regexes. Adversarial/huge HTML can make
+# the DOTALL script/style pattern backtrack pathologically; only scan a bounded
+# prefix so a hostile page can't hang the process.
+_HTML_SCAN_CAP = 512 * 1024  # 512 KB
+
 
 def _strip_html(html: str) -> str:
+    if len(html) > _HTML_SCAN_CAP:
+        html = html[:_HTML_SCAN_CAP]
     text = _HTML_SCRIPT_RX.sub("", html)
     text = _HTML_TAG_RX.sub("", text)
     text = re.sub(r"&nbsp;", " ", text)
@@ -1161,8 +1370,13 @@ def t_web_search(args: dict, ctx: ToolContext) -> str:
         return f"ERROR: search failed: {e}"
     if r.status_code != 200:
         return f"ERROR: HTTP {r.status_code}"
+    # Bound the HTML we run the (DOTALL, backtracking) result regex over so a
+    # huge/adversarial response can't trigger pathological backtracking.
+    html = r.text
+    if len(html) > _HTML_SCAN_CAP:
+        html = html[:_HTML_SCAN_CAP]
     rx = re.compile(r'<a[^>]*class="[^"]*result__a[^"]*"[^>]*href="([^"]+)"[^>]*>(.*?)</a>', re.DOTALL)
-    items = rx.findall(r.text)
+    items = rx.findall(html)
     out: list[str] = []
     for href, title in items[:n]:
         title_text = re.sub(r"<[^>]+>", "", title).strip()

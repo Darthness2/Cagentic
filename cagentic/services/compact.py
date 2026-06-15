@@ -19,10 +19,21 @@ Helpers:
 """
 from __future__ import annotations
 
+import json
+import logging
 import re
 from dataclasses import dataclass
 
 BOUNDARY_MARKER = "<<COMPACT_BOUNDARY>>"
+
+_log = logging.getLogger(__name__)
+
+# A single inlined base64 image (e.g. a browser screenshot) costs the model a
+# fixed-ish chunk of context regardless of the raw byte length, which itself
+# is enormous and would otherwise dominate a char/4 estimate. Charge a flat
+# per-image cost so the estimator reflects real context pressure without
+# being dominated by base64 noise.
+_IMAGE_TOKEN_COST = 1000
 
 
 @dataclass
@@ -34,8 +45,37 @@ class CompactReport:
     summary_added: bool = False
 
 
+def _approx_message_tokens(m: dict) -> int:
+    """Estimate the token cost of a single message, counting not just the
+    text content but also any assistant ``tool_calls`` payload (serialized)
+    and a fixed cost per inlined base64 image. The naive char/4-of-content
+    estimate ignored both, undercounting context so compaction under-fired."""
+    total = len(str(m.get("content") or "")) // 4
+    tcs = m.get("tool_calls")
+    if tcs:
+        try:
+            total += len(json.dumps(tcs, default=str)) // 4
+        except (TypeError, ValueError):
+            total += len(str(tcs)) // 4
+    images = m.get("images")
+    if images:
+        try:
+            total += _IMAGE_TOKEN_COST * len(images)
+        except TypeError:
+            total += _IMAGE_TOKEN_COST
+    return total
+
+
 def _approx_tokens(messages: list[dict]) -> int:
-    return sum(len(str(m.get("content") or "")) // 4 for m in messages)
+    return sum(_approx_message_tokens(m) for m in messages)
+
+
+# Public alias — the engine and agent shim import this so the token estimate
+# (which counts tool_calls payloads and inlined images, not just content) lives
+# in exactly one place instead of being re-implemented as a naive char/4 inline.
+def approx_tokens(messages: list[dict]) -> int:
+    """Estimate the token cost of a message list (centralized estimator)."""
+    return _approx_tokens(messages)
 
 
 def find_compact_boundary(messages: list[dict]) -> int:
@@ -194,7 +234,11 @@ def auto_compact(
         head.append(messages[0])
 
     boundary_idx = find_compact_boundary(messages)
-    middle_start = boundary_idx + 1 if boundary_idx > 0 else len(head)
+    # NB: >= 0, not > 0. A boundary at index 0 is still a real boundary; with
+    # the old `> 0` test it was treated as absent and middle_start fell back to
+    # len(head), re-summarizing the existing compacted summary and compounding
+    # the loss on every subsequent compact.
+    middle_start = boundary_idx + 1 if boundary_idx >= 0 else len(head)
 
     tail = messages[-keep_recent:]
     middle = messages[middle_start:-keep_recent] if len(messages) > middle_start + keep_recent else []
@@ -207,6 +251,9 @@ def auto_compact(
         try:
             summary_text = summarize_with_model(middle)
         except Exception:
+            # Deliberate fallback to the deterministic bulletizer — but log it
+            # so a broken summarizer model isn't silently masked.
+            _log.warning("summarize_with_model failed; using bulletized fallback", exc_info=True)
             summary_text = None
     if not summary_text:
         summary_text = _bulletize(middle)
@@ -241,14 +288,19 @@ def manage_context(
 ) -> list[CompactReport]:
     """Run the three strategies in order: snip → collapse → auto."""
     reports: list[CompactReport] = []
+    # Capture the REAL token count before each mutation rather than back-
+    # computing a fabricated `before` from a fixed per-change fudge factor.
+    before = _approx_tokens(messages)
     snipped = snip_compact(messages)
     if snipped:
-        reports.append(CompactReport(True, _approx_tokens(messages) + snipped * 50,
-                                     _approx_tokens(messages), "snipCompact"))
+        after = _approx_tokens(messages)
+        reports.append(CompactReport(True, before, after, "snipCompact"))
+        before = after
     merged = context_collapse(messages)
     if merged:
-        reports.append(CompactReport(True, _approx_tokens(messages) + merged * 100,
-                                     _approx_tokens(messages), "contextCollapse"))
+        after = _approx_tokens(messages)
+        reports.append(CompactReport(True, before, after, "contextCollapse"))
+        before = after
     r = auto_compact(
         messages,
         max_tokens=max_tokens,

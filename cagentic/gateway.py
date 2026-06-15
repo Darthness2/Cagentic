@@ -12,15 +12,23 @@ page. Bound to localhost only.
 from __future__ import annotations
 
 import json
+import logging
 import re
+import secrets
 import threading
 import time
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
+from urllib.parse import urlparse, parse_qs
 
 from . import config as _config
 from . import sessions
 from . import projects
 from .providers import build_client as _build_client, parse_model as _parse_model, list_all_models as _all_models
+
+_log = logging.getLogger(__name__)
+
+# Hostnames we treat as the loopback interface for Host/Origin checks.
+_LOCAL_HOSTS = frozenset({"localhost", "127.0.0.1", "::1", ""})
 
 
 class _ClientGone(Exception):
@@ -151,12 +159,26 @@ class Gateway:
         self._thread: threading.Thread | None = None
         self.error: str | None = None
 
+        # Per-process secret required on every /api/* request. Bound to
+        # localhost only, but this token defends against other local users
+        # and (with the Host/Origin checks) against DNS-rebinding / CSRF.
+        self.token = secrets.token_urlsafe(32)
+
+        # Simple in-memory rate limit for the email-verification endpoint:
+        # list of monotonic timestamps of recent sends.
+        self._email_send_times: list[float] = []
+
         self._turn_lock = threading.Lock()
         self._active_emit = None
         self._active_source: str = "pc"  # "ios" or "pc" — who initiated this turn
 
+        # Permission prompt bridge. Each prompt gets a unique id; the client
+        # must echo that id back when answering, so a stale/duplicate answer
+        # can't resolve a different prompt (avoids the old set-before-clear
+        # race on a single process-global answer).
         self._perm_cv = threading.Condition()
-        self._perm_answer: str | None = None
+        self._perm_id: str | None = None      # id of the prompt currently awaiting an answer
+        self._perm_answers: dict[str, str] = {}  # prompt_id -> answer
 
         # Computer control approval bridge (iOS client approves/denies PC actions)
         self._comp_cv = threading.Condition()
@@ -195,9 +217,11 @@ class Gateway:
         if self._server is not None:
             return True
         try:
-            server = ThreadingHTTPServer(("0.0.0.0", self.port), _Handler)
+            # Bind to loopback only — the gateway exposes the full assistant
+            # (shell, files, browser, MCP) and must never be reachable off-host.
+            server = ThreadingHTTPServer(("127.0.0.1", self.port), _Handler)
         except OSError as e:
-            self.error = f"could not bind 0.0.0.0:{self.port} ({e})"
+            self.error = f"could not bind 127.0.0.1:{self.port} ({e})"
             return False
         server.gateway = self            # type: ignore[attr-defined]
         server.daemon_threads = True
@@ -212,7 +236,7 @@ class Gateway:
                 self._server.shutdown()
                 self._server.server_close()
             except Exception:
-                pass
+                _log.warning("error shutting down gateway server", exc_info=True)
             self._server = None
 
     @property
@@ -228,22 +252,43 @@ class Gateway:
         emit = self._active_emit
         if emit is None:
             return "no"
+        import uuid
         from .engine import _summarize_args
+        prompt_id = str(uuid.uuid4())
         with self._perm_cv:
-            self._perm_answer = None
-        emit("permission", {"tool": name, "summary": _summarize_args(name, args)})
-        with self._perm_cv:
-            deadline = time.monotonic() + 300
-            while self._perm_answer is None:
-                remaining = deadline - time.monotonic()
-                if remaining <= 0:
-                    return "no"
-                self._perm_cv.wait(remaining)
-            return self._perm_answer
+            self._perm_answers.pop(prompt_id, None)
+            self._perm_id = prompt_id
+        emit("permission", {"id": prompt_id, "tool": name, "summary": _summarize_args(name, args)})
+        try:
+            with self._perm_cv:
+                deadline = time.monotonic() + 300
+                while prompt_id not in self._perm_answers:
+                    remaining = deadline - time.monotonic()
+                    if remaining <= 0:
+                        return "no"
+                    self._perm_cv.wait(remaining)
+                return self._perm_answers.pop(prompt_id)
+        finally:
+            with self._perm_cv:
+                if self._perm_id == prompt_id:
+                    self._perm_id = None
 
-    def deliver_permission(self, answer: str) -> None:
+    def deliver_permission(self, answer: str, prompt_id: str | None = None) -> None:
+        """Record an answer for a pending permission prompt.
+
+        When `prompt_id` is given it must match the prompt currently awaiting
+        an answer; a mismatched/stale id is ignored. When omitted (e.g. an
+        internal abort), the answer is applied to whatever prompt is active.
+        """
+        answer = answer if answer in ("yes", "no", "always", "never") else "no"
         with self._perm_cv:
-            self._perm_answer = answer if answer in ("yes", "no", "always", "never") else "no"
+            target = prompt_id or self._perm_id
+            if target is None:
+                return
+            if prompt_id is not None and prompt_id != self._perm_id:
+                _log.warning("ignoring permission answer for stale/unknown prompt id")
+                return
+            self._perm_answers[target] = answer
             self._perm_cv.notify_all()
 
     # -- computer control approval bridge -----------------------------------
@@ -743,7 +788,10 @@ IMPORTANT: When you use show_widget, do NOT repeat the widget title or type in y
     def edit_and_resend(self, index: int, message: str, emit) -> None:
         """Truncate history after the *index*-th user message, replace its text
         with *message*, and re-run the turn from that point."""
-        if not self._turn_lock.acquire(blocking=False):
+        # Like delete_message and the other history-mutators, interrupt any
+        # in-flight turn first so it can't keep appending into the history we
+        # are about to rewrite.
+        if not self._interrupt_turn():
             emit("error", {"text": "Cagentic is still working on the previous message."})
             return
         # Find user messages in the engine's message list
@@ -769,7 +817,7 @@ IMPORTANT: When you use show_widget, do NOT repeat the widget title or type in y
             try:
                 self._save_current()
             except Exception:
-                pass
+                _log.warning("failed to save chat after edit_and_resend", exc_info=True)
             self._turn_lock.release()
 
     def delete_message(self, index: int) -> dict:
@@ -810,7 +858,7 @@ IMPORTANT: When you use show_widget, do NOT repeat the widget title or type in y
             try:
                 self._save_current()
             except Exception:
-                pass
+                _log.warning("failed to save chat after turn", exc_info=True)
             self._turn_lock.release()
 
     # -- slash command handler for web UI -----------------------------------

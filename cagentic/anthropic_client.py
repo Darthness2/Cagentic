@@ -12,12 +12,20 @@ Message-format translation (Ollama ↔ Anthropic):
 from __future__ import annotations
 
 import json
+import logging
 import uuid
 from typing import Any, Iterator
 
 import requests
 
 from .ollama_client import OllamaError
+
+_log = logging.getLogger(__name__)
+
+# Anthropic requires an explicit max_tokens. 8192 was hard-coded and far below
+# what current Claude models can emit, silently truncating long answers. Use a
+# generous default and let callers override via options/config.
+_DEFAULT_MAX_TOKENS = 32000
 
 
 class AnthropicError(OllamaError):
@@ -142,7 +150,16 @@ class AnthropicClient:
             if role == "tool":
                 name = m.get("name", "")
                 queue = pending.get(name, [])
-                cid = queue.pop(0) if queue else _make_tool_id()
+                if not queue:
+                    # Orphan tool result — its originating tool_use was dropped
+                    # during compaction. Fabricating an id here references a
+                    # tool_use that doesn't exist, which Anthropic rejects with
+                    # a 400. Skip the orphan instead.
+                    _log.warning(
+                        "dropping orphan tool result for %r with no matching tool_use", name
+                    )
+                    continue
+                cid = queue.pop(0)
                 raw.append(
                     {
                         "role": "user",
@@ -198,7 +215,21 @@ class AnthropicClient:
                         },
                     }
                 )
-        return {"role": "assistant", "content": text, "tool_calls": tcs}
+        msg = {"role": "assistant", "content": text, "tool_calls": tcs}
+        if data.get("stop_reason") == "max_tokens":
+            # Response hit the output cap — surface so the engine warns and the
+            # user knows the answer is cut short.
+            msg["truncated"] = True
+        return msg
+
+    @staticmethod
+    def _resolve_max_tokens(options: dict | None) -> int:
+        if options:
+            for key in ("max_tokens", "max_completion_tokens", "num_predict"):
+                val = options.get(key)
+                if isinstance(val, int) and val > 0:
+                    return val
+        return _DEFAULT_MAX_TOKENS
 
     def _build_body(
         self,
@@ -211,14 +242,14 @@ class AnthropicClient:
         system, norm = self._convert_messages(messages)
         body: dict[str, Any] = {
             "model": model,
-            "max_tokens": 8192,
+            "max_tokens": self._resolve_max_tokens(options),
             "messages": norm,
         }
         if system:
             body["system"] = system
         if tools:
             body["tools"] = self._convert_tools(tools)
-        if options and "temperature" in options:
+        if options and options.get("temperature") is not None:
             body["temperature"] = options["temperature"]
         if stream:
             body["stream"] = True
@@ -255,69 +286,81 @@ class AnthropicClient:
         options: dict | None = None,
     ) -> Iterator[tuple[str, Any]]:
         body = self._build_body(model, messages, tools, options, stream=True)
-        try:
-            r = self._session.post(
-                _API_URL, json=body, stream=True, timeout=self.timeout
-            )
-            r.raise_for_status()
-        except requests.RequestException as e:
-            raise AnthropicError(f"Anthropic streaming error: {e}") from e
 
         full = ""
         tool_blocks: dict[str, dict] = {}  # tool_use_id -> {name, input_str}
         current_id: str | None = None
         in_tokens = 0
         out_tokens = 0
+        stop_reason: str | None = None
+        saw_message_stop = False
 
-        for raw_line in r.iter_lines():
-            if not raw_line:
-                continue
-            line = raw_line.decode() if isinstance(raw_line, bytes) else raw_line
+        try:
+            with self._session.post(
+                _API_URL, json=body, stream=True, timeout=self.timeout
+            ) as r:
+                try:
+                    r.raise_for_status()
+                except requests.RequestException as e:
+                    raise AnthropicError(f"Anthropic streaming error: {e}") from e
 
-            if line.startswith("event: "):
-                continue  # event-type lines — handled by the data line below
+                for raw_line in r.iter_lines():
+                    if not raw_line:
+                        continue
+                    line = raw_line.decode() if isinstance(raw_line, bytes) else raw_line
 
-            if not line.startswith("data: "):
-                continue
-            payload = line[6:]
-            try:
-                event = json.loads(payload)
-            except json.JSONDecodeError:
-                continue
+                    if line.startswith("event: "):
+                        continue  # event-type lines — handled by the data line below
 
-            etype = event.get("type")
+                    if not line.startswith("data: "):
+                        continue
+                    payload = line[6:]
+                    try:
+                        event = json.loads(payload)
+                    except json.JSONDecodeError:
+                        continue
 
-            if etype == "content_block_start":
-                block = event.get("content_block") or {}
-                if block.get("type") == "tool_use":
-                    current_id = block["id"]
-                    tool_blocks[current_id] = {
-                        "name": block.get("name", ""),
-                        "input_str": "",
-                    }
+                    etype = event.get("type")
 
-            elif etype == "content_block_delta":
-                delta = event.get("delta") or {}
-                dtype = delta.get("type")
-                if dtype == "text_delta":
-                    text = delta.get("text", "")
-                    full += text
-                    yield ("delta", text)
-                elif dtype == "input_json_delta" and current_id:
-                    tool_blocks[current_id]["input_str"] += delta.get(
-                        "partial_json", ""
-                    )
+                    if etype == "content_block_start":
+                        block = event.get("content_block") or {}
+                        if block.get("type") == "tool_use":
+                            current_id = block["id"]
+                            tool_blocks[current_id] = {
+                                "name": block.get("name", ""),
+                                "input_str": "",
+                            }
 
-            elif etype == "content_block_stop":
-                current_id = None
+                    elif etype == "content_block_delta":
+                        delta = event.get("delta") or {}
+                        dtype = delta.get("type")
+                        if dtype == "text_delta":
+                            text = delta.get("text", "")
+                            full += text
+                            yield ("delta", text)
+                        elif dtype == "input_json_delta" and current_id:
+                            tool_blocks[current_id]["input_str"] += delta.get(
+                                "partial_json", ""
+                            )
 
-            elif etype == "message_delta":
-                usage = event.get("usage") or {}
-                out_tokens = usage.get("output_tokens", 0)
+                    elif etype == "content_block_stop":
+                        current_id = None
 
-            elif etype == "message_start":
-                usage = (event.get("message") or {}).get("usage") or {}
-                in_tokens = usage.get("input_tokens", 0)
+                    elif etype == "message_delta":
+                        usage = event.get("usage") or {}
+                        out_tokens = usage.get("output_tokens", 0)
+                        sr = (event.get("delta") or {}).get("stop_reason")
+                        if sr:
+                            stop_reason = sr
+
+                    elif etype == "message_start":
+                        usage = (event.get("message") or {}).get("usage") or {}
+                        in_tokens = usage.get("input_tokens", 0)
+
+                    elif etype == "message_stop":
+                        saw_message_stop = True
+        except requests.RequestException as e:
+            raise AnthropicError(f"Anthropic streaming error: {e}") from e
 
         tcs = []
         for cid, tb in tool_blocks.items():
@@ -332,19 +375,23 @@ class AnthropicClient:
                 }
             )
 
-        yield (
-            "done",
-            {
-                "message": {
-                    "role": "assistant",
-                    "content": full,
-                    "tool_calls": tcs,
-                },
-                "eval_count": out_tokens,
-                "prompt_eval_count": in_tokens,
-                "total_duration_ns": 0,
+        # Mark truncated when the model hit its output cap OR the stream ended
+        # without a proper message_stop sentinel (connection died mid-response).
+        truncated = stop_reason == "max_tokens" or not saw_message_stop
+
+        done: dict[str, Any] = {
+            "message": {
+                "role": "assistant",
+                "content": full,
+                "tool_calls": tcs,
             },
-        )
+            "eval_count": out_tokens,
+            "prompt_eval_count": in_tokens,
+            "total_duration_ns": 0,
+        }
+        if truncated:
+            done["truncated"] = True
+        yield ("done", done)
 
     def unload(self, model: str) -> None:
         """No-op — cloud providers manage their own resources."""

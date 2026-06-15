@@ -5,9 +5,12 @@ record, observers register a callback and get notified on every update.
 """
 from __future__ import annotations
 
+import logging
 from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Any, Callable
+
+logger = logging.getLogger(__name__)
 
 
 Listener = Callable[["AppState", str, Any], None]
@@ -87,7 +90,12 @@ class AppState:
                 try:
                     fn(self, key, value)
                 except Exception:
-                    pass
+                    # A listener failing (e.g. a silent autosave) must not
+                    # abort the update or the other listeners — but it should
+                    # be visible in the logs rather than vanishing.
+                    logger.warning(
+                        "AppState listener failed on update of %r", key, exc_info=True
+                    )
 
     def push_file(self, path: str) -> None:
         if path in self.file_history:

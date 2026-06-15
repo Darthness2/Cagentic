@@ -6,14 +6,17 @@
 
 const POLL_MS = 1500;
 let port = 8765;
+let token = "";
 let timer = null;
 
 const $ = (id) => document.getElementById(id);
 
-async function loadPort() {
-  const r = await chrome.storage.local.get("port");
+async function loadSettings() {
+  const r = await chrome.storage.local.get(["port", "token"]);
   port = r.port || 8765;
+  token = r.token || "";
   $("port").value = port;
+  $("token").value = token;
 }
 
 function ago(ts) {
@@ -54,11 +57,22 @@ function renderRecent(recent) {
   recent.forEach((r) => {
     const row = document.createElement("div");
     row.className = "act " + (r.ok ? "ok" : "bad");
-    row.innerHTML =
-      '<span class="mk">' + (r.ok ? "✓" : "✗") + "</span>" +
-      '<span class="name">' + (r.action || "?") + "</span>" +
-      '<span class="sum">' + (r.summary || "") + "</span>" +
-      '<span class="when">' + ago(r.ts) + "</span>";
+    // Build with textContent (never innerHTML): r.action / r.summary are
+    // influenced by the bridge / page content, so interpolating them as HTML
+    // would be an XSS sink in the popup.
+    const mk = document.createElement("span");
+    mk.className = "mk";
+    mk.textContent = r.ok ? "✓" : "✗";
+    const name = document.createElement("span");
+    name.className = "name";
+    name.textContent = r.action || "?";
+    const sum = document.createElement("span");
+    sum.className = "sum";
+    sum.textContent = r.summary || "";
+    const when = document.createElement("span");
+    when.className = "when";
+    when.textContent = ago(r.ts);
+    row.append(mk, name, sum, when);
     box.appendChild(row);
   });
 }
