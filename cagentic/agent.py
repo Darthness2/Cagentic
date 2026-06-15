@@ -246,15 +246,16 @@ def _end_stream_line(rs: _RenderState) -> None:
         if rs.md is not None:
             rs.md.flush()
             rs.streamed_visible = bool(getattr(rs.md, "visible_emitted", False))
-        sys.stdout.write("\n")
-        sys.stdout.flush()
+        ui.sync_write("\n")
         rs.streaming = False
         rs.md = None
 
 
 def _stream_emit(s: str) -> None:
-    sys.stdout.write(s)
-    sys.stdout.flush()
+    # Share the paint lock with the status bar / spinner so a background
+    # paint frame can't slip between this write and its flush and clobber
+    # the cursor mid-token.
+    ui.sync_write(s)
 
 
 def render_event(event: Message, rs: _RenderState) -> None:
@@ -338,7 +339,7 @@ def render_event(event: Message, rs: _RenderState) -> None:
             # Continue an existing run — overwrite the line above instead
             # of printing a new one, so "read_file × 5" shows in place.
             rs.run.count += 1
-            sys.stdout.write("\r\033[1A\033[2K")
+            ui.sync_write("\r\033[1A\033[2K")
             _print_tool_line(name, short_summary, meta, ok=True, count=rs.run.count)
         else:
             rs.run = _ToolRun(name=name) if ok else None

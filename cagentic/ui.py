@@ -550,6 +550,21 @@ _active_spinners: list["Spinner"] = []
 _PAINT_LOCK = threading.Lock()
 
 
+def sync_write(s: str) -> None:
+    """Write `s` to stdout under the shared paint lock, then flush.
+
+    The StatusBar and Spinner paint from background threads, bracketing each
+    frame in a cursor save/restore. Main-thread output that streams tokens or
+    moves the cursor must take the SAME lock — otherwise a paint frame can
+    land between the write and its flush and the two fight over the cursor,
+    so the model's text visibly writes over itself. Plain prints elsewhere
+    are cursor-neutral against a paint frame and don't need this.
+    """
+    with _PAINT_LOCK:
+        sys.stdout.write(s)
+        sys.stdout.flush()
+
+
 def stop_all_spinners() -> None:
     for s in list(_active_spinners):
         try:
@@ -926,6 +941,7 @@ class StatusBar:
         self._thread: threading.Thread | None = None
         self._lock = threading.Lock()
         self._active = False
+        self._last_rows = 0      # track height so resize re-reserves the row
 
     # ------------------------------------------------------------------
     # Public API
@@ -935,9 +951,19 @@ class StatusBar:
         if not sys.stdout.isatty() or os.environ.get("COLLAMA_STATUS_BAR") == "off":
             return
         rows = shutil.get_terminal_size((80, 24)).lines
-        # Reserve the last row from the scroll region.
-        sys.stdout.write(f"\033[1;{rows - 1}r")
-        sys.stdout.flush()
+        self._last_rows = rows
+        # Reserve the last row from the scroll region. DECSTBM (ESC [ t;b r)
+        # homes the cursor to (1,1) per the VT spec, so it MUST be bracketed
+        # in DECSC/DECRC (ESC 7 / ESC 8) — otherwise the cursor jumps to the
+        # top of the screen and the turn's first streamed tokens write right
+        # over the banner and previous output.
+        with _PAINT_LOCK:
+            sys.stdout.write(
+                "\0337"                   # ESC 7: save cursor (DECSC)
+                + f"\033[1;{rows - 1}r"   # DECSTBM — reserve bottom row (homes)
+                + "\0338"                 # ESC 8: restore cursor (DECRC)
+            )
+            sys.stdout.flush()
         self._active = True
         self._stop.clear()
         self._thread = threading.Thread(target=self._run, daemon=True)
@@ -968,13 +994,19 @@ class StatusBar:
         self._thread = None
         self._active = False
         rows = shutil.get_terminal_size((80, 24)).lines
+        # Reset the scroll region and clear the bar row, but leave the cursor
+        # where the turn's output ended. Both DECSTBM reset (ESC [ r) and the
+        # move-to-bar-row escape disturb the cursor, so they MUST sit between
+        # the save and restore — emitting ESC [ r *after* the restore (the old
+        # bug) homed the cursor to (1,1), so the next prompt drew over the
+        # whole screen.
         with _PAINT_LOCK:
             sys.stdout.write(
-                "\0337"               # ESC 7: save cursor (DEC DECSC)
+                "\0337"               # ESC 7: save cursor (DECSC)
+                + "\033[r"            # reset scroll region (homes cursor)
                 + f"\033[{rows};1H"   # move to bar row
                 + "\033[2K"           # clear it
-                + "\0338"             # ESC 8: restore cursor (DEC DECRC)
-                + "\033[r"            # reset scroll region to full terminal
+                + "\0338"             # ESC 8: restore cursor (DECRC)
             )
             sys.stdout.flush()
 
@@ -1014,9 +1046,17 @@ class StatusBar:
     def _paint(self) -> None:
         text = self._compose()
         rows = shutil.get_terminal_size((80, 24)).lines
+        # On resize, re-reserve the bottom row against the new height. This
+        # goes INSIDE the save/restore bracket so the DECSTBM home doesn't
+        # strand the cursor and overwrite streaming output.
+        resize_seq = ""
+        if rows != self._last_rows:
+            resize_seq = f"\033[1;{rows - 1}r"
+            self._last_rows = rows
         with _PAINT_LOCK:
             sys.stdout.write(
                 "\0337"                          # ESC 7: save cursor
+                + resize_seq                     # re-reserve bottom row on resize
                 + f"\033[{rows};1H"              # move to bottom row
                 + "\033[2K"                      # clear line
                 + f"\033[38;5;246m{text}\033[0m" # muted gray (256-color 246)
