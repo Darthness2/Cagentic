@@ -5,6 +5,7 @@ Event-stream architecture with a personal-assistant system prompt.
 from __future__ import annotations
 
 import json
+import logging
 import re
 from concurrent.futures import ThreadPoolExecutor, as_completed
 from dataclasses import dataclass, field
@@ -16,11 +17,17 @@ from .background import BackgroundExecutor
 from .config import set_value
 from .ollama_client import OllamaClient, OllamaError, ToolsUnsupportedError
 from .permissions import CONCURRENT_SAFE, Resolver, auto_deny_resolver, can_use_tool
-from .services.compact import BOUNDARY_MARKER, manage_context
+from .services.compact import (
+    BOUNDARY_MARKER,
+    approx_tokens as estimate_tokens,
+    manage_context,
+)
 from .services.transcript import record as record_transcript
 from .state import AppState
 from .tasks import TaskGraph, TaskKind, new_id
 from .tools import ToolContext, all_tool_schemas, dispatch
+
+_log = logging.getLogger(__name__)
 
 
 MAX_TOOL_ITERATIONS = 1000
@@ -479,20 +486,35 @@ class StreamingToolExecutor:
     def execute(self, calls):
         if not calls:
             return
-        concurrent_calls = [c for c in calls if c[0] in CONCURRENT_SAFE]
-        serial_calls = [c for c in calls if c[0] not in CONCURRENT_SAFE]
-
-        if len(concurrent_calls) > 1:
-            with ThreadPoolExecutor(max_workers=self.max_workers) as pool:
-                futures = [pool.submit(self._run_one_collect, c) for c in concurrent_calls]
-                for fut in as_completed(futures):
-                    yield from fut.result()
-        else:
-            for c in concurrent_calls:
-                yield from self._run_one(c)
-
-        for c in serial_calls:
-            yield from self._run_one(c)
+        # Preserve the model's intended call ORDER. Globally partitioning into
+        # "concurrent" then "serial" reorders sequences the model meant to run
+        # in order (e.g. write_file then read_file would run read first because
+        # read is concurrent-safe). Instead, walk the list once and parallelize
+        # only ADJACENT runs of concurrent-safe calls; everything else runs
+        # serially in place.
+        i = 0
+        n = len(calls)
+        while i < n:
+            if calls[i][0] in CONCURRENT_SAFE:
+                # Gather the maximal adjacent run of concurrent-safe calls.
+                j = i
+                while j < n and calls[j][0] in CONCURRENT_SAFE:
+                    j += 1
+                group = calls[i:j]
+                if len(group) > 1:
+                    with ThreadPoolExecutor(max_workers=self.max_workers) as pool:
+                        # Submit in order; collect results in submission order so
+                        # output ordering within the group is deterministic
+                        # rather than completion-order.
+                        futures = [pool.submit(self._run_one_collect, c) for c in group]
+                        for fut in futures:
+                            yield from fut.result()
+                else:
+                    yield from self._run_one(group[0])
+                i = j
+            else:
+                yield from self._run_one(calls[i])
+                i += 1
 
     def _run_one(self, call):
         name, args, role = call
@@ -584,6 +606,15 @@ class QueryEngine:
         self.messages: list[dict] = [{"role": "system", "content": self._system_content()}]
         self._recent_calls: list[tuple[str, str]] = []
         self._recent_results: list[tuple[str, str]] = []
+        # Signatures already counted toward loop detection in the CURRENT
+        # assistant turn (one model response → its batch of tool calls). A
+        # legitimate same-turn fan-out of N identical calls is genuine
+        # parallelism, not a stuck loop, so each signature counts at most once
+        # per turn. Reset at the start of every batch in _execute_and_record.
+        self._counted_calls_this_turn: set[tuple[str, str]] = set()
+        # Result-loop keys already soft-steered this turn, so a repeated result
+        # injects the steer nudge only ONCE instead of on every duplicate.
+        self._steered_result_keys: set[tuple[str, str]] = set()
         self._abort_turn = False
         self._plan_shown_this_turn = False
         self._usage = {"input": 0, "output": 0, "ms": 0}
@@ -636,7 +667,7 @@ class QueryEngine:
         record_transcript(self.session_id or "", "user", prompt)
         self.messages.append(user_msg)
 
-        _pre = sum(len(str(m.get("content") or "")) // 4 for m in self.messages)
+        _pre = estimate_tokens(self.messages)
         will_compact = _pre > COMPACT_TOKENS
         if will_compact:
             yield Message("info", {
@@ -666,9 +697,7 @@ class QueryEngine:
                 )
                 self.messages.append({"role": "user", "content": inject})
                 yield Message("warn", {"text": f"background {note['id']} {note['status']} — injected"})
-            est_tokens = sum(
-                len(str(m.get("content") or "")) // 4 for m in self.messages
-            )
+            est_tokens = estimate_tokens(self.messages)
             if est_tokens >= 4000:
                 tool_count = len(all_tool_schemas(self.state.tool_groups)) if self.state.tools_enabled else 0
                 yield Message("info", {
@@ -902,6 +931,14 @@ class QueryEngine:
 
     def _check_loop(self, name: str, args: dict) -> bool:
         key = (name, json.dumps(args, sort_keys=True, default=str))
+        # Turn-scoped: a batch of N identical calls emitted in ONE assistant
+        # turn is genuine parallel fan-out, not a loop. Count each signature at
+        # most once per turn — the SECOND+ identical call within the same turn
+        # is allowed through (returns False) and does not inflate the run count.
+        if key in self._counted_calls_this_turn:
+            return False
+        self._counted_calls_this_turn.add(key)
+
         self._recent_calls.append(key)
         run = 1
         for prev in reversed(self._recent_calls[:-1]):
@@ -915,7 +952,7 @@ class QueryEngine:
             self.messages.append({
                 "role": "user",
                 "content": (
-                    f"You called {name} with the same arguments {run} times in a row. "
+                    f"You called {name} with the same arguments across {run} turns. "
                     f"Stop repeating. Try a different approach or ask a clarifying question."
                 ),
             })
@@ -958,6 +995,12 @@ class QueryEngine:
         return self._recent_results.count(key)
 
     def _execute_and_record(self, calls):
+        # New assistant turn → reset the per-turn dedup sets so a repeated
+        # signature is counted once for THIS turn (genuine same-turn fan-out of
+        # identical calls is not a loop and isn't dropped), and the soft
+        # result-steer can fire once per repeated key this turn.
+        self._counted_calls_this_turn = set()
+        self._steered_result_keys = set()
         cleaned_calls = []
         for name, args, role in calls:
             if self._check_loop(name, args):
@@ -994,7 +1037,21 @@ class QueryEngine:
                 record_transcript(self.session_id or "", "tool", result, name=name)
 
                 seen = self._result_loop_count(name, result)
-                if seen == LOOP_THRESHOLD:
+                steer_key = (name, (result or "")[:240])
+                if seen >= LOOP_THRESHOLD * 2:
+                    # Hard abort takes precedence — the soft steer didn't work.
+                    yield Message("warn", {
+                        "text": f"loop unbroken after {seen} identical results — ending turn"
+                    })
+                    self._abort_turn = True
+                    return
+                if seen >= LOOP_THRESHOLD and steer_key not in self._steered_result_keys:
+                    # Fire on >= (not ==): counts can jump past the exact value
+                    # when exempt/CACHED/concurrent results land, which silently
+                    # skipped the old `== LOOP_THRESHOLD` branch. Steer once per
+                    # repeated key per turn so we don't re-inject on every
+                    # subsequent identical result.
+                    self._steered_result_keys.add(steer_key)
                     yield Message("warn", {
                         "text": f"loop: {name} returned the same result {seen}× — steering hard"
                     })
@@ -1006,12 +1063,6 @@ class QueryEngine:
                             f"or give the user a short final answer."
                         ),
                     })
-                elif seen >= LOOP_THRESHOLD * 2:
-                    yield Message("warn", {
-                        "text": f"loop unbroken after {seen} identical results — ending turn"
-                    })
-                    self._abort_turn = True
-                    return
 
 
 class _StreamGen:

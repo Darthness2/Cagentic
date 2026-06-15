@@ -3,7 +3,9 @@
   "name": "Cagentic Bridge",
   "version": "0.1.0",
   "description": "Lets your local Cagentic assistant see and act in this browser.",
+  "_comment_permissions": "All listed permissions are used: tabs (query/create/update/remove/group), tabGroups (the orange Cagentic group), scripting (executeScript for read/click/fill/eval/etc.), alarms (keep the MV3 service worker's poll loop alive), storage (port + bridge token).",
   "permissions": ["tabs", "tabGroups", "scripting", "alarms", "storage"],
+  "_comment_host_permissions": "<all_urls> is KEPT intentionally: the assistant must read/script arbitrary sites the user has open, so narrowing the host list would break core function. The command channel is NOT secured by host scope — it is locked by the shared bridge token (X-Cagentic-Token, enforced by browser.py on /next, /result, /status). The download action additionally blocks private/loopback/link-local/reserved hosts and omits cookies by default to prevent credentialed SSRF over this broad scope.",
   "host_permissions": ["<all_urls>"],
   "background": { "service_worker": "background.js" },
   "action": {

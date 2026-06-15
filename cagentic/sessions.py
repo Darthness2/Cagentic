@@ -6,15 +6,24 @@ Each session is JSON at ~/.config/cagentic/sessions/<id>.json with:
 from __future__ import annotations
 
 import json
+import logging
 import os
 import re
 import stat
+import tempfile
+import threading
 import time
 import uuid
 from pathlib import Path
 from typing import Any
 
 from .config import config_dir
+
+logger = logging.getLogger(__name__)
+
+# Serializes concurrent saves (gateway thread + REPL autosave) so the
+# write-temp-then-replace dance can't interleave and corrupt a session file.
+_SAVE_LOCK = threading.Lock()
 
 
 def sessions_dir() -> Path:
@@ -47,7 +56,10 @@ def make(model: str, title: str | None = None, project_id: str | None = None) ->
 def derive_title(messages: list[dict]) -> str:
     for m in messages:
         if m.get("role") == "user":
-            text = (m.get("content") or "").strip()
+            # Content may be a list (tool/assistant payloads), not a str —
+            # coerce so re.sub / slicing don't blow up.
+            raw = m.get("content")
+            text = ("" if raw is None else str(raw)).strip()
             text = re.sub(r"\s+", " ", text)
             return text[:60] if text else "untitled"
     return "untitled"
@@ -58,13 +70,27 @@ def save(session: dict) -> Path:
     if session.get("title") in (None, "", "untitled"):
         session["title"] = derive_title(session.get("messages", []))
     p = _path(session["id"])
-    tmp = p.with_suffix(".json.tmp")
-    tmp.write_text(json.dumps(session, indent=2))
-    tmp.replace(p)
-    try:
-        os.chmod(p, stat.S_IRUSR | stat.S_IWUSR)
-    except OSError:
-        pass
+    d = p.parent
+    data = json.dumps(session, indent=2)
+    # Unique temp name + lock so concurrent savers can't clobber each other's
+    # temp file or race the replace. Session files don't hold secrets, so the
+    # default temp perms are fine; the atomic replace is what matters.
+    with _SAVE_LOCK:
+        fd, tmp_name = tempfile.mkstemp(dir=str(d), prefix=f".{session['id']}.", suffix=".tmp")
+        try:
+            os.fchmod(fd, stat.S_IRUSR | stat.S_IWUSR)
+            with os.fdopen(fd, "w", encoding="utf-8") as f:
+                f.write(data)
+                f.flush()
+                os.fsync(f.fileno())
+            os.replace(tmp_name, p)
+        except OSError:
+            logger.warning("session save failed for %s", p, exc_info=True)
+            try:
+                os.unlink(tmp_name)
+            except OSError:
+                logger.warning("could not clean up temp file %s", tmp_name, exc_info=True)
+            raise
     return p
 
 

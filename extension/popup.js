@@ -6,14 +6,17 @@
 
 const POLL_MS = 1500;
 let port = 8765;
+let token = "";
 let timer = null;
 
 const $ = (id) => document.getElementById(id);
 
-async function loadPort() {
-  const r = await chrome.storage.local.get("port");
+async function loadSettings() {
+  const r = await chrome.storage.local.get(["port", "token"]);
   port = r.port || 8765;
+  token = r.token || "";
   $("port").value = port;
+  $("token").value = token;
 }
 
 function ago(ts) {
@@ -54,11 +57,22 @@ function renderRecent(recent) {
   recent.forEach((r) => {
     const row = document.createElement("div");
     row.className = "act " + (r.ok ? "ok" : "bad");
-    row.innerHTML =
-      '<span class="mk">' + (r.ok ? "✓" : "✗") + "</span>" +
-      '<span class="name">' + (r.action || "?") + "</span>" +
-      '<span class="sum">' + (r.summary || "") + "</span>" +
-      '<span class="when">' + ago(r.ts) + "</span>";
+    // Build with textContent (never innerHTML): r.action / r.summary are
+    // influenced by the bridge / page content, so interpolating them as HTML
+    // would be an XSS sink in the popup.
+    const mk = document.createElement("span");
+    mk.className = "mk";
+    mk.textContent = r.ok ? "✓" : "✗";
+    const name = document.createElement("span");
+    name.className = "name";
+    name.textContent = r.action || "?";
+    const sum = document.createElement("span");
+    sum.className = "sum";
+    sum.textContent = r.summary || "";
+    const when = document.createElement("span");
+    when.className = "when";
+    when.textContent = ago(r.ts);
+    row.append(mk, name, sum, when);
     box.appendChild(row);
   });
 }
@@ -74,32 +88,47 @@ function renderOnline(s) {
   $("ver").textContent = "cagentic v" + (s.version || "?") + " · bridge on 127.0.0.1:" + port;
 }
 
-function renderOffline() {
+function renderOffline(msg) {
   $("dot").className = "dot off";
-  $("statusText").textContent = "Cagentic not running";
+  $("statusText").textContent = msg || "Cagentic not running";
   $("statusSub").textContent = "";
   $("details").classList.add("hidden");
   $("ver").textContent = "start Cagentic, then this connects automatically";
 }
 
 async function poll() {
+  if (!token) {
+    // Not paired: /status would 403, so prompt the user to paste the token
+    // Cagentic printed instead of showing a misleading "not running".
+    renderOffline("Paste the bridge token below to connect");
+    return;
+  }
   try {
-    const res = await fetch("http://127.0.0.1:" + port + "/status", { method: "GET" });
+    const res = await fetch("http://127.0.0.1:" + port + "/status", {
+      method: "GET",
+      headers: { "X-Cagentic-Token": token },
+    });
+    if (res.status === 403) {
+      renderOffline("Bridge token rejected — re-paste it");
+      return;
+    }
     if (!res.ok) throw new Error("bad status");
     renderOnline(await res.json());
   } catch (e) {
+    console.warn("Cagentic: status poll failed", e);
     renderOffline();
   }
 }
 
 $("save").addEventListener("click", async () => {
   port = parseInt($("port").value, 10) || 8765;
-  await chrome.storage.local.set({ port });
+  token = $("token").value.trim();
+  await chrome.storage.local.set({ port, token });
   poll();
 });
 
 (async () => {
-  await loadPort();
+  await loadSettings();
   poll();
   timer = setInterval(poll, POLL_MS);
 })();

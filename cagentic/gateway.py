@@ -12,15 +12,23 @@ page. Bound to localhost only.
 from __future__ import annotations
 
 import json
+import logging
 import re
+import secrets
 import threading
 import time
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
+from urllib.parse import urlparse, parse_qs
 
 from . import config as _config
 from . import sessions
 from . import projects
 from .providers import build_client as _build_client, parse_model as _parse_model, list_all_models as _all_models
+
+_log = logging.getLogger(__name__)
+
+# Hostnames we treat as the loopback interface for Host/Origin checks.
+_LOCAL_HOSTS = frozenset({"localhost", "127.0.0.1", "::1", ""})
 
 
 class _ClientGone(Exception):
@@ -151,12 +159,26 @@ class Gateway:
         self._thread: threading.Thread | None = None
         self.error: str | None = None
 
+        # Per-process secret required on every /api/* request. Bound to
+        # localhost only, but this token defends against other local users
+        # and (with the Host/Origin checks) against DNS-rebinding / CSRF.
+        self.token = secrets.token_urlsafe(32)
+
+        # Simple in-memory rate limit for the email-verification endpoint:
+        # list of monotonic timestamps of recent sends.
+        self._email_send_times: list[float] = []
+
         self._turn_lock = threading.Lock()
         self._active_emit = None
         self._active_source: str = "pc"  # "ios" or "pc" — who initiated this turn
 
+        # Permission prompt bridge. Each prompt gets a unique id; the client
+        # must echo that id back when answering, so a stale/duplicate answer
+        # can't resolve a different prompt (avoids the old set-before-clear
+        # race on a single process-global answer).
         self._perm_cv = threading.Condition()
-        self._perm_answer: str | None = None
+        self._perm_id: str | None = None      # id of the prompt currently awaiting an answer
+        self._perm_answers: dict[str, str] = {}  # prompt_id -> answer
 
         # Computer control approval bridge (iOS client approves/denies PC actions)
         self._comp_cv = threading.Condition()
@@ -195,9 +217,11 @@ class Gateway:
         if self._server is not None:
             return True
         try:
-            server = ThreadingHTTPServer(("0.0.0.0", self.port), _Handler)
+            # Bind to loopback only — the gateway exposes the full assistant
+            # (shell, files, browser, MCP) and must never be reachable off-host.
+            server = ThreadingHTTPServer(("127.0.0.1", self.port), _Handler)
         except OSError as e:
-            self.error = f"could not bind 0.0.0.0:{self.port} ({e})"
+            self.error = f"could not bind 127.0.0.1:{self.port} ({e})"
             return False
         server.gateway = self            # type: ignore[attr-defined]
         server.daemon_threads = True
@@ -212,7 +236,7 @@ class Gateway:
                 self._server.shutdown()
                 self._server.server_close()
             except Exception:
-                pass
+                _log.warning("error shutting down gateway server", exc_info=True)
             self._server = None
 
     @property
@@ -228,22 +252,43 @@ class Gateway:
         emit = self._active_emit
         if emit is None:
             return "no"
+        import uuid
         from .engine import _summarize_args
+        prompt_id = str(uuid.uuid4())
         with self._perm_cv:
-            self._perm_answer = None
-        emit("permission", {"tool": name, "summary": _summarize_args(name, args)})
-        with self._perm_cv:
-            deadline = time.monotonic() + 300
-            while self._perm_answer is None:
-                remaining = deadline - time.monotonic()
-                if remaining <= 0:
-                    return "no"
-                self._perm_cv.wait(remaining)
-            return self._perm_answer
+            self._perm_answers.pop(prompt_id, None)
+            self._perm_id = prompt_id
+        emit("permission", {"id": prompt_id, "tool": name, "summary": _summarize_args(name, args)})
+        try:
+            with self._perm_cv:
+                deadline = time.monotonic() + 300
+                while prompt_id not in self._perm_answers:
+                    remaining = deadline - time.monotonic()
+                    if remaining <= 0:
+                        return "no"
+                    self._perm_cv.wait(remaining)
+                return self._perm_answers.pop(prompt_id)
+        finally:
+            with self._perm_cv:
+                if self._perm_id == prompt_id:
+                    self._perm_id = None
 
-    def deliver_permission(self, answer: str) -> None:
+    def deliver_permission(self, answer: str, prompt_id: str | None = None) -> None:
+        """Record an answer for a pending permission prompt.
+
+        When `prompt_id` is given it must match the prompt currently awaiting
+        an answer; a mismatched/stale id is ignored. When omitted (e.g. an
+        internal abort), the answer is applied to whatever prompt is active.
+        """
+        answer = answer if answer in ("yes", "no", "always", "never") else "no"
         with self._perm_cv:
-            self._perm_answer = answer if answer in ("yes", "no", "always", "never") else "no"
+            target = prompt_id or self._perm_id
+            if target is None:
+                return
+            if prompt_id is not None and prompt_id != self._perm_id:
+                _log.warning("ignoring permission answer for stale/unknown prompt id")
+                return
+            self._perm_answers[target] = answer
             self._perm_cv.notify_all()
 
     # -- computer control approval bridge -----------------------------------
@@ -552,6 +597,7 @@ IMPORTANT: When you use show_widget, do NOT repeat the widget title or type in y
             lines = _clean(reply.get("content") or "").strip().strip('"\'').splitlines()
             title = lines[0].strip()[:60] if lines else ""
         except Exception:
+            _log.warning("autotitle: model call failed, falling back", exc_info=True)
             title = ""
         if not title:
             # Model unavailable — fall back to the first user message
@@ -668,7 +714,7 @@ IMPORTANT: When you use show_widget, do NOT repeat the widget title or type in y
                 self.engine.temperature = t
                 cfg["temperature"] = t
             except (TypeError, ValueError):
-                pass
+                _log.warning("ignoring invalid temperature %r", data.get("temperature"))
         if "user_name" in data:
             name = (data.get("user_name") or "").strip() or None
             self.agent.state.update(user_name=name)
@@ -686,7 +732,7 @@ IMPORTANT: When you use show_widget, do NOT repeat the widget title or type in y
                 if 1 <= port <= 65535:
                     _config.set_value(cfg, "gateway.port", port)
             except (TypeError, ValueError):
-                pass
+                _log.warning("ignoring invalid gateway_port %r", data.get("gateway_port"))
         if "gateway_auto_start" in data:
             _config.set_value(cfg, "gateway.auto_start", bool(data["gateway_auto_start"]))
         if "system_prompt" in data:
@@ -696,7 +742,7 @@ IMPORTANT: When you use show_widget, do NOT repeat the widget title or type in y
         try:
             _config.save(cfg)
         except Exception:
-            pass
+            _log.warning("failed to save config after settings update", exc_info=True)
         return self.get_settings()
 
     def set_model(self, model: str) -> dict:
@@ -724,7 +770,7 @@ IMPORTANT: When you use show_widget, do NOT repeat the widget title or type in y
         try:
             _config.save(self.config)
         except Exception:
-            pass
+            _log.warning("failed to save config after model switch", exc_info=True)
         return {"model": model}
 
     def bootstrap(self) -> dict:
@@ -743,7 +789,10 @@ IMPORTANT: When you use show_widget, do NOT repeat the widget title or type in y
     def edit_and_resend(self, index: int, message: str, emit) -> None:
         """Truncate history after the *index*-th user message, replace its text
         with *message*, and re-run the turn from that point."""
-        if not self._turn_lock.acquire(blocking=False):
+        # Like delete_message and the other history-mutators, interrupt any
+        # in-flight turn first so it can't keep appending into the history we
+        # are about to rewrite.
+        if not self._interrupt_turn():
             emit("error", {"text": "Cagentic is still working on the previous message."})
             return
         # Find user messages in the engine's message list
@@ -769,7 +818,7 @@ IMPORTANT: When you use show_widget, do NOT repeat the widget title or type in y
             try:
                 self._save_current()
             except Exception:
-                pass
+                _log.warning("failed to save chat after edit_and_resend", exc_info=True)
             self._turn_lock.release()
 
     def delete_message(self, index: int) -> dict:
@@ -810,7 +859,7 @@ IMPORTANT: When you use show_widget, do NOT repeat the widget title or type in y
             try:
                 self._save_current()
             except Exception:
-                pass
+                _log.warning("failed to save chat after turn", exc_info=True)
             self._turn_lock.release()
 
     # -- slash command handler for web UI -----------------------------------
@@ -896,6 +945,7 @@ IMPORTANT: When you use show_widget, do NOT repeat the widget title or type in y
                     pct = status["cpu_percent"]
                     lines.append(f"vram:     {cpu_gb:.1f}/{size_gb:.1f} GB on CPU ({pct:.0f}% offloaded — slow)")
             except Exception:
+                _log.warning("could not read VRAM status", exc_info=True)
                 lines.append("vram:     (not available)")
             mcp_servers = list(((cfg.get("mcp") or {}).get("servers") or {}).keys())
             lines.append(f"mcp:      {len(mcp_servers)} configured ({', '.join(mcp_servers) or 'none'})")
@@ -1001,12 +1051,9 @@ IMPORTANT: When you use show_widget, do NOT repeat the widget title or type in y
             return {"ok": True, "text": "MCP servers:\n" + "\n".join(f"  {s}" for s in mcp_servers)}
 
         if cmd == "config":
-            import copy
-            safe = copy.deepcopy(cfg)
-            gh = safe.get("github") or {}
-            tok = gh.get("token")
-            if tok and len(tok) > 8:
-                gh["token"] = tok[:4] + "…" + tok[-4:]
+            # Redact ALL secret-bearing values (github token, provider api_keys,
+            # SMTP/email password, MCP env secrets) before exposing the config.
+            safe = _cfg.redact_secrets(cfg)
             return {"ok": True, "text": json.dumps(safe, indent=2)}
 
         if cmd == "set":
@@ -1053,14 +1100,84 @@ class _Handler(BaseHTTPRequestHandler):
             # or cancels a request.  Silently ignore rather than printing a traceback.
             self.close_connection = True
 
+    # Conservative CSP. The UI is built from inline <script>/<style>, so we
+    # keep 'unsafe-inline' for those, but lock everything else down so a
+    # successful HTML/JS injection can't exfiltrate to a third-party origin,
+    # load plugins, or frame us.
+    _CSP = (
+        "default-src 'self'; "
+        "script-src 'self' 'unsafe-inline'; "
+        "style-src 'self' 'unsafe-inline'; "
+        "img-src 'self' data: https:; "
+        "connect-src 'self'; "
+        "object-src 'none'; "
+        "frame-ancestors 'none'"
+    )
+
     def _gw(self) -> Gateway:
         return self.server.gateway  # type: ignore[attr-defined]
+
+    def _security_headers(self) -> None:
+        self.send_header("Content-Security-Policy", self._CSP)
+        self.send_header("X-Content-Type-Options", "nosniff")
+        self.send_header("Referrer-Policy", "no-referrer")
+
+    def _host_is_local(self) -> bool:
+        """Reject requests whose Host header isn't loopback (anti DNS-rebind)."""
+        host = (self.headers.get("Host") or "").strip()
+        # Strip an optional :port (and handle bracketed IPv6 literals).
+        if host.startswith("["):
+            hostname = host[1:].split("]", 1)[0]
+        else:
+            hostname = host.rsplit(":", 1)[0] if ":" in host else host
+        return hostname.lower() in _LOCAL_HOSTS
+
+    def _origin_ok(self) -> bool:
+        """If an Origin header is present, its host must be a localhost origin.
+
+        A missing Origin (normal for top-level navigations and same-origin
+        GETs) is allowed; the token + Host check still gate /api/*.
+        """
+        origin = self.headers.get("Origin")
+        if not origin:
+            return True
+        try:
+            parsed = urlparse(origin)
+        except ValueError:
+            return False
+        return (parsed.hostname or "").lower() in _LOCAL_HOSTS
+
+    def _authorized(self) -> bool:
+        """Gate every /api/* request against DNS-rebinding, cross-origin
+        (CSRF), and the per-process secret token. Returns True if allowed."""
+        if not self._host_is_local():
+            _log.warning("rejected request with non-local Host header")
+            return False
+        if not self._origin_ok():
+            _log.warning("rejected request with cross-origin Origin header")
+            return False
+        expected = self._gw().token
+        # fetch() calls send the token via header; the SSE/EventSource stream
+        # (which can't set headers) sends it via ?token= query param.
+        supplied = self.headers.get("X-Cagentic-Token")
+        if not supplied:
+            qs = parse_qs(urlparse(self.path).query)
+            vals = qs.get("token")
+            supplied = vals[0] if vals else None
+        if not supplied or not secrets.compare_digest(str(supplied), str(expected)):
+            _log.warning("rejected /api request with missing/invalid token")
+            return False
+        return True
+
+    def _deny(self) -> None:
+        self._send(b"forbidden", "text/plain", status=403)
 
     def _send(self, body: bytes, content_type: str, status: int = 200) -> None:
         try:
             self.send_response(status)
             self.send_header("Content-Type", content_type)
             self.send_header("Content-Length", str(len(body)))
+            self._security_headers()
             self.end_headers()
             self.wfile.write(body)
         except OSError:
@@ -1080,13 +1197,30 @@ class _Handler(BaseHTTPRequestHandler):
 
     def do_GET(self) -> None:  # noqa: N802
         path = self.path.split("?")[0]
-        if path == "/":
-            self._send(_HTML.encode("utf-8"), "text/html; charset=utf-8")
-        elif path == "/app.css":
-            self._send(_CSS.encode("utf-8"), "text/css; charset=utf-8")
-        elif path == "/app.js":
-            self._send(_JS.encode("utf-8"), "application/javascript; charset=utf-8")
-        elif path == "/api/bootstrap":
+        # Static page assets bootstrap the UI (and carry the token to the
+        # browser), so they aren't token-gated — but they must still be a
+        # same-host request to thwart DNS-rebinding.
+        if path in ("/", "/app.css", "/app.js"):
+            if not self._host_is_local() or not self._origin_ok():
+                self._deny()
+                return
+            if path == "/":
+                # Inject the per-session token so the page's fetch()/SSE can
+                # authenticate. Done at serve time since _HTML is a constant.
+                token = self._gw().token
+                html = _HTML.replace("{{CAGENTIC_TOKEN}}", token)
+                self._send(html.encode("utf-8"), "text/html; charset=utf-8")
+            elif path == "/app.css":
+                self._send(_CSS.encode("utf-8"), "text/css; charset=utf-8")
+            else:
+                self._send(_JS.encode("utf-8"), "application/javascript; charset=utf-8")
+            return
+        # Everything under /api/* requires auth.
+        if path.startswith("/api/"):
+            if not self._authorized():
+                self._deny()
+                return
+        if path == "/api/bootstrap":
             self._json(self._gw().bootstrap())
         elif path == "/api/settings":
             self._json(self._gw().get_settings())
@@ -1097,6 +1231,12 @@ class _Handler(BaseHTTPRequestHandler):
 
     def do_POST(self) -> None:  # noqa: N802
         path = self.path.split("?")[0]
+        # Every POST route lives under /api/* — require auth (token + Host +
+        # Origin) before doing anything. This blocks CSRF and unauthenticated
+        # access to the shell/files/browser the assistant can drive.
+        if not self._authorized():
+            self._deny()
+            return
         gw = self._gw()
         if path == "/api/abort":
             gw.abort_generation()
@@ -2851,7 +2991,11 @@ setInterval(updateClock, 1000); updateClock();
 })();
 
 // ---- HELPERS ----------------------------------------------------------------
-function esc(s){ return (s||'').replace(/[&<>]/g,c=>({'&':'&amp;','<':'&lt;','>':'&gt;'}[c])); }
+function esc(s){ return (s||'').replace(/[&<>"']/g,c=>({'&':'&amp;','<':'&lt;','>':'&gt;','"':'&quot;',"'":'&#39;'}[c])); }
+// Allow only http(s) (and data:image for <img>) URLs into href/src attributes;
+// anything else (javascript:, data:text/html, etc.) is dropped to '#'.
+function safeUrl(u){ u=(u||'').trim(); return /^https?:\/\//i.test(u)?u:'#'; }
+function safeImgUrl(u){ u=(u||'').trim(); return (/^https?:\/\//i.test(u)||/^data:image\//i.test(u))?u:''; }
 function md(src) {
   const blocks=[];
   let s=(src||'').replace(/```(\w*)\n?([\s\S]*?)```/g,(m,lang,code)=>{
@@ -3029,7 +3173,7 @@ function buildPanelInner(p){
         '</tr></thead><tbody>'+(p.rows||[]).map(r=>'<tr>'+r.map(c=>'<td>'+esc(String(c))+'</td>').join('')+'</tr>').join('')+'</tbody></table>';
       break;
     case 'image':
-      inner='<div class="vp-image"><img src="'+esc(p.url||'')+'" alt="" onerror="this.style.display=\'none\'"/>'+
+      inner='<div class="vp-image"><img src="'+esc(safeImgUrl(p.url||''))+'" alt="" onerror="this.style.display=\'none\'"/>'+
         (p.caption?'<div class="cap">'+esc(p.caption)+'</div>':'')+'</div>';
       break;
     case 'web':

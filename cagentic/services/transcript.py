@@ -7,11 +7,14 @@ mid-turn still leaves a usable history.
 from __future__ import annotations
 
 import json
+import logging
 import time
 from pathlib import Path
 from typing import Any
 
 from ..config import config_dir
+
+logger = logging.getLogger(__name__)
 
 
 def transcripts_dir() -> Path:
@@ -38,4 +41,4 @@ def record(session_id: str, role: str, content: Any, **extra) -> None:
         with p.open("a", encoding="utf-8") as f:
             f.write(json.dumps(line, ensure_ascii=False) + "\n")
     except OSError:
-        pass
+        logger.warning("transcript append failed for session %s", session_id, exc_info=True)
