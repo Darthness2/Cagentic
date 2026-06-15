@@ -597,6 +597,7 @@ IMPORTANT: When you use show_widget, do NOT repeat the widget title or type in y
             lines = _clean(reply.get("content") or "").strip().strip('"\'').splitlines()
             title = lines[0].strip()[:60] if lines else ""
         except Exception:
+            _log.warning("autotitle: model call failed, falling back", exc_info=True)
             title = ""
         if not title:
             # Model unavailable — fall back to the first user message
@@ -713,7 +714,7 @@ IMPORTANT: When you use show_widget, do NOT repeat the widget title or type in y
                 self.engine.temperature = t
                 cfg["temperature"] = t
             except (TypeError, ValueError):
-                pass
+                _log.warning("ignoring invalid temperature %r", data.get("temperature"))
         if "user_name" in data:
             name = (data.get("user_name") or "").strip() or None
             self.agent.state.update(user_name=name)
@@ -731,7 +732,7 @@ IMPORTANT: When you use show_widget, do NOT repeat the widget title or type in y
                 if 1 <= port <= 65535:
                     _config.set_value(cfg, "gateway.port", port)
             except (TypeError, ValueError):
-                pass
+                _log.warning("ignoring invalid gateway_port %r", data.get("gateway_port"))
         if "gateway_auto_start" in data:
             _config.set_value(cfg, "gateway.auto_start", bool(data["gateway_auto_start"]))
         if "system_prompt" in data:
@@ -741,7 +742,7 @@ IMPORTANT: When you use show_widget, do NOT repeat the widget title or type in y
         try:
             _config.save(cfg)
         except Exception:
-            pass
+            _log.warning("failed to save config after settings update", exc_info=True)
         return self.get_settings()
 
     def set_model(self, model: str) -> dict:
@@ -769,7 +770,7 @@ IMPORTANT: When you use show_widget, do NOT repeat the widget title or type in y
         try:
             _config.save(self.config)
         except Exception:
-            pass
+            _log.warning("failed to save config after model switch", exc_info=True)
         return {"model": model}
 
     def bootstrap(self) -> dict:
@@ -944,6 +945,7 @@ IMPORTANT: When you use show_widget, do NOT repeat the widget title or type in y
                     pct = status["cpu_percent"]
                     lines.append(f"vram:     {cpu_gb:.1f}/{size_gb:.1f} GB on CPU ({pct:.0f}% offloaded — slow)")
             except Exception:
+                _log.warning("could not read VRAM status", exc_info=True)
                 lines.append("vram:     (not available)")
             mcp_servers = list(((cfg.get("mcp") or {}).get("servers") or {}).keys())
             lines.append(f"mcp:      {len(mcp_servers)} configured ({', '.join(mcp_servers) or 'none'})")
@@ -1049,12 +1051,9 @@ IMPORTANT: When you use show_widget, do NOT repeat the widget title or type in y
             return {"ok": True, "text": "MCP servers:\n" + "\n".join(f"  {s}" for s in mcp_servers)}
 
         if cmd == "config":
-            import copy
-            safe = copy.deepcopy(cfg)
-            gh = safe.get("github") or {}
-            tok = gh.get("token")
-            if tok and len(tok) > 8:
-                gh["token"] = tok[:4] + "…" + tok[-4:]
+            # Redact ALL secret-bearing values (github token, provider api_keys,
+            # SMTP/email password, MCP env secrets) before exposing the config.
+            safe = _cfg.redact_secrets(cfg)
             return {"ok": True, "text": json.dumps(safe, indent=2)}
 
         if cmd == "set":
@@ -1101,14 +1100,84 @@ class _Handler(BaseHTTPRequestHandler):
             # or cancels a request.  Silently ignore rather than printing a traceback.
             self.close_connection = True
 
+    # Conservative CSP. The UI is built from inline <script>/<style>, so we
+    # keep 'unsafe-inline' for those, but lock everything else down so a
+    # successful HTML/JS injection can't exfiltrate to a third-party origin,
+    # load plugins, or frame us.
+    _CSP = (
+        "default-src 'self'; "
+        "script-src 'self' 'unsafe-inline'; "
+        "style-src 'self' 'unsafe-inline'; "
+        "img-src 'self' data: https:; "
+        "connect-src 'self'; "
+        "object-src 'none'; "
+        "frame-ancestors 'none'"
+    )
+
     def _gw(self) -> Gateway:
         return self.server.gateway  # type: ignore[attr-defined]
+
+    def _security_headers(self) -> None:
+        self.send_header("Content-Security-Policy", self._CSP)
+        self.send_header("X-Content-Type-Options", "nosniff")
+        self.send_header("Referrer-Policy", "no-referrer")
+
+    def _host_is_local(self) -> bool:
+        """Reject requests whose Host header isn't loopback (anti DNS-rebind)."""
+        host = (self.headers.get("Host") or "").strip()
+        # Strip an optional :port (and handle bracketed IPv6 literals).
+        if host.startswith("["):
+            hostname = host[1:].split("]", 1)[0]
+        else:
+            hostname = host.rsplit(":", 1)[0] if ":" in host else host
+        return hostname.lower() in _LOCAL_HOSTS
+
+    def _origin_ok(self) -> bool:
+        """If an Origin header is present, its host must be a localhost origin.
+
+        A missing Origin (normal for top-level navigations and same-origin
+        GETs) is allowed; the token + Host check still gate /api/*.
+        """
+        origin = self.headers.get("Origin")
+        if not origin:
+            return True
+        try:
+            parsed = urlparse(origin)
+        except ValueError:
+            return False
+        return (parsed.hostname or "").lower() in _LOCAL_HOSTS
+
+    def _authorized(self) -> bool:
+        """Gate every /api/* request against DNS-rebinding, cross-origin
+        (CSRF), and the per-process secret token. Returns True if allowed."""
+        if not self._host_is_local():
+            _log.warning("rejected request with non-local Host header")
+            return False
+        if not self._origin_ok():
+            _log.warning("rejected request with cross-origin Origin header")
+            return False
+        expected = self._gw().token
+        # fetch() calls send the token via header; the SSE/EventSource stream
+        # (which can't set headers) sends it via ?token= query param.
+        supplied = self.headers.get("X-Cagentic-Token")
+        if not supplied:
+            qs = parse_qs(urlparse(self.path).query)
+            vals = qs.get("token")
+            supplied = vals[0] if vals else None
+        if not supplied or not secrets.compare_digest(str(supplied), str(expected)):
+            _log.warning("rejected /api request with missing/invalid token")
+            return False
+        return True
+
+    def _deny(self) -> None:
+        self._send(b"forbidden", "text/plain", status=403)
 
     def _send(self, body: bytes, content_type: str, status: int = 200) -> None:
         try:
             self.send_response(status)
             self.send_header("Content-Type", content_type)
             self.send_header("Content-Length", str(len(body)))
+            self._security_headers()
             self.end_headers()
             self.wfile.write(body)
         except OSError:
@@ -1128,13 +1197,30 @@ class _Handler(BaseHTTPRequestHandler):
 
     def do_GET(self) -> None:  # noqa: N802
         path = self.path.split("?")[0]
-        if path == "/":
-            self._send(_HTML.encode("utf-8"), "text/html; charset=utf-8")
-        elif path == "/app.css":
-            self._send(_CSS.encode("utf-8"), "text/css; charset=utf-8")
-        elif path == "/app.js":
-            self._send(_JS.encode("utf-8"), "application/javascript; charset=utf-8")
-        elif path == "/api/bootstrap":
+        # Static page assets bootstrap the UI (and carry the token to the
+        # browser), so they aren't token-gated — but they must still be a
+        # same-host request to thwart DNS-rebinding.
+        if path in ("/", "/app.css", "/app.js"):
+            if not self._host_is_local() or not self._origin_ok():
+                self._deny()
+                return
+            if path == "/":
+                # Inject the per-session token so the page's fetch()/SSE can
+                # authenticate. Done at serve time since _HTML is a constant.
+                token = self._gw().token
+                html = _HTML.replace("{{CAGENTIC_TOKEN}}", token)
+                self._send(html.encode("utf-8"), "text/html; charset=utf-8")
+            elif path == "/app.css":
+                self._send(_CSS.encode("utf-8"), "text/css; charset=utf-8")
+            else:
+                self._send(_JS.encode("utf-8"), "application/javascript; charset=utf-8")
+            return
+        # Everything under /api/* requires auth.
+        if path.startswith("/api/"):
+            if not self._authorized():
+                self._deny()
+                return
+        if path == "/api/bootstrap":
             self._json(self._gw().bootstrap())
         elif path == "/api/settings":
             self._json(self._gw().get_settings())
@@ -1145,6 +1231,12 @@ class _Handler(BaseHTTPRequestHandler):
 
     def do_POST(self) -> None:  # noqa: N802
         path = self.path.split("?")[0]
+        # Every POST route lives under /api/* — require auth (token + Host +
+        # Origin) before doing anything. This blocks CSRF and unauthenticated
+        # access to the shell/files/browser the assistant can drive.
+        if not self._authorized():
+            self._deny()
+            return
         gw = self._gw()
         if path == "/api/abort":
             gw.abort_generation()

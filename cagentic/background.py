@@ -12,6 +12,7 @@ Two kinds of background work:
 """
 from __future__ import annotations
 
+import logging
 import subprocess
 import threading
 import time
@@ -20,6 +21,12 @@ from pathlib import Path
 from typing import Callable, Optional
 
 from .tasks import TaskGraph, TaskKind, new_id
+
+logger = logging.getLogger(__name__)
+
+# Cap how many background jobs may run at once so a runaway caller can't spawn
+# unbounded threads/subprocesses.
+MAX_INFLIGHT = 8
 
 
 @dataclass
@@ -31,6 +38,10 @@ class BackgroundJob:
     result: str = ""
     started_at: float = field(default_factory=time.time)
     finished_at: float = 0.0
+    # The concrete TaskGraph task id this job maps to (if any). Matching the
+    # task to update by id avoids the bug where two jobs sharing a command
+    # collided on `description == label`.
+    task_id: str | None = None
 
 
 class BackgroundExecutor:
@@ -40,39 +51,75 @@ class BackgroundExecutor:
         self._notifications: list[dict] = []
         self._lock = threading.Lock()
         self._threads: list[threading.Thread] = []
+        # Bound concurrency; acquired before starting a worker, released in
+        # the runners' finally block.
+        self._slots = threading.BoundedSemaphore(MAX_INFLIGHT)
+
+    # -- internal helpers -----------------------------------------------
+
+    def _reap_threads(self) -> None:
+        """Drop references to threads that have finished. Call under no lock;
+        it takes the lock itself."""
+        with self._lock:
+            self._threads = [t for t in self._threads if t.is_alive()]
 
     # -- public ----------------------------------------------------------
 
     def submit_bash(self, command: str, cwd: Path, *, timeout: int = 600) -> str:
+        if not self._slots.acquire(blocking=False):
+            raise RuntimeError(
+                f"too many background jobs in flight (max {MAX_INFLIGHT}); "
+                f"wait for some to finish"
+            )
+        self._reap_threads()
         job_id = new_id(TaskKind.BASH)
         job = BackgroundJob(id=job_id, kind="bash", label=command)
-        with self._lock:
-            self._jobs[job_id] = job
-        if self.tasks is not None:
-            self.tasks.create(
-                title=f"bash: {command[:60]}",
-                kind=TaskKind.BASH, status="active",
-                description=command, worktree=str(cwd),
+        try:
+            if self.tasks is not None:
+                task = self.tasks.create(
+                    title=f"bash: {command[:60]}",
+                    kind=TaskKind.BASH, status="active",
+                    description=command, worktree=str(cwd),
+                )
+                job.task_id = task.id
+            with self._lock:
+                self._jobs[job_id] = job
+            t = threading.Thread(
+                target=self._run_bash, args=(job_id, command, cwd, timeout), daemon=True,
             )
-        t = threading.Thread(
-            target=self._run_bash, args=(job_id, command, cwd, timeout), daemon=True,
-        )
-        t.start()
-        self._threads.append(t)
+            t.start()
+        except BaseException:
+            # Never leak a semaphore slot if we failed before the worker took
+            # ownership of releasing it.
+            self._slots.release()
+            raise
+        with self._lock:
+            self._threads.append(t)
         return job_id
 
     def submit_dream(self, prompt: str, run: Callable[[str], str]) -> str:
         """Run an arbitrary callable in the background. `run(prompt)` should
         return the final text. Used by the agent_call tool's async variant."""
+        if not self._slots.acquire(blocking=False):
+            raise RuntimeError(
+                f"too many background jobs in flight (max {MAX_INFLIGHT}); "
+                f"wait for some to finish"
+            )
+        self._reap_threads()
         job_id = new_id(TaskKind.DREAM)
         job = BackgroundJob(id=job_id, kind="dream", label=prompt[:120])
+        try:
+            with self._lock:
+                self._jobs[job_id] = job
+            t = threading.Thread(
+                target=self._run_dream, args=(job_id, prompt, run), daemon=True,
+            )
+            t.start()
+        except BaseException:
+            self._slots.release()
+            raise
         with self._lock:
-            self._jobs[job_id] = job
-        t = threading.Thread(
-            target=self._run_dream, args=(job_id, prompt, run), daemon=True,
-        )
-        t.start()
-        self._threads.append(t)
+            self._threads.append(t)
         return job_id
 
     def status(self, job_id: str) -> Optional[BackgroundJob]:
@@ -101,6 +148,7 @@ class BackgroundExecutor:
     # -- runners ---------------------------------------------------------
 
     def _finish(self, job_id: str, status: str, result: str) -> None:
+        task_id = None
         with self._lock:
             job = self._jobs.get(job_id)
             if not job:
@@ -108,17 +156,22 @@ class BackgroundExecutor:
             job.status = status
             job.result = result
             job.finished_at = time.time()
+            task_id = job.task_id
             self._notifications.append({
                 "id": job_id, "kind": job.kind, "label": job.label,
                 "status": status, "result": result[:2000],
             })
-        if self.tasks is not None:
-            t = self.tasks.list()  # crude lookup; bash jobs are recent
-            for task in t:
-                if task.kind == "b" and task.description == job.label and task.status == "active":
-                    self.tasks.update(task.id, status="done" if status == "done" else "failed",
-                                      result=result[:2000])
-                    break
+        # Update the concrete task by id — not by matching description, which
+        # collided when two jobs shared the same command.
+        if self.tasks is not None and task_id is not None:
+            try:
+                self.tasks.update(
+                    task_id,
+                    status="done" if status == "done" else "failed",
+                    result=result[:2000],
+                )
+            except Exception:
+                logger.warning("background: failed updating task %s", task_id, exc_info=True)
 
     def _run_bash(self, job_id: str, command: str, cwd: Path, timeout: int) -> None:
         try:
@@ -136,11 +189,17 @@ class BackgroundExecutor:
         except subprocess.TimeoutExpired:
             self._finish(job_id, "failed", f"timed out after {timeout}s")
         except Exception as e:
+            logger.warning("background bash job %s failed", job_id, exc_info=True)
             self._finish(job_id, "failed", f"{type(e).__name__}: {e}")
+        finally:
+            self._slots.release()
 
     def _run_dream(self, job_id: str, prompt: str, run: Callable[[str], str]) -> None:
         try:
             text = run(prompt) or ""
             self._finish(job_id, "done", text)
         except Exception as e:
+            logger.warning("background dream job %s failed", job_id, exc_info=True)
             self._finish(job_id, "failed", f"{type(e).__name__}: {e}")
+        finally:
+            self._slots.release()

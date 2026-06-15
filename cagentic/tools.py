@@ -1008,7 +1008,13 @@ def t_browser_eval(args: dict, ctx: ToolContext) -> str:
     code = args.get("code")
     if not code:
         return "ERROR: browser_eval requires 'code'"
-    if not ctx.confirm("run JavaScript in the browser", code[:120]):
+    # Show the full script in the approval detail so a dangerous tail isn't
+    # hidden behind a truncation; flag very long scripts explicitly.
+    if len(code) > 2000:
+        detail = f"[long script — {len(code)} chars]\n{code}"
+    else:
+        detail = code
+    if not ctx.confirm("run JavaScript in the browser", detail):
         return "ERROR: user denied"
     r = b.send("eval", {"code": code, "tab_id": args.get("tab_id")})
     if not r.get("ok"):
@@ -1073,7 +1079,7 @@ def t_browser_screenshot(args: dict, ctx: ToolContext) -> str:
     try:
         ctx.pending_images.append(img_b64)
     except Exception:
-        pass
+        logger.warning("browser_screenshot: could not queue image for vision", exc_info=True)
     # Also save a copy to disk so the user can open it directly.
     saved = ""
     try:
@@ -1086,7 +1092,7 @@ def t_browser_screenshot(args: dict, ctx: ToolContext) -> str:
         path.write_bytes(_b64.b64decode(img_b64))
         saved = f"  ·  saved to {path}"
     except Exception:
-        pass
+        logger.warning("browser_screenshot: failed saving screenshot to disk", exc_info=True)
     return (f"OK: captured the viewport ({w}×{h}). The image is attached for "
             f"vision models — use browser_click_at with x,y in this coordinate "
             f"space (origin top-left).{saved}")
@@ -1139,16 +1145,36 @@ def t_browser_download(args: dict, ctx: ToolContext) -> str:
     if not data_b64:
         return "ERROR: download returned no bytes"
 
+    # Hard ceiling on the decoded blob. Base64 inflates by ~4/3, so a too-large
+    # payload would otherwise be held fully in memory. Reject early using the
+    # encoded length, then re-check the decoded length defensively.
+    MAX_DOWNLOAD_BYTES = 50 * 1024 * 1024  # 50 MB
+    approx_decoded = (len(data_b64) * 3) // 4
+    if approx_decoded > MAX_DOWNLOAD_BYTES:
+        return (
+            f"ERROR: download too large (~{approx_decoded:,} bytes, cap "
+            f"{MAX_DOWNLOAD_BYTES:,}). Fetch a smaller resource."
+        )
+
     import base64 as _b64
     try:
         raw = _b64.b64decode(data_b64)
     except Exception as e:
+        logger.warning("browser_download: base64 decode failed", exc_info=True)
         return f"ERROR: bad base64 from extension: {e}"
+    if len(raw) > MAX_DOWNLOAD_BYTES:
+        return (
+            f"ERROR: download too large ({len(raw):,} bytes, cap "
+            f"{MAX_DOWNLOAD_BYTES:,}). Fetch a smaller resource."
+        )
 
     # Decide on the destination path.
     out_path = args.get("path")
     if out_path:
-        p = _resolve(out_path, ctx.root)
+        try:
+            p = _resolve_contained(out_path, ctx.root)
+        except PathEscapeError as exc:
+            return f"ERROR: {exc}"
         p.parent.mkdir(parents=True, exist_ok=True)
     else:
         import re as _re
@@ -1564,7 +1590,7 @@ def t_enter_plan_mode(args: dict, ctx: ToolContext) -> str:
         try:
             engine.refresh_system_prompt()
         except Exception:
-            pass
+            logger.warning("enter_plan_mode: refresh_system_prompt failed", exc_info=True)
     return "OK: PLAN MODE entered. Mutating tools blocked. Use exit_plan_mode to resume."
 
 
@@ -1578,7 +1604,7 @@ def t_exit_plan_mode(args: dict, ctx: ToolContext) -> str:
         try:
             engine.refresh_system_prompt()
         except Exception:
-            pass
+            logger.warning("exit_plan_mode: refresh_system_prompt failed", exc_info=True)
     return "OK: plan mode OFF."
 
 
@@ -1629,6 +1655,23 @@ def t_config_get(args: dict, ctx: ToolContext) -> str:
     return f"{key} = {v}"
 
 
+# Keys the model is allowed to set via the config_set tool. Anything that
+# affects security posture (insecure_ssl), networking (ports/hosts), secrets
+# (tokens/keys), or process execution (MCP commands) is deliberately excluded —
+# those must be edited in the config file by the user directly.
+_CONFIG_SET_ALLOWLIST = frozenset({
+    "model",
+    "temperature",
+    "max_tokens",
+    "system_prompt",
+    "theme",
+    "editor",
+    "default_workspace",
+    "yolo",
+    "auto_continue",
+})
+
+
 def t_config_set(args: dict, ctx: ToolContext) -> str:
     engine = getattr(ctx, "engine", None)
     if engine is None or engine.config is None:
@@ -1636,6 +1679,13 @@ def t_config_set(args: dict, ctx: ToolContext) -> str:
     from .config import set_value, save
     key = args["key"]
     val = args["value"]
+    if key not in _CONFIG_SET_ALLOWLIST:
+        return (
+            f"ERROR: config_set refuses to write '{key}'. Only user-facing keys "
+            f"are settable here ({', '.join(sorted(_CONFIG_SET_ALLOWLIST))}). "
+            f"Security/networking/secret/MCP keys must be edited in the config "
+            f"file manually."
+        )
     if not ctx.confirm("config set", f"{key} = {val}"):
         return "ERROR: user denied"
     set_value(engine.config, key, val)
@@ -2316,6 +2366,8 @@ def dispatch(name: str, args: dict, ctx: ToolContext) -> str:
     try:
         return fn(args, ctx)
     except KeyError as e:
+        logger.warning("tool %r missing argument %s", name, e, exc_info=True)
         return f"ERROR: missing argument {e}"
     except Exception as e:
+        logger.warning("tool %r raised %s", name, type(e).__name__, exc_info=True)
         return f"ERROR: {type(e).__name__}: {e}"

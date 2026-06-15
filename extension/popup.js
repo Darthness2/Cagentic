@@ -88,32 +88,47 @@ function renderOnline(s) {
   $("ver").textContent = "cagentic v" + (s.version || "?") + " · bridge on 127.0.0.1:" + port;
 }
 
-function renderOffline() {
+function renderOffline(msg) {
   $("dot").className = "dot off";
-  $("statusText").textContent = "Cagentic not running";
+  $("statusText").textContent = msg || "Cagentic not running";
   $("statusSub").textContent = "";
   $("details").classList.add("hidden");
   $("ver").textContent = "start Cagentic, then this connects automatically";
 }
 
 async function poll() {
+  if (!token) {
+    // Not paired: /status would 403, so prompt the user to paste the token
+    // Cagentic printed instead of showing a misleading "not running".
+    renderOffline("Paste the bridge token below to connect");
+    return;
+  }
   try {
-    const res = await fetch("http://127.0.0.1:" + port + "/status", { method: "GET" });
+    const res = await fetch("http://127.0.0.1:" + port + "/status", {
+      method: "GET",
+      headers: { "X-Cagentic-Token": token },
+    });
+    if (res.status === 403) {
+      renderOffline("Bridge token rejected — re-paste it");
+      return;
+    }
     if (!res.ok) throw new Error("bad status");
     renderOnline(await res.json());
   } catch (e) {
+    console.warn("Cagentic: status poll failed", e);
     renderOffline();
   }
 }
 
 $("save").addEventListener("click", async () => {
   port = parseInt($("port").value, 10) || 8765;
-  await chrome.storage.local.set({ port });
+  token = $("token").value.trim();
+  await chrome.storage.local.set({ port, token });
   poll();
 });
 
 (async () => {
-  await loadPort();
+  await loadSettings();
   poll();
   timer = setInterval(poll, POLL_MS);
 })();

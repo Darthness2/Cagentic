@@ -36,12 +36,17 @@ exit.
 from __future__ import annotations
 
 import json
+import logging
 import os
+import queue
+import signal
 import subprocess
 import threading
 import time
 from dataclasses import dataclass, field
 from typing import Any
+
+logger = logging.getLogger(__name__)
 
 
 PROTOCOL_VERSION = "2024-11-05"   # mcp protocol revision string
@@ -62,12 +67,29 @@ class MCPServer:
     _lock: threading.Lock = field(default_factory=threading.Lock)
     _initialized: bool = False
     _tools_cache: list[dict] | None = None
+    # stdout lines pushed by a background reader thread; consumed (with a
+    # timeout) by _send_request so a stalled server can't block forever.
+    _stdout_q: "queue.Queue[str | None]" = field(default_factory=queue.Queue)
+    _reader: threading.Thread | None = None
+    _stderr_thread: threading.Thread | None = None
+    # Tail of recent stderr lines, kept for diagnostics on exit.
+    _stderr_tail: list[str] = field(default_factory=list)
 
     def start(self, timeout: float = 10.0) -> None:
         """Launch the server subprocess and run the MCP initialize handshake."""
         if self.proc and self.proc.poll() is None:
             return
         env = {**os.environ, **self.env}
+        # start_new_session puts the child in its own process group so we can
+        # kill the whole tree on stop — npx spawns a `node` grandchild that
+        # would otherwise leak. (No-op / harmless on platforms without it.)
+        popen_kwargs: dict[str, Any] = {}
+        if hasattr(os, "setsid"):
+            popen_kwargs["start_new_session"] = True
+        elif os.name == "nt":  # Windows: own process group for killing the tree
+            popen_kwargs["creationflags"] = getattr(
+                subprocess, "CREATE_NEW_PROCESS_GROUP", 0
+            )
         # MCP servers are line-delimited JSON-RPC over stdio.
         self.proc = subprocess.Popen(
             self.command,
@@ -77,7 +99,22 @@ class MCPServer:
             env=env,
             text=True,
             bufsize=1,                  # line-buffered
+            **popen_kwargs,
         )
+        # Drain stdout and stderr on daemon threads. stderr MUST be drained
+        # continuously or a chatty server fills its ~64KB pipe and deadlocks.
+        self._stdout_q = queue.Queue()
+        self._stderr_tail = []
+        self._reader = threading.Thread(
+            target=self._read_stdout, args=(self.proc,), daemon=True,
+            name=f"mcp-{self.name}-stdout",
+        )
+        self._reader.start()
+        self._stderr_thread = threading.Thread(
+            target=self._drain_stderr, args=(self.proc,), daemon=True,
+            name=f"mcp-{self.name}-stderr",
+        )
+        self._stderr_thread.start()
         # Handshake: initialize → initialized notification.
         try:
             self._send_request("initialize", {
@@ -91,24 +128,74 @@ class MCPServer:
             self.stop()
             raise MCPError(f"server '{self.name}' init failed: {e}") from e
 
+    def _read_stdout(self, proc: subprocess.Popen) -> None:
+        """Feed every stdout line into the queue; sentinel None on EOF."""
+        try:
+            for line in iter(proc.stdout.readline, ""):  # type: ignore[union-attr]
+                self._stdout_q.put(line)
+        except Exception:
+            logger.warning("mcp '%s' stdout reader crashed", self.name, exc_info=True)
+        finally:
+            self._stdout_q.put(None)  # signal EOF / process end
+
+    def _drain_stderr(self, proc: subprocess.Popen) -> None:
+        """Continuously drain stderr so the pipe buffer never fills and
+        deadlocks the server. Keep a short tail for error reporting."""
+        try:
+            for line in iter(proc.stderr.readline, ""):  # type: ignore[union-attr]
+                self._stderr_tail.append(line)
+                del self._stderr_tail[:-50]  # cap the tail
+        except Exception:
+            logger.warning("mcp '%s' stderr drainer crashed", self.name, exc_info=True)
+
+    def _stderr_snapshot(self, limit: int = 500) -> str:
+        return ("".join(self._stderr_tail))[-limit:]
+
     def stop(self) -> None:
-        if not self.proc:
+        proc = self.proc
+        if not proc:
             return
         try:
-            self.proc.stdin.close()  # type: ignore[union-attr]
+            if proc.stdin:
+                proc.stdin.close()
         except Exception:
-            pass
+            logger.warning("mcp '%s' stdin close failed", self.name, exc_info=True)
         try:
-            self.proc.terminate()
-            self.proc.wait(timeout=3)
+            self._terminate_tree(proc)
+            proc.wait(timeout=3)
         except Exception:
+            # Escalate to SIGKILL on the whole group, then reap the zombie.
             try:
-                self.proc.kill()
+                self._kill_tree(proc)
             except Exception:
-                pass
+                logger.warning("mcp '%s' kill failed", self.name, exc_info=True)
+            try:
+                proc.wait(timeout=3)
+            except Exception:
+                logger.warning("mcp '%s' wait-after-kill failed", self.name, exc_info=True)
         self.proc = None
         self._initialized = False
         self._tools_cache = None
+
+    def _terminate_tree(self, proc: subprocess.Popen) -> None:
+        if hasattr(os, "killpg"):
+            try:
+                os.killpg(os.getpgid(proc.pid), signal.SIGTERM)
+                return
+            except (ProcessLookupError, PermissionError, OSError):
+                logger.warning("mcp '%s' killpg(SIGTERM) failed, falling back",
+                               self.name, exc_info=True)
+        proc.terminate()
+
+    def _kill_tree(self, proc: subprocess.Popen) -> None:
+        if hasattr(os, "killpg"):
+            try:
+                os.killpg(os.getpgid(proc.pid), signal.SIGKILL)
+                return
+            except (ProcessLookupError, PermissionError, OSError):
+                logger.warning("mcp '%s' killpg(SIGKILL) failed, falling back",
+                               self.name, exc_info=True)
+        proc.kill()
 
     # ---- JSON-RPC plumbing ------------------------------------------------
 
@@ -121,19 +208,31 @@ class MCPServer:
             payload = json.dumps({
                 "jsonrpc": "2.0", "id": req_id, "method": method, "params": params,
             })
-            self.proc.stdin.write(payload + "\n")  # type: ignore[union-attr]
-            self.proc.stdin.flush()                # type: ignore[union-attr]
-            # Read until we find a matching response. MCP servers emit
-            # notifications too, which we drain and ignore for now.
+            # Guard the write: a server that died after the poll() check above
+            # raises BrokenPipeError on write — turn it into a clean MCPError.
+            try:
+                self.proc.stdin.write(payload + "\n")  # type: ignore[union-attr]
+                self.proc.stdin.flush()                # type: ignore[union-attr]
+            except (BrokenPipeError, OSError, ValueError) as e:
+                raise MCPError(
+                    f"server '{self.name}' write failed for '{method}': {e}"
+                ) from e
+            # Read until we find a matching response, but bound every read by
+            # the remaining deadline via the reader-thread queue — a server
+            # that stalls mid-line can't hang us (or hold the lock) forever.
             deadline = time.monotonic() + timeout
-            while time.monotonic() < deadline:
-                line = self.proc.stdout.readline()  # type: ignore[union-attr]
-                if not line:
-                    if self.proc.poll() is not None:
-                        err = (self.proc.stderr.read() or "")[:500]  # type: ignore[union-attr]
-                        raise MCPError(f"server '{self.name}' exited (stderr: {err})")
-                    time.sleep(0.05)
-                    continue
+            while True:
+                remaining = deadline - time.monotonic()
+                if remaining <= 0:
+                    raise MCPError(f"timeout waiting for '{method}' response")
+                try:
+                    line = self._stdout_q.get(timeout=remaining)
+                except queue.Empty:
+                    raise MCPError(f"timeout waiting for '{method}' response")
+                if line is None:
+                    # EOF sentinel — the process ended.
+                    err = self._stderr_snapshot()
+                    raise MCPError(f"server '{self.name}' exited (stderr: {err})")
                 try:
                     msg = json.loads(line)
                 except json.JSONDecodeError:
@@ -143,7 +242,6 @@ class MCPServer:
                         err = msg["error"]
                         raise MCPError(f"{method}: {err.get('message', err)}")
                     return msg.get("result")
-            raise MCPError(f"timeout waiting for '{method}' response")
 
     def _send_notification(self, method: str, params: dict) -> None:
         if not self.proc or self.proc.poll() is not None:
@@ -152,8 +250,9 @@ class MCPServer:
         try:
             self.proc.stdin.write(payload + "\n")  # type: ignore[union-attr]
             self.proc.stdin.flush()                # type: ignore[union-attr]
-        except Exception:
-            pass
+        except (BrokenPipeError, OSError, ValueError):
+            logger.warning("mcp '%s' notification '%s' write failed",
+                           self.name, method, exc_info=True)
 
     # ---- public surface ---------------------------------------------------
 
@@ -240,7 +339,7 @@ class MCPManager:
             try:
                 srv.stop()
             except Exception:
-                pass
+                logger.warning("mcp server '%s' stop failed", srv.name, exc_info=True)
 
 
 def format_tool_result(result: dict) -> str:
