@@ -2,9 +2,12 @@
 from __future__ import annotations
 
 import argparse
+import logging
 import os
 import sys
 from pathlib import Path
+
+logger = logging.getLogger(__name__)
 
 from . import __version__, config, notes as _notes, reminders as _reminders, sessions, ui
 from . import diff as _diff
@@ -118,24 +121,10 @@ def _pick_model_interactive(client: OllamaClient) -> str | None:
 
 
 def _redact(cfg: dict) -> dict:
-    out = {**cfg, "github": dict(cfg.get("github", {}))}
-    tok = out["github"].get("token")
-    if tok:
-        out["github"]["token"] = tok[:4] + "…" + tok[-4:] if len(tok) > 8 else "••••"
-    # Also redact any tokens in MCP server env blocks.
-    mcp = dict(out.get("mcp") or {})
-    servers = dict(mcp.get("servers") or {})
-    for name, spec in list(servers.items()):
-        if not isinstance(spec, dict):
-            continue
-        env = dict(spec.get("env") or {})
-        for k, v in list(env.items()):
-            if any(s in k.lower() for s in ("token", "secret", "key", "password")):
-                env[k] = "••••" if not v else (str(v)[:4] + "…")
-        servers[name] = {**spec, "env": env}
-    mcp["servers"] = servers
-    out["mcp"] = mcp
-    return out
+    # Delegate to the single source of truth so every secret-bearing key
+    # (github token, provider api_keys, smtp/email password, mcp env secrets)
+    # is masked consistently — the gateway reuses config.redact_secrets too.
+    return config.redact_secrets(cfg)
 
 
 def _apply_setting_live(agent: Agent, key: str, value) -> bool:
@@ -1026,22 +1015,22 @@ def main(argv: list[str] | None = None) -> int:
         try:
             client.unload(agent.model)
         except Exception:
-            pass
+            logger.warning("shutdown: client.unload failed", exc_info=True)
         try:
             if agent.state.mcp is not None:
                 agent.state.mcp.shutdown()
         except Exception:
-            pass
+            logger.warning("shutdown: MCP shutdown failed", exc_info=True)
         try:
             if agent.state.browser is not None:
                 agent.state.browser.stop()
         except Exception:
-            pass
+            logger.warning("shutdown: browser stop failed", exc_info=True)
         try:
             if gateway_holder["server"] is not None:
                 gateway_holder["server"].stop()
         except Exception:
-            pass
+            logger.warning("shutdown: gateway stop failed", exc_info=True)
 
     atexit.register(_shutdown)
     for sig_name in ("SIGTERM", "SIGBREAK", "SIGHUP"):
@@ -1051,7 +1040,7 @@ def main(argv: list[str] | None = None) -> int:
         try:
             signal.signal(sig, lambda *_: (_shutdown(), sys.exit(0)))
         except (ValueError, OSError):
-            pass
+            logger.warning("could not install handler for %s", sig_name, exc_info=True)
 
     if args.serve:
         from .gateway import Gateway

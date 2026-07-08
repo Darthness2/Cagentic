@@ -13,21 +13,52 @@ Wire protocol (JSON, server bound to 127.0.0.1 only):
     GET  /ping     health check + connection heartbeat
     GET  /status   live status for the extension popup (model, activity, …)
 
-Nothing is reachable beyond localhost, and every mutating browser action
-still goes through Cagentic's normal approval prompt before it's queued.
+Security model: even though the server only binds to 127.0.0.1, any web page
+the user visits can issue requests to localhost and any other local process can
+talk to it. So the bridge is *not* trusted to its bind address alone:
+
+  * A shared secret token is generated on start() and written to
+    ~/.config/cagentic/browser_token (0600). The user copies it into the
+    extension popup, and the extension sends it (X-Cagentic-Token header, or a
+    ?token= query param for GETs) on every request. /next, /result and /status
+    require a valid token; mismatches get 403.
+  * The Host header must be localhost / 127.0.0.1 (anti DNS-rebinding — stops a
+    page on attacker.com that resolves to 127.0.0.1 from driving the bridge).
+  * There is no permissive CORS header, so a cross-origin page's fetch can't
+    read the responses even if it somehow learned the token.
+
+Every mutating browser action still goes through Cagentic's normal approval
+prompt before it's queued.
 """
 from __future__ import annotations
 
+import hmac
 import json
+import logging
+import os
+import secrets
 import threading
 import time
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 
+_log = logging.getLogger(__name__)
 
 # How long /next is held open waiting for a command before returning empty.
 _LONGPOLL_SECONDS = 25
 # The extension counts as "connected" if it has polled within this window.
 _CONNECTED_WINDOW = 45
+
+# Hosts we accept in the Host header (anti DNS-rebinding). Port is stripped
+# before comparison.
+_ALLOWED_HOSTS = frozenset({"localhost", "127.0.0.1", "[::1]", "::1"})
+
+
+def _token_path() -> str:
+    """Path to the persisted shared-secret token file."""
+    base = os.environ.get("XDG_CONFIG_HOME") or os.path.join(
+        os.path.expanduser("~"), ".config"
+    )
+    return os.path.join(base, "cagentic", "browser_token")
 
 
 def _version() -> str:
@@ -42,6 +73,9 @@ class BrowserBridge:
 
     def __init__(self, port: int = 8765) -> None:
         self.port = port
+        # Shared secret required on /next, /result and /status. Generated lazily
+        # in start(); the user copies it from the token file into the extension.
+        self.token: str = ""
         self._server: ThreadingHTTPServer | None = None
         self._thread: threading.Thread | None = None
         self._lock = threading.Lock()
@@ -64,6 +98,7 @@ class BrowserBridge:
         if the port can't be bound — typically another Cagentic is running."""
         if self._server is not None:
             return True
+        self.token = self._load_or_create_token()
         try:
             server = ThreadingHTTPServer(("127.0.0.1", self.port), _Handler)
         except OSError as e:
@@ -81,9 +116,54 @@ class BrowserBridge:
             try:
                 self._server.shutdown()
                 self._server.server_close()
-            except Exception:
-                pass
+            except OSError:
+                _log.warning("error shutting down browser bridge", exc_info=True)
             self._server = None
+
+    # -- shared-secret token ------------------------------------------------
+
+    def _load_or_create_token(self) -> str:
+        """Return the persisted token, generating + persisting one if absent.
+
+        Reuses an existing token (so a restart doesn't force the user to re-paste
+        it into the extension) but regenerates if the file is unreadable/empty.
+        Written with 0600 perms; the token value is never logged.
+        """
+        path = _token_path()
+        try:
+            with open(path, "r", encoding="utf-8") as fh:
+                existing = fh.read().strip()
+            if existing:
+                return existing
+        except FileNotFoundError:
+            pass
+        except OSError:
+            _log.warning("could not read browser token file", exc_info=True)
+
+        token = secrets.token_urlsafe(32)
+        try:
+            os.makedirs(os.path.dirname(path), exist_ok=True)
+            # Create with 0600 from the start (umask-safe via O_CREAT|0o600).
+            fd = os.open(path, os.O_WRONLY | os.O_CREAT | os.O_TRUNC, 0o600)
+            try:
+                os.write(fd, token.encode("utf-8"))
+            finally:
+                os.close(fd)
+            try:
+                os.chmod(path, 0o600)
+            except OSError:
+                _log.warning("could not chmod browser token file", exc_info=True)
+        except OSError:
+            # Couldn't persist; still enforce auth this session with an
+            # in-memory token (the user just won't be able to read it from disk).
+            _log.warning("could not persist browser token file", exc_info=True)
+        return token
+
+    def verify_token(self, presented: str | None) -> bool:
+        """Constant-time comparison of a presented token against ours."""
+        if not self.token or not presented:
+            return False
+        return hmac.compare_digest(self.token, presented)
 
     @property
     def running(self) -> bool:
@@ -221,8 +301,9 @@ class _Handler(BaseHTTPRequestHandler):
             self.send_response(status)
             self.send_header("Content-Type", "application/json")
             self.send_header("Content-Length", str(len(body)))
-            self.send_header("Access-Control-Allow-Origin", "*")
-            self.send_header("Access-Control-Allow-Headers", "Content-Type")
+            # No Access-Control-Allow-Origin: the extension's service worker
+            # fetches this as a same-origin/no-CORS-needed request, so we never
+            # opt cross-origin web pages into reading these responses.
             self.end_headers()
             self.wfile.write(body)
         except OSError:
@@ -230,36 +311,71 @@ class _Handler(BaseHTTPRequestHandler):
             # on Windows (ConnectionAbortedError / WinError 10053) when the
             # SW restarts, the popup opens/closes, or the tab reloads.
             # Nothing actionable; the next poll will reconnect.
-            pass
+            _log.debug("client closed connection mid-response", exc_info=True)
 
-    def do_OPTIONS(self) -> None:  # noqa: N802
-        try:
-            self.send_response(204)
-            self.send_header("Access-Control-Allow-Origin", "*")
-            self.send_header("Access-Control-Allow-Headers", "Content-Type")
-            self.send_header("Access-Control-Allow-Methods", "GET, POST, OPTIONS")
-            self.send_header("Content-Length", "0")
-            self.end_headers()
-        except OSError:
-            pass
+    def _host_ok(self) -> bool:
+        """Reject requests whose Host header isn't localhost (anti DNS-rebinding)."""
+        host = (self.headers.get("Host") or "").strip()
+        # Strip the port (but keep IPv6 brackets intact, e.g. "[::1]:8765").
+        if host.startswith("["):
+            hostname = host.split("]")[0] + "]"
+        else:
+            hostname = host.split(":")[0]
+        return hostname.lower() in _ALLOWED_HOSTS
+
+    def _presented_token(self) -> str | None:
+        """Token from the X-Cagentic-Token header or a ?token= query param."""
+        tok = self.headers.get("X-Cagentic-Token")
+        if tok:
+            return tok
+        _, _, query = self.path.partition("?")
+        for part in query.split("&"):
+            key, _, val = part.partition("=")
+            if key == "token" and val:
+                from urllib.parse import unquote
+                return unquote(val)
+        return None
+
+    def _authed(self) -> bool:
+        """Enforce Host check + shared-secret token; emits the failure response."""
+        if not self._host_ok():
+            self._send_json({"error": "forbidden host"}, status=403)
+            return False
+        if not self._bridge().verify_token(self._presented_token()):
+            # Never log the token value, only the rejection.
+            _log.warning("rejected bridge request with missing/invalid token")
+            self._send_json({"error": "forbidden"}, status=403)
+            return False
+        return True
 
     def do_GET(self) -> None:  # noqa: N802
         path = self.path.split("?")[0]
-        if path == "/next":
-            cmd = self._bridge()._take_command()
-            self._send_json({"command": cmd})
-        elif path == "/ping":
+        if path == "/ping":
+            # Health check only: no secrets, no activity — left unauthenticated
+            # so the extension/CLI can detect the bridge before pairing.
+            if not self._host_ok():
+                self._send_json({"error": "forbidden host"}, status=403)
+                return
             self._bridge()._heartbeat()
             self._send_json({"ok": True, "service": "cagentic-browser-bridge"})
-        elif path == "/status":
-            self._bridge()._heartbeat()
-            self._send_json(self._bridge().status())
-        else:
-            self._send_json({"error": "not found"}, status=404)
+            return
+        if path in ("/next", "/status"):
+            if not self._authed():
+                return
+            if path == "/next":
+                cmd = self._bridge()._take_command()
+                self._send_json({"command": cmd})
+            else:  # /status — gated so we don't leak model/activity/history
+                self._bridge()._heartbeat()
+                self._send_json(self._bridge().status())
+            return
+        self._send_json({"error": "not found"}, status=404)
 
     def do_POST(self) -> None:  # noqa: N802
         if self.path.split("?")[0] != "/result":
             self._send_json({"error": "not found"}, status=404)
+            return
+        if not self._authed():
             return
         length = int(self.headers.get("Content-Length") or 0)
         raw = self.rfile.read(length) if length else b"{}"

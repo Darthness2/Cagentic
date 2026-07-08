@@ -41,7 +41,10 @@ READ_ONLY: set[str] = {
 
 
 # Tools that are safe to run concurrently (no shared mutable state).
-CONCURRENT_SAFE: set[str] = READ_ONLY | {"set_workspace"}
+# NB: `set_workspace` mutates shared AppState (the workspace path other
+# concurrent tools resolve against), so it must NOT run in the thread pool —
+# keep it serial.
+CONCURRENT_SAFE: set[str] = set(READ_ONLY)
 
 
 # Resolver: (tool_name, args, state) -> 'yes' | 'always' | 'no' | 'never'

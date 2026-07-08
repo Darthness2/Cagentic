@@ -7,18 +7,27 @@ raw POST/PATCH/DELETE) go through ToolContext.confirm().
 from __future__ import annotations
 
 import json
+import logging
 import os
 from typing import Any
+from urllib.parse import quote
 
 import requests
 
 from .tools import ToolContext, _truncate
 
-try:
-    from urllib3.exceptions import InsecureRequestWarning  # type: ignore
-    requests.packages.urllib3.disable_warnings(InsecureRequestWarning)  # type: ignore
-except Exception:
-    pass
+logger = logging.getLogger(__name__)
+
+
+def _suppress_insecure_warnings() -> None:
+    """Silence urllib3's InsecureRequestWarning — only called when a request
+    actually opts out of TLS verification, so normal usage still warns."""
+    try:
+        from urllib3.exceptions import InsecureRequestWarning  # type: ignore
+        requests.packages.urllib3.disable_warnings(InsecureRequestWarning)  # type: ignore
+    except Exception:
+        logger.warning("could not disable urllib3 InsecureRequestWarning", exc_info=True)
+
 
 API = "https://api.github.com"
 UA = "cagentic/0.1"
@@ -52,6 +61,7 @@ def _request(method: str, path: str, ctx: ToolContext, **kw) -> tuple[int, Any]:
     url = path if path.startswith("http") else f"{API}{path}"
     if ctx.insecure_ssl:
         kw.setdefault("verify", False)
+        _suppress_insecure_warnings()
     try:
         r = requests.request(method, url, headers=_headers(ctx), timeout=30, **kw)
     except requests.RequestException as e:
@@ -119,7 +129,10 @@ def t_gh_get_file(args: dict, ctx: ToolContext) -> str:
     path = args["path"]
     ref = args.get("ref")
     params = {"ref": ref} if ref else None
-    status, body = _request("GET", f"/repos/{repo}/contents/{path}", ctx, params=params)
+    # Encode each path segment so spaces / special chars don't corrupt the URL,
+    # but keep the directory separators (safe="/").
+    enc_path = quote(path, safe="/")
+    status, body = _request("GET", f"/repos/{repo}/contents/{enc_path}", ctx, params=params)
     if status == 200 and isinstance(body, dict) and body.get("type") == "file":
         try:
             data = base64.b64decode(body.get("content", "")).decode("utf-8", errors="replace")

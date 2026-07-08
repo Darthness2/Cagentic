@@ -8,12 +8,16 @@ acts as a black-box research/specialist call.
 """
 from __future__ import annotations
 
+import logging
 from typing import TYPE_CHECKING
 
+from .permissions import auto_deny_resolver
 from .state import AppState
 
 if TYPE_CHECKING:  # pragma: no cover
     from .engine import QueryEngine
+
+logger = logging.getLogger(__name__)
 
 
 def fork_subagent(
@@ -39,7 +43,9 @@ def fork_subagent(
         yolo=parent.state.yolo,
         insecure_ssl=parent.state.insecure_ssl,
         tools_enabled=parent.state.tools_enabled,
-        permissions=dict(parent.state.permissions),
+        # Fresh permission cache — a black-box sub-agent must not inherit or
+        # mutate the parent's approvals.
+        permissions={},
     )
     sub = QueryEngine(
         client=parent.client,
@@ -47,7 +53,11 @@ def fork_subagent(
         model=model or parent.model,
         temperature=parent.temperature,
         config=parent.config,
-        permission_resolver=parent.permission_resolver,
+        # Non-interactive: a sub-agent runs headless, so it must never block on
+        # a terminal y/n prompt. Read-only tools are still allowed by the
+        # permission gate; everything mutating is auto-denied. (If the parent
+        # is in yolo mode, sub_state.yolo carries that through and approves.)
+        permission_resolver=auto_deny_resolver,
         stream=False,
     )
 
@@ -55,11 +65,17 @@ def fork_subagent(
         sub.messages[0]["content"] = sub.messages[0]["content"] + "\n\n=== ROLE ===\n" + role
 
     final = ""
-    for ev in sub.submit_message(prompt):
-        if ev.kind in ("assistant", "done"):
-            text = ev.data.get("text") or ""
-            if text:
-                final = text
-        elif ev.kind == "error":
-            return f"sub-agent error: {ev.data.get('text', '')}"
+    try:
+        for ev in sub.submit_message(prompt):
+            if ev.kind in ("assistant", "done"):
+                text = ev.data.get("text") or ""
+                if text:
+                    final = text
+            elif ev.kind == "error":
+                return f"sub-agent error: {ev.data.get('text', '')}"
+    except Exception as e:
+        # A raised provider/engine exception must not crash the parent turn —
+        # the caller only handles a returned string.
+        logger.warning("sub-agent '%s' crashed", title, exc_info=True)
+        return f"sub-agent error: {type(e).__name__}: {e}"
     return final or "(sub-agent returned no answer)"

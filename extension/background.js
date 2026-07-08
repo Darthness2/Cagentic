@@ -11,6 +11,12 @@ let looping = false;
 let cagGroupId = null;          // id of the "Cagentic" tab group
 const glowTimers = new Map();   // tabId -> timeoutHandle for hide-soon
 
+// MV3 re-entrancy guard. The `looping` flag alone is not enough: when the
+// service worker is killed and respawned (which Chrome does aggressively) a
+// command that was mid-flight can be re-delivered or replayed. We dedupe by
+// command id so a given command is dispatched at most once per SW lifetime.
+const seenCommandIds = new Set();
+
 function sleep(ms) {
   return new Promise((r) => setTimeout(r, ms));
 }
@@ -18,6 +24,14 @@ function sleep(ms) {
 async function getPort() {
   const { port } = await chrome.storage.local.get("port");
   return port || DEFAULT_PORT;
+}
+
+// The shared secret printed by Cagentic and pasted into the popup. The bridge
+// requires it on /next, /result and /status and replies 403 otherwise, so the
+// command channel is locked to whoever holds this token (not just localhost).
+async function getToken() {
+  const { token } = await chrome.storage.local.get("token");
+  return token || "";
 }
 
 // ---- the poll loop --------------------------------------------------------
@@ -28,17 +42,41 @@ async function pollLoop() {
   try {
     while (true) {
       const port = await getPort();
+      const token = await getToken();
+      if (!token) {
+        // Not paired yet: nothing we send would be accepted (403). Wait for the
+        // user to paste the token into the popup rather than hammering /next.
+        await sleep(3000);
+        continue;
+      }
       let command = null;
       try {
-        const res = await fetch(`http://127.0.0.1:${port}/next`, { method: "GET" });
+        const res = await fetch(`http://127.0.0.1:${port}/next`, {
+          method: "GET",
+          headers: { "X-Cagentic-Token": token },
+        });
         if (res.ok) {
           command = (await res.json()).command;
         }
       } catch (e) {
+        console.warn("Cagentic: /next poll failed", e);
         await sleep(3000);
         continue;
       }
       if (command) {
+        // Dedupe: a command id is only ever dispatched once, even if the SW
+        // restarts and the bridge re-offers it (MV3 re-entrancy protection).
+        if (command.id != null && seenCommandIds.has(command.id)) {
+          continue;
+        }
+        if (command.id != null) {
+          seenCommandIds.add(command.id);
+          // Keep the set from growing unbounded over a long-lived SW.
+          if (seenCommandIds.size > 500) {
+            const first = seenCommandIds.values().next().value;
+            seenCommandIds.delete(first);
+          }
+        }
         let ok = true;
         let result;
         try {
@@ -47,7 +85,7 @@ async function pollLoop() {
           ok = false;
           result = String((e && e.message) || e);
         }
-        await postResult(port, command.id, ok, result);
+        await postResult(port, token, command.id, ok, result);
       }
     }
   } finally {
@@ -55,15 +93,20 @@ async function pollLoop() {
   }
 }
 
-async function postResult(port, id, ok, result) {
+async function postResult(port, token, id, ok, result) {
   try {
     await fetch(`http://127.0.0.1:${port}/result`, {
       method: "POST",
-      headers: { "Content-Type": "application/json" },
+      headers: {
+        "Content-Type": "application/json",
+        "X-Cagentic-Token": token,
+      },
       body: JSON.stringify({ id, ok, result }),
     });
   } catch (e) {
-    /* the agent will time out gracefully */
+    // The agent will time out gracefully, but surface it so failures aren't
+    // silently swallowed during debugging.
+    console.warn("Cagentic: failed to POST /result", e);
   }
 }
 
@@ -74,6 +117,68 @@ const PER_TAB_ACTIONS = new Set([
   "screenshot", "click_at", "links",
 ]);
 
+// SSRF guard for the `download` action. Returns a reason string if the URL must
+// NOT be fetched (private/loopback/link-local/reserved host, non-http(s)
+// scheme, or unparseable), or null if it's allowed.
+function isBlockedDownloadUrl(rawUrl) {
+  let u;
+  try {
+    u = new URL(rawUrl);
+  } catch (e) {
+    return "invalid URL";
+  }
+  if (u.protocol !== "http:" && u.protocol !== "https:") {
+    return `blocked scheme: ${u.protocol}`;
+  }
+  // hostname has surrounding brackets stripped for IPv6 by the URL parser.
+  const host = (u.hostname || "").toLowerCase();
+  if (!host) return "missing host";
+
+  // Named loopback.
+  if (host === "localhost" || host.endsWith(".localhost")) {
+    return "blocked host: localhost";
+  }
+
+  // IPv6 (including IPv4-mapped) — block loopback, link-local and ULA.
+  if (host.includes(":")) {
+    if (host === "::1" || host === "::") return "blocked IPv6 loopback";
+    if (host.startsWith("fe80")) return "blocked IPv6 link-local";       // fe80::/10
+    if (host.startsWith("fc") || host.startsWith("fd")) return "blocked IPv6 ULA"; // fc00::/7
+    // IPv4-mapped (::ffff:a.b.c.d) — extract and fall through to IPv4 checks.
+    const mapped = host.match(/(\d{1,3}\.\d{1,3}\.\d{1,3}\.\d{1,3})$/);
+    if (mapped) {
+      const mr = blockedIPv4(mapped[1]);
+      if (mr) return mr;
+    }
+    return null;
+  }
+
+  // IPv4 literal.
+  if (/^\d{1,3}(\.\d{1,3}){3}$/.test(host)) {
+    return blockedIPv4(host);
+  }
+
+  // A hostname (DNS name). We can't fully resolve it here, but block the
+  // obvious "0" / numeric edge cases handled above; otherwise allow public DNS.
+  return null;
+}
+
+function blockedIPv4(ip) {
+  const parts = ip.split(".").map((n) => parseInt(n, 10));
+  if (parts.length !== 4 || parts.some((n) => Number.isNaN(n) || n < 0 || n > 255)) {
+    return "invalid IPv4";
+  }
+  const [a, b] = parts;
+  if (a === 127) return "blocked loopback (127.0.0.0/8)";
+  if (a === 10) return "blocked private (10.0.0.0/8)";
+  if (a === 172 && b >= 16 && b <= 31) return "blocked private (172.16.0.0/12)";
+  if (a === 192 && b === 168) return "blocked private (192.168.0.0/16)";
+  if (a === 169 && b === 254) return "blocked link-local (169.254.0.0/16)";
+  if (a === 0) return "blocked reserved (0.0.0.0/8)";
+  if (a >= 224) return "blocked reserved (multicast/reserved)";
+  return null;
+}
+
 async function dispatch(action, p) {
   // Resolve the target tab up-front so we can apply the orange glow and the
   // "Cagentic" tab group around the actual work.
@@ -83,8 +188,8 @@ async function dispatch(action, p) {
   }
 
   if (tabId != null) {
-    ensureGroup(tabId).catch(() => {});
-    glowOn(tabId).catch(() => {});
+    ensureGroup(tabId).catch((e) => console.debug("Cagentic: ensureGroup", e));
+    glowOn(tabId).catch((e) => console.debug("Cagentic: glowOn", e));
   }
 
   try {
@@ -99,10 +204,10 @@ async function dispatch(action, p) {
         const tab = await chrome.tabs.create({
           url: p.url, active: p.active !== false,
         });
-        ensureGroup(tab.id).catch(() => {});
+        ensureGroup(tab.id).catch((e) => console.debug("Cagentic: ensureGroup", e));
         // Give the new tab a moment to load before we paint on it.
         setTimeout(() => {
-          glowOn(tab.id).catch(() => {});
+          glowOn(tab.id).catch((e) => console.debug("Cagentic: glowOn", e));
           glowOffSoon(tab.id);
         }, 350);
         return { id: tab.id, url: tab.url };
@@ -111,7 +216,7 @@ async function dispatch(action, p) {
         const tab = await chrome.tabs.update(tabId, { url: p.url });
         // Wait for the page to start, then re-glow (the previous DOM is gone).
         setTimeout(() => {
-          glowOn(tabId).catch(() => {});
+          glowOn(tabId).catch((e) => console.debug("Cagentic: glowOn", e));
           glowOffSoon(tabId);
         }, 600);
         return { id: tab.id, url: p.url };
@@ -148,8 +253,13 @@ async function dispatch(action, p) {
         return result;
       }
       case "eval": {
-        // Run in the page's MAIN world so the PAGE's CSP applies (most pages
-        // allow eval) instead of the extension's strict no-unsafe-eval CSP.
+        // Trust model: this runs ARBITRARY JavaScript in the page's MAIN world.
+        // It is only reachable for commands handed back by /next, which the
+        // bridge serves only to clients presenting the valid shared token (see
+        // getToken / X-Cagentic-Token). An unauthenticated/cross-origin caller
+        // cannot reach this path. The MAIN world is used so the PAGE's CSP
+        // applies (most pages allow eval) rather than the extension's strict
+        // no-unsafe-eval CSP.
         const [{ result }] = await chrome.scripting.executeScript({
           target: { tabId },
           world: "MAIN",
@@ -206,15 +316,30 @@ async function dispatch(action, p) {
         return result;
       }
       case "download": {
-        // The extension's own fetch carries the user's cookies because
-        // <all_urls> is in host_permissions — that's how we authenticate
-        // against Google Drive / Docs export endpoints without an OAuth
-        // flow. No tab needed.
+        // Fetch a URL and return its bytes. This is a powerful primitive, so it
+        // is hardened against being turned into a credentialed SSRF /
+        // exfiltration tool:
+        //   * The target host is checked against private/loopback/link-local/
+        //     reserved ranges BEFORE any network request is made.
+        //   * Cookies are NOT sent by default (credentials:"omit"). Sending the
+        //     user's session cookies is opt-in via p.credentials === true, and
+        //     even then only to public hosts that passed the block-list.
+        // The existing 25 MB size cap is preserved.
         try {
+          const blocked = isBlockedDownloadUrl(p.url);
+          if (blocked) return { ok: false, error: blocked };
+
+          // Default to omitting cookies; only include when explicitly requested.
+          const credentials = p.credentials === true ? "include" : "omit";
           const r = await fetch(p.url, {
-            credentials: "include",
+            credentials,
             redirect: "follow",
           });
+          // A redirect could land us on a private host; re-check the final URL.
+          const finalBlocked = isBlockedDownloadUrl(r.url);
+          if (finalBlocked) {
+            return { ok: false, error: `redirected to ${finalBlocked}` };
+          }
           if (!r.ok) return { ok: false, error: `HTTP ${r.status}` };
           const buf = await r.arrayBuffer();
           const MAX = 25 * 1024 * 1024;     // 25 MB
@@ -236,6 +361,7 @@ async function dispatch(action, p) {
             data: btoa(s),
           };
         } catch (e) {
+          console.warn("Cagentic: download failed", e);
           return { ok: false, error: String((e && e.message) || e) };
         }
       }
@@ -262,7 +388,7 @@ async function ensureGroup(tabId) {
     // Verify the saved group still exists; Chrome forgets it across restarts.
     if (cagGroupId != null) {
       try { await chrome.tabGroups.get(cagGroupId); }
-      catch (e) { cagGroupId = null; }
+      catch (e) { console.debug("Cagentic: cached tab group gone", e); cagGroupId = null; }
     }
     if (cagGroupId == null) {
       cagGroupId = await chrome.tabs.group({ tabIds: [tabId] });
@@ -278,7 +404,8 @@ async function ensureGroup(tabId) {
       await chrome.tabs.group({ tabIds: [tabId], groupId: cagGroupId });
     }
   } catch (e) {
-    // tabGroups not allowed on this tab (chrome://, devtools, incognito)
+    // tabGroups not allowed on this tab (chrome://, devtools, incognito).
+    console.debug("Cagentic: ensureGroup skipped", e);
   }
 }
 
@@ -294,7 +421,10 @@ async function glowOn(tabId) {
       func: showCagGlow,
       args: [CAG_ORANGE],
     });
-  } catch (e) { /* chrome:// page, detached, or restricted */ }
+  } catch (e) {
+    // chrome:// page, detached, or restricted — glow is cosmetic only.
+    console.debug("Cagentic: glowOn skipped", e);
+  }
 }
 
 function glowOffSoon(tabId) {
@@ -307,7 +437,10 @@ function glowOffSoon(tabId) {
         target: { tabId },
         func: hideCagGlow,
       });
-    } catch (e) { /* tab gone or restricted */ }
+    } catch (e) {
+      // tab gone or restricted — glow is cosmetic only.
+      console.debug("Cagentic: glowOff skipped", e);
+    }
   }, 900);
   glowTimers.set(tabId, t);
 }
