@@ -5,6 +5,7 @@ import argparse
 import logging
 import os
 import sys
+import time
 from pathlib import Path
 
 logger = logging.getLogger(__name__)
@@ -862,6 +863,34 @@ def repl(agent: Agent, cfg: dict, gateway_holder: dict | None = None) -> int:
             continue
 
 
+def _list_models_with_retry(client, attempts: int = 5, delay: float = 2.0):
+    """List models, retrying briefly on *connection* failures only.
+
+    The Ollama desktop app (tray/service) takes a few seconds to bind
+    11434 after login. Launching cagentic in that window used to hard-fail
+    instantly with "Is `ollama serve` running?" even though Ollama was
+    seconds away from being ready. Retry connection-refused / connect-
+    timeout a handful of times so a startup race doesn't look like a
+    missing install. HTTP errors (404/500) are NOT retried — reconnecting
+    won't fix a broken server.
+    """
+    import requests
+    last_err: OllamaError | None = None
+    for i in range(attempts):
+        try:
+            return client.list_models()
+        except OllamaError as e:
+            last_err = e
+            # Only the connection-level failures are worth retrying.
+            cause = e.__cause__
+            if not isinstance(cause, requests.ConnectionError):
+                raise
+            if i < attempts - 1:
+                time.sleep(delay)
+    assert last_err is not None
+    raise last_err
+
+
 def main(argv: list[str] | None = None) -> int:
     args = parse_args(argv if argv is not None else sys.argv[1:])
 
@@ -934,7 +963,7 @@ def main(argv: list[str] | None = None) -> int:
             root = Path.home()
 
     try:
-        models = client.list_models()
+        models = _list_models_with_retry(client)
     except OllamaError as e:
         if args.serve:
             # Headless service may start before Ollama does — keep the
