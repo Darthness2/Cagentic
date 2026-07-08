@@ -131,7 +131,14 @@ class OpenAIClient:
             if role == "tool":
                 name = m.get("name", "")
                 queue = pending.get(name, [])
-                cid = queue.pop(0) if queue else _make_call_id()
+                if not queue:
+                    # Orphan tool result — its originating assistant tool_call
+                    # was dropped (e.g. during compaction). Fabricating a
+                    # tool_call_id that references no assistant tool_call makes
+                    # OpenAI reject the next request with HTTP 400, so drop the
+                    # orphan result instead. (Matches the Anthropic client.)
+                    continue
+                cid = queue.pop(0)
                 out.append(
                     {
                         "role": "tool",
@@ -141,8 +148,9 @@ class OpenAIClient:
                 )
                 continue
 
-            # user / other roles
-            out.append({"role": role, "content": m.get("content") or ""})
+            # user / other roles — OpenAI only accepts a known role, so coerce
+            # anything unexpected (e.g. an empty/missing role) to "user".
+            out.append({"role": role or "user", "content": m.get("content") or ""})
 
         # ---- Second pass: merge consecutive same-role messages ---------
         merged: list[dict] = []
@@ -150,7 +158,9 @@ class OpenAIClient:
             if (
                 merged
                 and merged[-1]["role"] == m["role"]
-                and m["role"] not in ("assistant",)
+                # Never merge "assistant" (carries tool_calls) or "tool"
+                # (carries a distinct tool_call_id that must be preserved).
+                and m["role"] not in ("assistant", "tool")
                 and "tool_calls" not in merged[-1]
                 and "tool_calls" not in m
             ):
@@ -246,42 +256,53 @@ class OpenAIClient:
             )
             r.raise_for_status()
         except requests.RequestException as e:
+            # r may exist (non-2xx response) but never get consumed below; close
+            # it so the underlying socket returns to the pool instead of leaking.
+            try:
+                if "r" in locals():
+                    r.close()
+            except Exception:
+                pass
             raise OpenAIError(f"OpenAI streaming error: {e}") from e
 
         full = ""
         tc_acc: dict[int, dict] = {}  # index -> partial call
 
-        for raw_line in r.iter_lines():
-            if not raw_line:
-                continue
-            line = raw_line.decode() if isinstance(raw_line, bytes) else raw_line
-            if not line.startswith("data: "):
-                continue
-            payload = line[6:]
-            if payload.strip() == "[DONE]":
-                break
-            try:
-                chunk = json.loads(payload)
-            except json.JSONDecodeError:
-                continue
+        # `with r` guarantees the streaming response (and its socket) is closed
+        # even when the consumer stops iterating early or the stream errors,
+        # so connections return to the urllib3 pool rather than leaking.
+        with r:
+            for raw_line in r.iter_lines():
+                if not raw_line:
+                    continue
+                line = raw_line.decode() if isinstance(raw_line, bytes) else raw_line
+                if not line.startswith("data: "):
+                    continue
+                payload = line[6:]
+                if payload.strip() == "[DONE]":
+                    break
+                try:
+                    chunk = json.loads(payload)
+                except json.JSONDecodeError:
+                    continue
 
-            delta = (chunk.get("choices") or [{}])[0].get("delta") or {}
-            text = delta.get("content") or ""
-            if text:
-                full += text
-                yield ("delta", text)
+                delta = (chunk.get("choices") or [{}])[0].get("delta") or {}
+                text = delta.get("content") or ""
+                if text:
+                    full += text
+                    yield ("delta", text)
 
-            for tc_delta in delta.get("tool_calls") or []:
-                idx = tc_delta.get("index", 0)
-                if idx not in tc_acc:
-                    tc_acc[idx] = {"id": "", "function": {"name": "", "arguments": ""}}
-                if tc_delta.get("id"):
-                    tc_acc[idx]["id"] = tc_delta["id"]
-                fn_d = tc_delta.get("function") or {}
-                if fn_d.get("name"):
-                    tc_acc[idx]["function"]["name"] += fn_d["name"]
-                if fn_d.get("arguments"):
-                    tc_acc[idx]["function"]["arguments"] += fn_d["arguments"]
+                for tc_delta in delta.get("tool_calls") or []:
+                    idx = tc_delta.get("index", 0)
+                    if idx not in tc_acc:
+                        tc_acc[idx] = {"id": "", "function": {"name": "", "arguments": ""}}
+                    if tc_delta.get("id"):
+                        tc_acc[idx]["id"] = tc_delta["id"]
+                    fn_d = tc_delta.get("function") or {}
+                    if fn_d.get("name"):
+                        tc_acc[idx]["function"]["name"] += fn_d["name"]
+                    if fn_d.get("arguments"):
+                        tc_acc[idx]["function"]["arguments"] += fn_d["arguments"]
 
         tcs = []
         for idx in sorted(tc_acc):

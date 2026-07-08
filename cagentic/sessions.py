@@ -78,7 +78,11 @@ def save(session: dict) -> Path:
     with _SAVE_LOCK:
         fd, tmp_name = tempfile.mkstemp(dir=str(d), prefix=f".{session['id']}.", suffix=".tmp")
         try:
-            os.fchmod(fd, stat.S_IRUSR | stat.S_IWUSR)
+            # fchmod is POSIX-only; on Windows it raises AttributeError (not
+            # OSError), which the handler below wouldn't catch — leaking the fd
+            # and temp file. Session files hold no secrets anyway.
+            if hasattr(os, "fchmod"):
+                os.fchmod(fd, stat.S_IRUSR | stat.S_IWUSR)
             with os.fdopen(fd, "w", encoding="utf-8") as f:
                 f.write(data)
                 f.flush()
@@ -99,7 +103,7 @@ def load(session_id: str) -> dict | None:
     if not p.exists():
         return None
     try:
-        return json.loads(p.read_text())
+        return json.loads(p.read_text(encoding="utf-8"))
     except (json.JSONDecodeError, OSError):
         return None
 

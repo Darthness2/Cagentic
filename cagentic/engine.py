@@ -615,6 +615,12 @@ class QueryEngine:
         # Result-loop keys already soft-steered this turn, so a repeated result
         # injects the steer nudge only ONCE instead of on every duplicate.
         self._steered_result_keys: set[tuple[str, str]] = set()
+        # Result signatures already counted toward loop detection in the
+        # CURRENT turn — mirrors _counted_calls_this_turn so a genuine same-turn
+        # fan-out of identical results (e.g. 4 identical grep calls emitted in
+        # one assistant message) doesn't read as a stuck loop. Reset per turn
+        # in _execute_and_record.
+        self._counted_results_this_turn: set[tuple[str, str]] = set()
         self._abort_turn = False
         self._plan_shown_this_turn = False
         self._usage = {"input": 0, "output": 0, "ms": 0}
@@ -990,6 +996,17 @@ class QueryEngine:
         if (result or "").lstrip().startswith("[CACHED"):
             return 0
         key = (name, (result or "")[:240])
+        # Same-turn fan-out of identical results is genuine parallelism, not a
+        # stuck loop — count each signature at most once per turn (mirroring
+        # _check_loop on the call side). Without this, 4 identical results
+        # from one assistant message would hit LOOP_THRESHOLD and falsely steer,
+        # and 8 would hard-abort the turn — exactly the case the call-side dedup
+        # was designed to permit.
+        if key in self._counted_results_this_turn:
+            # Already counted this turn; return the current cross-turn count
+            # without inflating it.
+            return self._recent_results.count(key)
+        self._counted_results_this_turn.add(key)
         self._recent_results.append(key)
         self._recent_results = self._recent_results[-30:]
         return self._recent_results.count(key)
@@ -1001,6 +1018,7 @@ class QueryEngine:
         # result-steer can fire once per repeated key this turn.
         self._counted_calls_this_turn = set()
         self._steered_result_keys = set()
+        self._counted_results_this_turn = set()
         cleaned_calls = []
         for name, args, role in calls:
             if self._check_loop(name, args):

@@ -199,7 +199,11 @@ class OllamaClient:
             r.raise_for_status()
         except requests.RequestException as e:
             raise OllamaError(f"could not reach Ollama at {self.host}: {e}") from e
-        return [m["name"] for m in r.json().get("models", [])]
+        models = r.json().get("models", [])
+        # Guard against malformed entries (some proxies/custom builds omit
+        # "name"); skip any entry we can't identify rather than crashing the
+        # whole listing.
+        return [m["name"] for m in models if isinstance(m, dict) and m.get("name")]
 
     def loaded_models(self) -> list[dict]:
         """List currently-resident models (calls Ollama's /api/ps).

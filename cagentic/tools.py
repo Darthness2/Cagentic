@@ -8,6 +8,7 @@ from __future__ import annotations
 import logging
 import os
 import re
+import shutil
 import subprocess
 from dataclasses import dataclass, field
 from pathlib import Path
@@ -228,7 +229,7 @@ def t_write_file(args: dict, ctx: ToolContext) -> str:
     if not ctx.confirm("file write", detail):
         return "ERROR: user denied write"
     p.parent.mkdir(parents=True, exist_ok=True)
-    p.write_text(content, encoding="utf-8")
+    _write_text_raw(p, content)
     _record_edit(ctx, p, old_text, content, "write")
     adds, dels = _diff.stats(old_text, content)
     return f"OK: wrote {path} +{adds} -{dels}"
@@ -300,6 +301,19 @@ def _read_text_robust(p: Path) -> str:
     return text
 
 
+def _write_text_raw(p: Path, text: str) -> None:
+    """Write UTF-8 with NO newline translation.
+
+    Path.write_text defaults to newline=None, which translates "\\n"→
+    os.linesep ("\\r\\n" on Windows). That silently turns every LF file into
+    CRLF after an edit (noisy git diffs, broken LF-only repos) and corrupts
+    already-CRLF content into "\\r\\r\\n". newline="" writes the string's
+    bytes verbatim, so files keep whatever line endings the in-memory text
+    has (LF, which is what the model emits and our normalized reads produce).
+    """
+    p.write_text(text, encoding="utf-8", newline="")
+
+
 def t_edit_file(args: dict, ctx: ToolContext) -> str:
     path = args["path"]
     old = args["old_string"]
@@ -320,7 +334,7 @@ def t_edit_file(args: dict, ctx: ToolContext) -> str:
         new_text = raw.replace(old, new) if replace_all else raw.replace(old, new, 1)
         if raw.strip() and not new_text.strip() and not args.get("allow_empty"):
             return f"ERROR: refusing to empty {path}. Pass allow_empty=true to confirm."
-        p.write_text(new_text, encoding="utf-8")
+        _write_text_raw(p, new_text)
         _record_edit(ctx, p, raw, new_text, "edit")
         adds, dels = _diff.stats(raw, new_text)
         return f"OK: edited {path} +{adds} -{dels}"
@@ -379,7 +393,7 @@ def t_edit_file(args: dict, ctx: ToolContext) -> str:
 
     if raw.strip() and not new_text.strip() and not args.get("allow_empty"):
         return f"ERROR: refusing to empty {path}. Pass allow_empty=true."
-    p.write_text(new_text, encoding="utf-8")
+    _write_text_raw(p, new_text)
     _record_edit(ctx, p, raw, new_text, "edit")
     adds, dels = _diff.stats(text, new_text)
     return f"OK: edited {path} +{adds} -{dels}"
@@ -427,7 +441,7 @@ def t_replace_lines(args: dict, ctx: ToolContext) -> str:
     new_text = "".join(new_lines)
     if raw.strip() and not new_text.strip() and not args.get("allow_empty"):
         return f"ERROR: refusing to empty {path}. Pass allow_empty=true."
-    p.write_text(new_text, encoding="utf-8")
+    _write_text_raw(p, new_text)
     _record_edit(ctx, p, raw, new_text, "replace_lines")
     adds, dels = _diff.stats(raw, new_text)
     return f"OK: replaced {path}:{s + 1}-{e} +{adds} -{dels}"
@@ -1328,23 +1342,27 @@ def t_web_fetch(args: dict, ctx: ToolContext) -> str:
 
     chunks: list[bytes] = []
     seen = 0
-    for chunk in r.iter_content(8192):
-        if not chunk:
-            continue
-        # Hard total ceiling: never keep more than max_bytes overall.
-        remaining = max_bytes - seen
-        if remaining <= 0:
-            break
-        if len(chunk) > remaining:
-            chunk = chunk[:remaining]
-        chunks.append(chunk)
-        seen += len(chunk)
-        if seen >= max_bytes:
-            break
     try:
-        r.close()
-    except Exception:
-        logger.warning("web_fetch: failed closing response", exc_info=True)
+        for chunk in r.iter_content(8192):
+            if not chunk:
+                continue
+            # Hard total ceiling: never keep more than max_bytes overall.
+            remaining = max_bytes - seen
+            if remaining <= 0:
+                break
+            if len(chunk) > remaining:
+                chunk = chunk[:remaining]
+            chunks.append(chunk)
+            seen += len(chunk)
+            if seen >= max_bytes:
+                break
+    finally:
+        # Close in finally so a connection drop mid-stream (iter_content
+        # raising) still releases the socket instead of leaking it.
+        try:
+            r.close()
+        except Exception:
+            logger.warning("web_fetch: failed closing response", exc_info=True)
     raw = b"".join(chunks)
     try:
         body = raw.decode(r.encoding or "utf-8", errors="replace")
@@ -1442,15 +1460,34 @@ def _analyze_failure(stdout: str, stderr: str) -> str:
     return ("  ↳ " + "  ·  ".join(hints)) if hints else ""
 
 
+def _shell_run_invocation(cmd: str):
+    """Return (args, shell) for subprocess.run to execute `cmd` under a shell.
+
+    On POSIX, shell=True uses /bin/sh. On Windows, shell=True uses cmd.exe,
+    which rejects the Unix shell syntax the model often emits (&&, $VAR,
+    pipes, redirects) — so a command like `grep foo file | head` fails. When
+    a POSIX shell (bash from Git Bash, or sh) is on PATH, route through it so
+    those commands work; otherwise fall back to cmd.exe (basic commands still
+    run, Unix syntax won't).
+    """
+    if os.name == "nt":
+        posix_shell = shutil.which("bash") or shutil.which("sh")
+        if posix_shell:
+            return ([posix_shell, "-c", cmd], False)
+        return (["cmd", "/c", cmd], False)
+    return (cmd, True)
+
+
 def t_run_bash(args: dict, ctx: ToolContext) -> str:
     cmd = args["command"]
     timeout = int(args.get("timeout", 60))
     if not ctx.confirm("shell command", cmd):
         return "ERROR: user denied command"
+    run_cmd, use_shell = _shell_run_invocation(cmd)
     try:
         with ui.Spinner(f"running: {cmd[:40] + ('…' if len(cmd) > 40 else '')}"):
             proc = subprocess.run(
-                cmd, shell=True, cwd=str(ctx.root),
+                run_cmd, shell=use_shell, cwd=str(ctx.root),
                 capture_output=True, text=True, timeout=timeout,
             )
     except subprocess.TimeoutExpired:
@@ -1620,7 +1657,11 @@ def t_todo_write(args: dict, ctx: ToolContext) -> str:
         if isinstance(it, str):
             todos.append({"text": it, "status": "pending"})
         elif isinstance(it, dict) and "text" in it:
-            todos.append({"text": it["text"], "status": it.get("status", "pending")})
+            # `get("status", "pending")` only defaults when the key is absent;
+            # the model can send "status": "" or null, which would then crash
+            # t['status'][0] below. Coerce falsy to "pending".
+            status = it.get("status") or "pending"
+            todos.append({"text": it["text"], "status": status})
     state.update(todos=todos)
     out = "\n".join(f"  [{t['status'][0]}] {t['text']}" for t in todos)
     return f"OK: {len(todos)} todo(s):\n{out}"
@@ -2349,7 +2390,19 @@ def dispatch(name: str, args: dict, ctx: ToolContext) -> str:
     if fn is None:
         canonical = TOOL_ALIASES.get(name.lower())
         if canonical and canonical in all_tools:
-            result = all_tools[canonical](args, ctx)
+            # Run the aliased tool under the same exception guard as a canonical
+            # call so a KeyError/ValueError surfaces as an "ERROR: ..." string
+            # instead of propagating uncaught out of the tool dispatch.
+            try:
+                result = all_tools[canonical](args, ctx)
+            except KeyError as e:
+                logger.warning("tool %r (alias %r) missing argument %s",
+                               canonical, name, e, exc_info=True)
+                return f"ERROR: missing argument {e}"
+            except Exception as e:
+                logger.warning("tool %r (alias %r) raised %s",
+                               canonical, name, type(e).__name__, exc_info=True)
+                return f"ERROR: {type(e).__name__}: {e}"
             if isinstance(result, str) and not result.startswith("ERROR"):
                 result = f"[note: '{name}' is an alias for '{canonical}']\n{result}"
             return result

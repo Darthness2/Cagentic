@@ -962,7 +962,10 @@ def main(argv: list[str] | None = None) -> int:
         ui.warn(f"note: '{model}' is known not to support tool calls — running tool-less.")
 
     def _remember_no_tools(_a):
-        config.set_value(cfg, f"models.{model}.tools_supported", False)
+        # Persist under the agent's CURRENT model, not the startup `model` this
+        # closure captured — otherwise switching to a tool-less model B records
+        # the flag against model A and penalizes the wrong one next launch.
+        config.set_value(cfg, f"models.{_a.model}.tools_supported", False)
         config.save(cfg)
 
     agent = Agent(
@@ -1053,7 +1056,15 @@ def main(argv: list[str] | None = None) -> int:
         ui.info(f"gateway running at {gw.url()} — press Ctrl-C to stop.")
         try:
             import threading
-            threading.Event().wait()
+            # Park the main thread with a short-timeout poll rather than
+            # Event().wait() with no timeout: on Windows an unbounded wait
+            # blocks in a non-interruptible C-level call, so SIGINT (Ctrl-C)
+            # never raises KeyboardInterrupt and the gateway can't be stopped
+            # with Ctrl-C. Returning to Python every 0.5s lets the default
+            # SIGINT handler fire.
+            stop = threading.Event()
+            while not stop.wait(0.5):
+                pass
         except KeyboardInterrupt:
             pass
         _shutdown()

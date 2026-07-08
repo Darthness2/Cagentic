@@ -100,8 +100,8 @@ class TaskGraph:
             else:
                 return None
         try:
-            return Task(**json.loads(p.read_text()))
-        except (json.JSONDecodeError, OSError, TypeError):
+            return Task(**json.loads(p.read_text(encoding="utf-8")))
+        except (json.JSONDecodeError, OSError, TypeError, UnicodeDecodeError):
             return None
 
     def update(self, task_id: str, **changes) -> Task | None:
@@ -121,8 +121,8 @@ class TaskGraph:
         out: list[Task] = []
         for p in sorted(self.root.glob("*.json")):
             try:
-                t = Task(**json.loads(p.read_text()))
-            except (json.JSONDecodeError, OSError, TypeError):
+                t = Task(**json.loads(p.read_text(encoding="utf-8")))
+            except (json.JSONDecodeError, OSError, TypeError, UnicodeDecodeError):
                 continue
             if status and t.status != status:
                 continue
@@ -145,5 +145,5 @@ class TaskGraph:
     def _write(self, task: Task) -> None:
         p = self._path(task.id)
         tmp = p.with_suffix(".json.tmp")
-        tmp.write_text(json.dumps(task.to_dict(), indent=2))
+        tmp.write_text(json.dumps(task.to_dict(), indent=2), encoding="utf-8")
         tmp.replace(p)

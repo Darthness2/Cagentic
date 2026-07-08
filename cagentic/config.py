@@ -77,8 +77,8 @@ def load() -> dict:
     if not p.exists():
         return copy.deepcopy(_DEFAULTS)
     try:
-        data = json.loads(p.read_text())
-    except (json.JSONDecodeError, OSError):
+        data = json.loads(p.read_text(encoding="utf-8"))
+    except (json.JSONDecodeError, OSError, UnicodeDecodeError):
         return copy.deepcopy(_DEFAULTS)
     if not isinstance(data, dict):
         return copy.deepcopy(_DEFAULTS)
@@ -97,7 +97,12 @@ def save(cfg: dict) -> None:
         # perms BEFORE writing, so secrets are never briefly world-readable.
         fd, tmp_name = tempfile.mkstemp(dir=str(d), prefix=".config.", suffix=".tmp")
         try:
-            os.fchmod(fd, stat.S_IRUSR | stat.S_IWUSR)
+            # Tighten perms to 0600 before writing so secrets are never briefly
+            # world-readable. fchmod is POSIX-only; on Windows (FAT/NTFS ACLs)
+            # there's no equivalent, so skip it — the file lives in the user's
+            # own config dir, which is already user-private by default ACL.
+            if hasattr(os, "fchmod"):
+                os.fchmod(fd, stat.S_IRUSR | stat.S_IWUSR)
             with os.fdopen(fd, "w", encoding="utf-8") as f:
                 f.write(data)
                 f.flush()

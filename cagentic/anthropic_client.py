@@ -114,7 +114,10 @@ class AnthropicClient:
             content = m.get("content") or ""
 
             if role == "system":
-                system = content
+                # Concatenate rather than overwrite — the engine may emit a
+                # base prompt plus a per-session addendum, and dropping the
+                # earlier one would silently lose context.
+                system = (system + "\n" + content) if system else content
                 continue
 
             if role == "assistant":
@@ -270,9 +273,13 @@ class AnthropicClient:
         try:
             r = self._session.post(_API_URL, json=body, timeout=self.timeout)
             r.raise_for_status()
+            data = r.json()
         except requests.RequestException as e:
             raise AnthropicError(f"Anthropic API error: {e}") from e
-        return self._parse_response(r.json())
+        except ValueError as e:
+            # Non-JSON body (e.g. an HTML error page from a gateway/proxy).
+            raise AnthropicError(f"Anthropic returned a non-JSON response: {e}") from e
+        return self._parse_response(data)
 
     # ------------------------------------------------------------------
     # Streaming chat

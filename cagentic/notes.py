@@ -57,7 +57,7 @@ class Note:
 def write(name: str, body: str, *, append: bool = False) -> Note:
     """Write or overwrite a note. If `append`, prepend a timestamped entry."""
     p = _path(name)
-    existing = p.read_text(errors="replace") if p.exists() else ""
+    existing = p.read_text(encoding="utf-8", errors="replace") if p.exists() else ""
     if append and existing:
         stamp = time.strftime("%Y-%m-%d %H:%M")
         new_body = f"## {stamp}\n{body.strip()}\n\n{existing}"
@@ -74,7 +74,7 @@ def get(name: str) -> Note | None:
     p = _path(name)
     if not p.exists():
         return None
-    body = p.read_text(errors="replace")
+    body = p.read_text(encoding="utf-8", errors="replace")
     return Note(name=p.stem, path=p, body=body, updated_at=p.stat().st_mtime)
 
 
@@ -90,7 +90,7 @@ def list_all() -> list[Note]:
     out: list[Note] = []
     for p in notes_dir().glob("*.md"):
         try:
-            body = p.read_text(errors="replace")
+            body = p.read_text(encoding="utf-8", errors="replace")
         except OSError:
             continue
         out.append(Note(name=p.stem, path=p, body=body, updated_at=p.stat().st_mtime))

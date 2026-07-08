@@ -233,12 +233,13 @@ def auto_compact(
     if messages and messages[0].get("role") == "system":
         head.append(messages[0])
 
-    boundary_idx = find_compact_boundary(messages)
-    # NB: >= 0, not > 0. A boundary at index 0 is still a real boundary; with
-    # the old `> 0` test it was treated as absent and middle_start fell back to
-    # len(head), re-summarizing the existing compacted summary and compounding
-    # the loss on every subsequent compact.
-    middle_start = boundary_idx + 1 if boundary_idx >= 0 else len(head)
+    # Start the middle slice right after the head (the system prompt). The
+    # previous compaction's "[older context, compacted]" summary lives before
+    # the boundary marker, so the old `boundary_idx + 1` start EXCLUDED it from
+    # both head and middle — dropping it outright on every re-compaction and
+    # cumulatively losing all older context. Folding the existing summary into
+    # the new middle (re-summarizing it) preserves it as a roll-up instead.
+    middle_start = len(head)
 
     tail = messages[-keep_recent:]
     middle = messages[middle_start:-keep_recent] if len(messages) > middle_start + keep_recent else []

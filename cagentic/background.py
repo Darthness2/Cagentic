@@ -174,9 +174,14 @@ class BackgroundExecutor:
                 logger.warning("background: failed updating task %s", task_id, exc_info=True)
 
     def _run_bash(self, job_id: str, command: str, cwd: Path, timeout: int) -> None:
+        # On Windows, shell=True uses cmd.exe which rejects Unix shell syntax
+        # the model emits; route through bash/sh when available. Lazy import to
+        # avoid a tools<->background import-time dependency.
+        from .tools import _shell_run_invocation
+        run_cmd, use_shell = _shell_run_invocation(command)
         try:
             proc = subprocess.run(
-                command, shell=True, cwd=str(cwd),
+                run_cmd, shell=use_shell, cwd=str(cwd),
                 capture_output=True, text=True, timeout=timeout,
             )
             ok = proc.returncode == 0

@@ -65,7 +65,11 @@ def save(proj: dict) -> Path:
     with _SAVE_LOCK:
         fd, tmp_name = tempfile.mkstemp(dir=str(d), prefix=f".{proj['id']}.", suffix=".tmp")
         try:
-            os.fchmod(fd, stat.S_IRUSR | stat.S_IWUSR)
+            # fchmod is POSIX-only; on Windows it raises AttributeError (not
+            # OSError), which the handler below wouldn't catch — leaking the fd
+            # and temp file.
+            if hasattr(os, "fchmod"):
+                os.fchmod(fd, stat.S_IRUSR | stat.S_IWUSR)
             with os.fdopen(fd, "w", encoding="utf-8") as f:
                 f.write(data)
                 f.flush()
@@ -86,7 +90,7 @@ def load(project_id: str) -> dict | None:
     if not p.exists():
         return None
     try:
-        return json.loads(p.read_text())
+        return json.loads(p.read_text(encoding="utf-8"))
     except (json.JSONDecodeError, OSError):
         return None
 
@@ -103,7 +107,7 @@ def list_all() -> list[dict]:
     out = []
     for p in projects_dir().glob("*.json"):
         try:
-            data = json.loads(p.read_text())
+            data = json.loads(p.read_text(encoding="utf-8"))
         except (json.JSONDecodeError, OSError):
             continue
         out.append({

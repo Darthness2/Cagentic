@@ -74,6 +74,7 @@ class MCPServer:
     _stderr_thread: threading.Thread | None = None
     # Tail of recent stderr lines, kept for diagnostics on exit.
     _stderr_tail: list[str] = field(default_factory=list)
+    _stderr_lock: threading.Lock = field(default_factory=threading.Lock)
 
     def start(self, timeout: float = 10.0) -> None:
         """Launch the server subprocess and run the MCP initialize handshake."""
@@ -143,13 +144,17 @@ class MCPServer:
         deadlocks the server. Keep a short tail for error reporting."""
         try:
             for line in iter(proc.stderr.readline, ""):  # type: ignore[union-attr]
-                self._stderr_tail.append(line)
-                del self._stderr_tail[:-50]  # cap the tail
+                # append + trim isn't atomic across threads; guard so a
+                # concurrent _stderr_snapshot can't join a half-truncated view.
+                with self._stderr_lock:
+                    self._stderr_tail.append(line)
+                    del self._stderr_tail[:-50]  # cap the tail
         except Exception:
             logger.warning("mcp '%s' stderr drainer crashed", self.name, exc_info=True)
 
     def _stderr_snapshot(self, limit: int = 500) -> str:
-        return ("".join(self._stderr_tail))[-limit:]
+        with self._stderr_lock:
+            return ("".join(self._stderr_tail))[-limit:]
 
     def stop(self) -> None:
         proc = self.proc
@@ -185,6 +190,12 @@ class MCPServer:
             except (ProcessLookupError, PermissionError, OSError):
                 logger.warning("mcp '%s' killpg(SIGTERM) failed, falling back",
                                self.name, exc_info=True)
+        if os.name == "nt":
+            # On Windows, proc.terminate()/proc.kill() call TerminateProcess
+            # on the direct child only — the `node` grandchild that npx spawns
+            # would be orphaned. taskkill /T walks and kills the whole tree.
+            self._win_kill_tree(proc.pid, force=False)
+            return
         proc.terminate()
 
     def _kill_tree(self, proc: subprocess.Popen) -> None:
@@ -195,7 +206,26 @@ class MCPServer:
             except (ProcessLookupError, PermissionError, OSError):
                 logger.warning("mcp '%s' killpg(SIGKILL) failed, falling back",
                                self.name, exc_info=True)
+        if os.name == "nt":
+            self._win_kill_tree(proc.pid, force=True)
+            return
         proc.kill()
+
+    @staticmethod
+    def _win_kill_tree(pid: int, *, force: bool) -> None:
+        """Kill a process and all its descendants on Windows via taskkill."""
+        args = ["taskkill", "/T", "/PID", str(pid)]
+        if force:
+            args.insert(1, "/F")
+        try:
+            subprocess.call(
+                args,
+                stdout=subprocess.DEVNULL,
+                stderr=subprocess.DEVNULL,
+            )
+        except OSError:
+            # taskkill missing or pid already gone — nothing useful to do.
+            pass
 
     # ---- JSON-RPC plumbing ------------------------------------------------
 
@@ -247,12 +277,15 @@ class MCPServer:
         if not self.proc or self.proc.poll() is not None:
             return
         payload = json.dumps({"jsonrpc": "2.0", "method": method, "params": params})
-        try:
-            self.proc.stdin.write(payload + "\n")  # type: ignore[union-attr]
-            self.proc.stdin.flush()                # type: ignore[union-attr]
-        except (BrokenPipeError, OSError, ValueError):
-            logger.warning("mcp '%s' notification '%s' write failed",
-                           self.name, method, exc_info=True)
+        # Take the same lock as _send_request so a notification can't interleave
+        # its bytes with an in-flight request and corrupt the JSON-RPC stream.
+        with self._lock:
+            try:
+                self.proc.stdin.write(payload + "\n")  # type: ignore[union-attr]
+                self.proc.stdin.flush()                # type: ignore[union-attr]
+            except (BrokenPipeError, OSError, ValueError):
+                logger.warning("mcp '%s' notification '%s' write failed",
+                               self.name, method, exc_info=True)
 
     # ---- public surface ---------------------------------------------------
 
@@ -295,9 +328,21 @@ class MCPManager:
             command = spec.get("command")
             if not command:
                 continue
+            # `command` may be a list (preferred) or a shell-style string.
+            # `list("npx -y …")` would split it into single characters and
+            # then Popen tries to exec a program named "n" — so tokenize
+            # strings with shlex instead. Use POSIX rules off Windows so
+            # backslashes in paths aren't eaten as escapes.
+            if isinstance(command, str):
+                import shlex
+                command = shlex.split(command, posix=os.name != "nt")
+            else:
+                command = list(command)
+            if not command:
+                continue
             self.servers[name] = MCPServer(
                 name=name,
-                command=list(command),
+                command=command,
                 env=dict(spec.get("env") or {}),
             )
 
@@ -358,7 +403,7 @@ def format_tool_result(result: dict) -> str:
         if t == "text":
             parts.append(item.get("text", ""))
         elif t == "image":
-            parts.append(f"[image: {item.get('mimeType', '?')}, {len(item.get('data', ''))} bytes b64]")
+            parts.append(f"[image: {item.get('mimeType', '?')}, {len(item.get('data', ''))} chars b64]")
         elif t == "resource":
             res = item.get("resource") or {}
             parts.append(f"[resource: {res.get('uri', '?')}  {res.get('mimeType', '')}]")

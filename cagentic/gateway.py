@@ -200,9 +200,12 @@ class Gateway:
             permission_resolver=self._resolve,
             stream=True,
         )
-        # Teach this engine (gateway only) to drive the holographic HUD.
-        self.engine.system_suffix = _HUD_INSTRUCTIONS
-        self.engine.refresh_system_prompt()
+        # Teach this engine (gateway only) to drive the holographic HUD. The
+        # user's custom system prompt (if any) is kept separate from the HUD
+        # instructions so the settings UI can edit one without clobbering the
+        # other — both are composed into system_suffix by _rebuild_suffix().
+        self._user_system_prompt = (config.get("system_prompt") or "").strip()
+        self._rebuild_suffix()
         # Wire up phone action callback — will be activated when source=ios
         self._setup_phone_action()
         # Wire up widget action callback — emits SSE widget events
@@ -396,6 +399,19 @@ IMPORTANT: When you use show_widget, do NOT repeat the widget title or type in y
         self.engine.system_suffix = suffix
         self.engine.refresh_system_prompt()
 
+    def _rebuild_suffix(self) -> None:
+        """Recompose system_suffix from the user's custom prompt + the HUD
+        instructions, without the device-context tail (that is re-injected by
+        _inject_device_context at the start of each turn). Keeping the user
+        prompt and the HUD block separate means the settings UI can edit one
+        without destroying the other."""
+        parts: list[str] = []
+        if self._user_system_prompt:
+            parts.append(self._user_system_prompt)
+        parts.append(_HUD_INSTRUCTIONS)
+        self.engine.system_suffix = "\n\n".join(parts)
+        self.engine.refresh_system_prompt()
+
     def _setup_phone_action(self) -> None:
         """Wire up the phone_action callback on the engine's tool executor."""
         gw = self
@@ -451,7 +467,12 @@ IMPORTANT: When you use show_widget, do NOT repeat the widget title or type in y
         # below would time out against its 300s wait.
         self.deliver_permission("no")
         got = self._turn_lock.acquire(timeout=timeout)
-        self.engine._abort_turn = False
+        if got:
+            # We own the lock now, so the turn is finished; clear the flag so
+            # the next turn can run. If we DIDN'T get the lock the turn is
+            # still live — leave the abort flag set so it stops ASAP and
+            # don't pretend we interrupted it.
+            self.engine._abort_turn = False
         return got
 
     def list_chats(self) -> list[dict]:
@@ -508,11 +529,12 @@ IMPORTANT: When you use show_widget, do NOT repeat the widget title or type in y
 
     def new_chat(self) -> dict:
         locked = self._interrupt_turn()
+        if not locked:
+            return {"error": "Cagentic is still working on the previous message."}
         try:
             return self._new_chat_unlocked()
         finally:
-            if locked:
-                self._turn_lock.release()
+            self._turn_lock.release()
 
     def _new_chat_unlocked(self) -> dict:
         self._save_current()
@@ -525,11 +547,12 @@ IMPORTANT: When you use show_widget, do NOT repeat the widget title or type in y
 
     def load_chat(self, chat_id: str) -> dict:
         locked = self._interrupt_turn()
+        if not locked:
+            return {"error": "Cagentic is still working on the previous message."}
         try:
             return self._load_chat_unlocked(chat_id)
         finally:
-            if locked:
-                self._turn_lock.release()
+            self._turn_lock.release()
 
     def _load_chat_unlocked(self, chat_id: str) -> dict:
         self._save_current()
@@ -559,6 +582,8 @@ IMPORTANT: When you use show_widget, do NOT repeat the widget title or type in y
 
     def delete_chat(self, chat_id: str) -> dict:
         locked = self._interrupt_turn()
+        if not locked:
+            return {"error": "Cagentic is still working on the previous message."}
         try:
             sessions.delete(chat_id)
             # Remove from any project
@@ -569,8 +594,7 @@ IMPORTANT: When you use show_widget, do NOT repeat the widget title or type in y
                 self._new_chat_unlocked()
             return {"chats": self.list_chats(), "current": self.current_chat(), "projects": self.list_projects()}
         finally:
-            if locked:
-                self._turn_lock.release()
+            self._turn_lock.release()
 
     def autotitle_chat(self) -> dict:
         """Ask the model itself for a short title for the current chat."""
@@ -692,7 +716,7 @@ IMPORTANT: When you use show_widget, do NOT repeat the widget title or type in y
             "yolo": self.agent.state.yolo,
             "gateway_port": int(gw_cfg.get("port", 8700)),
             "gateway_auto_start": bool(gw_cfg.get("auto_start", True)),
-            "system_prompt": self.engine.system_suffix or "",
+            "system_prompt": self._user_system_prompt or "",
         }
 
     def abort_generation(self) -> None:
@@ -736,9 +760,9 @@ IMPORTANT: When you use show_widget, do NOT repeat the widget title or type in y
         if "gateway_auto_start" in data:
             _config.set_value(cfg, "gateway.auto_start", bool(data["gateway_auto_start"]))
         if "system_prompt" in data:
-            self.engine.system_suffix = str(data["system_prompt"]).strip()
-            self.engine.refresh_system_prompt()
-            cfg["system_prompt"] = self.engine.system_suffix
+            self._user_system_prompt = str(data["system_prompt"]).strip()
+            self._rebuild_suffix()
+            cfg["system_prompt"] = self._user_system_prompt
         try:
             _config.save(cfg)
         except Exception:
@@ -824,6 +848,8 @@ IMPORTANT: When you use show_widget, do NOT repeat the widget title or type in y
     def delete_message(self, index: int) -> dict:
         """Delete the *index*-th user message and everything after it."""
         locked = self._interrupt_turn()
+        if not locked:
+            return {"error": "Cagentic is still working on the previous message."}
         try:
             user_indices = [i for i, m in enumerate(self.engine.messages) if m.get("role") == "user"]
             if index < 0 or index >= len(user_indices):
@@ -834,8 +860,7 @@ IMPORTANT: When you use show_widget, do NOT repeat the widget title or type in y
             self._save_current()
             return self.current_chat()
         finally:
-            if locked:
-                self._turn_lock.release()
+            self._turn_lock.release()
 
     def run_turn(self, message: str, emit, source: str = "pc") -> None:
         if not self._turn_lock.acquire(blocking=False):
@@ -906,9 +931,14 @@ IMPORTANT: When you use show_widget, do NOT repeat the widget title or type in y
             return {"ok": True, "text": "new chat started", "current": cur}
 
         if cmd == "clear":
-            self.engine.messages.clear()
-            self._save_current()
-            return {"ok": True, "text": "chat cleared"}
+            if not self._interrupt_turn():
+                return {"ok": False, "text": "Cagentic is still working on the previous message."}
+            try:
+                self.engine.messages.clear()
+                self._save_current()
+                return {"ok": True, "text": "chat cleared"}
+            finally:
+                self._turn_lock.release()
 
         if cmd == "model":
             if not arg1:
@@ -1064,22 +1094,34 @@ IMPORTANT: When you use show_widget, do NOT repeat the widget title or type in y
             return {"ok": True, "text": f"set {arg1} = {arg2}"}
 
         if cmd == "undo":
-            # Remove last user + assistant messages
-            msgs = self.engine.messages
-            while msgs and msgs[-1].get("role") != "user":
-                msgs.pop()
-            if msgs and msgs[-1].get("role") == "user":
-                msgs.pop()
-            self._save_current()
-            return {"ok": True, "text": "undid last exchange"}
+            # Remove last user + assistant messages. Must hold the turn lock —
+            # a streaming turn appends to this list concurrently.
+            if not self._interrupt_turn():
+                return {"ok": False, "text": "Cagentic is still working on the previous message."}
+            try:
+                msgs = self.engine.messages
+                while msgs and msgs[-1].get("role") != "user":
+                    msgs.pop()
+                if msgs and msgs[-1].get("role") == "user":
+                    msgs.pop()
+                self._save_current()
+                return {"ok": True, "text": "undid last exchange"}
+            finally:
+                self._turn_lock.release()
 
         if cmd == "retry":
-            # Remove last assistant message so the engine re-generates
-            msgs = self.engine.messages
-            while msgs and msgs[-1].get("role") == "assistant":
-                msgs.pop()
-            self._save_current()
-            return {"ok": True, "text": "removed last reply — send a message to retry"}
+            # Remove last assistant message so the engine re-generates. Same
+            # turn-lock requirement as /undo.
+            if not self._interrupt_turn():
+                return {"ok": False, "text": "Cagentic is still working on the previous message."}
+            try:
+                msgs = self.engine.messages
+                while msgs and msgs[-1].get("role") == "assistant":
+                    msgs.pop()
+                self._save_current()
+                return {"ok": True, "text": "removed last reply — send a message to retry"}
+            finally:
+                self._turn_lock.release()
 
         return {"ok": False, "text": f"unknown command: /{cmd}. Type /help for available commands."}
 

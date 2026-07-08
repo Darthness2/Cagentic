@@ -70,8 +70,8 @@ def _load_all() -> list[Reminder]:
     if not p.exists():
         return []
     try:
-        raw = json.loads(p.read_text())
-    except (json.JSONDecodeError, OSError):
+        raw = json.loads(p.read_text(encoding="utf-8"))
+    except (json.JSONDecodeError, OSError, UnicodeDecodeError):
         return []
     out: list[Reminder] = []
     if isinstance(raw, list):
@@ -87,7 +87,9 @@ def _save_all(rems: list[Reminder]) -> None:
     p = _path()
     p.parent.mkdir(parents=True, exist_ok=True)
     tmp = p.with_suffix(".json.tmp")
-    tmp.write_text(json.dumps([r.to_dict() for r in rems], indent=2))
+    tmp.write_text(
+        json.dumps([r.to_dict() for r in rems], indent=2), encoding="utf-8"
+    )
     tmp.replace(p)
     try:
         os.chmod(p, stat.S_IRUSR | stat.S_IWUSR)
@@ -104,6 +106,10 @@ def add(text: str, *, due_at: float | None = None, tags: list[str] | None = None
 
 
 def update(rid: str, **changes) -> Reminder | None:
+    # Guard against an empty id: every id starts with "", so startswith("")
+    # would match the first reminder and silently mutate it.
+    if not rid:
+        return None
     rems = _load_all()
     target = None
     for r in rems:
@@ -121,6 +127,10 @@ def update(rid: str, **changes) -> Reminder | None:
 
 
 def delete(rid: str) -> bool:
+    # Guard against an empty id: every id starts with "", so startswith("")
+    # would match (and delete) every reminder — catastrophic data loss.
+    if not rid:
+        return False
     rems = _load_all()
     n = len(rems)
     rems = [r for r in rems if not (r.id == rid or r.id.startswith(rid))]
@@ -164,7 +174,13 @@ def parse_when(text: str) -> float | None:
         return time.mktime((t.tm_year, t.tm_mon, t.tm_mday, 20, 0, 0, 0, 0, -1))
     # 'in N <unit>'
     import re as _re
-    m = _re.match(r"in\s+(\d+)\s*([smhd])", s) or _re.match(r"in\s+(\d+)\s+(seconds?|minutes?|hours?|days?)", s)
+    # The short-form unit char needs a trailing word boundary so "in 5 months"
+    # doesn't match as 5 minutes (m), "in 5 decades" as 5 days (d), etc.
+    # match() doesn't anchor the end, so without \b the first letter of any
+    # unit word starting with s/m/h/d is accepted.
+    m = _re.match(r"in\s+(\d+)\s*([smhd])\b", s) or _re.match(
+        r"in\s+(\d+)\s+(seconds?|minutes?|hours?|days?)\b", s
+    )
     if m:
         n = int(m.group(1))
         unit = m.group(2)[0]
