@@ -33,11 +33,19 @@ class AppState:
     insecure_ssl: bool = False          # turn off TLS verify (school MITM)
     tools_enabled: bool = True          # native ollama tool calls vs text-protocol
 
+    # Effort dial — how much effort/thoroughness the model applies. One of
+    # "low" | "medium" | "high". Injected into the system prompt; higher means
+    # more exploration before acting and more verification after.
+    effort: str = "medium"
+
     # per-tool permission cache: name -> "always"|"once"|"never"|None
     permissions: dict[str, str] = field(default_factory=dict)
 
     # files we've read/edited this session (relative paths, in order)
     file_history: list[str] = field(default_factory=list)
+
+    # worktree stack — entered worktree dirs we'll pop back to.
+    worktree_stack: list[str] = field(default_factory=list)
 
     # Plan mode: read-only, no mutating tools.
     plan_mode: bool = False
@@ -45,6 +53,9 @@ class AppState:
     # Lightweight per-session todo list (TodoWrite). Separate from persistent
     # reminders (cagentic.reminders) — these are scratch for the current turn.
     todos: list[dict] = field(default_factory=list)
+
+    # In-memory briefs (BriefTool): name -> markdown.
+    briefs: dict[str, str] = field(default_factory=dict)
 
     # Enabled tool groups — controls which tool schemas are sent to the model.
     # None means "use tools.DEFAULT_GROUPS".

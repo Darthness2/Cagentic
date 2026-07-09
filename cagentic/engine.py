@@ -257,6 +257,52 @@ def _load_memory(workspace: Path, home: Path) -> str:
     return "\n\n".join(chunks)
 
 
+# ---------------------------------------------------------------- effort ----
+
+# The effort dial steers how much work the model puts into a turn. Local
+# models have no native "reasoning effort" knob, so we steer it through the
+# system prompt — the one lever that reliably changes a model's thoroughness.
+# Persisted per-gateway via /api/effort; default "medium".
+EFFORT_LEVELS = ("low", "medium", "high")
+
+_EFFORT_GUIDANCE = {
+    "low": (
+        "Optimize for SPEED and minimalism. Do the smallest amount of work "
+        "that satisfies the request:\n"
+        "- Make the most direct change; don't refactor or polish beyond what "
+        "was asked.\n"
+        "- Investigate only as much as you must — a couple of reads, not a "
+        "survey.\n"
+        "- Skip extra verification / test runs unless the user asked for them.\n"
+        "- Keep your final answer to one or two sentences."
+    ),
+    "medium": (
+        "Balance speed and rigor (the default):\n"
+        "- Investigate enough to be confident, then act.\n"
+        "- Verify the change when it's cheap to do so — re-run the failing "
+        "command, or read back the region you edited.\n"
+        "- Keep answers concise but complete."
+    ),
+    "high": (
+        "Optimize for CORRECTNESS and thoroughness. Spend the extra effort:\n"
+        "- Explore the relevant context broadly before acting — understand "
+        "callers, edge cases, and related files, not just the first match.\n"
+        "- Consider failure modes and edge cases; handle errors explicitly.\n"
+        "- After acting, VERIFY: run the relevant command or test and confirm "
+        "it passes, and re-read the changed region to be sure it's correct.\n"
+        "- Prefer a complete, robust fix over a quick patch — but still act, "
+        "then confirm; don't narrate endlessly."
+    ),
+}
+
+
+def _effort_section(effort: str | None) -> str:
+    level = (effort or "medium").lower()
+    if level not in EFFORT_LEVELS:
+        level = "medium"
+    return f"\n\n=== EFFORT LEVEL: {level.upper()} ===\n{_EFFORT_GUIDANCE[level]}\n"
+
+
 def fetch_system_prompt_parts(state: AppState) -> str:
     """Assemble the personal-assistant system prompt."""
     workspace = state.workspace
@@ -370,6 +416,10 @@ Call a tool by emitting ONE call and STOPPING. Any of these works:
 After the call, STOP. The harness emits tool outputs; you must NOT.
 """
 
+    # How hard the model should work this turn (changeable live via the
+    # gateway's /api/effort or the /effort command).
+    base += _effort_section(getattr(state, "effort", "medium"))
+
     # Personal-context memory: CAGENTIC.md / AGENTS.md in workspace + parents,
     # plus any persistent profile / preferences notes the user has stashed.
     memory = _load_memory(workspace, home)
@@ -475,6 +525,7 @@ class StreamingToolExecutor:
         engine: object | None = None,
         background: object | None = None,
         tasks: object | None = None,
+        teams: object | None = None,
     ) -> None:
         self.state = state
         self.resolver = resolver
@@ -482,6 +533,7 @@ class StreamingToolExecutor:
         self.engine = engine
         self.background = background
         self.tasks = tasks
+        self.teams = teams
 
     def execute(self, calls):
         if not calls:
@@ -541,6 +593,7 @@ class StreamingToolExecutor:
             engine=self.engine,
             background=self.background,
             tasks=self.tasks,
+            teams=self.teams,
             read_cache=getattr(self.engine, "_read_cache", None),
         )
 
@@ -591,10 +644,12 @@ class QueryEngine:
         self.permission_resolver: Resolver = permission_resolver or auto_deny_resolver
         self.task_graph = TaskGraph()
         self.background = BackgroundExecutor(tasks=self.task_graph)
+        from .teams import TeamRegistry
+        self.teams = TeamRegistry()
         self.executor = StreamingToolExecutor(
             state, self.permission_resolver,
             engine=self, background=self.background,
-            tasks=self.task_graph,
+            tasks=self.task_graph, teams=self.teams,
         )
         # Optional extra instructions appended to the system prompt (e.g. the
         # gateway teaches the model to drive its HUD). Empty for the REPL.

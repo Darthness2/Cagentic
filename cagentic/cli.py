@@ -57,6 +57,7 @@ Slash commands:
   /gateway [off]         start (or stop) the Cagentic web UI
                          (cagentic --install-service keeps it running 24/7)
   /plan on|off           toggle plan mode (read-only)
+  /effort low|med|high   how hard the model works per turn
   /todo [add|done|clear] session todo list
   /stream on|off         toggle token streaming
   /diag                  print model / workspace / tools / mcp status
@@ -514,6 +515,22 @@ def repl(agent: Agent, cfg: dict, gateway_holder: dict | None = None) -> int:
                 agent.state.update(plan_mode=(want == "on"))
                 agent.engine.refresh_system_prompt()
                 ui.info(f"plan mode: {'ON (read-only)' if agent.state.plan_mode else 'off'}")
+                continue
+            if cmd == "effort":
+                from .engine import EFFORT_LEVELS
+                if not arg1:
+                    ui.info(f"effort: {getattr(agent.state, 'effort', 'medium')}  "
+                            f"(usage: /effort {'|'.join(EFFORT_LEVELS)})")
+                    continue
+                level = arg1.lower()
+                if level not in EFFORT_LEVELS:
+                    ui.warn(f"usage: /effort {'|'.join(EFFORT_LEVELS)}")
+                    continue
+                agent.state.update(effort=level)
+                agent.engine.refresh_system_prompt()
+                cfg["effort"] = level
+                config.save(cfg)
+                ui.info(f"effort: {level}")
                 continue
             if cmd == "todo":
                 todos = list(agent.state.todos or [])
