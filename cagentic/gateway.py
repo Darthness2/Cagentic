@@ -1039,8 +1039,8 @@ IMPORTANT: When you use show_widget, do NOT repeat the widget title or type in y
         """Execute a slash command from the web UI and return a result dict.
 
         Supported commands mirror the CLI: /new, /clear, /model, /models,
-        /diag, /tools, /groups, /yolo, /help, /plan, /stream, /name, /host,
-        /retry, /undo, /save, /notes, /mcp, /config, /set.
+        /diag, /tools, /groups, /yolo, /help, /plan, /effort, /stream,
+        /name, /host, /retry, /undo, /save, /notes, /mcp, /config, /set.
         """
         from .tools import DEFAULT_GROUPS, _all_tools
         from . import config as _cfg
@@ -1060,6 +1060,7 @@ IMPORTANT: When you use show_widget, do NOT repeat the widget title or type in y
                 "/groups [enable|disable <name>] — show/change tool groups\n"
                 "/yolo [on|off] — toggle auto-approve\n"
                 "/plan [on|off] — toggle plan mode\n"
+                "/effort [low|medium|high] — how hard the model works\n"
                 "/stream [on|off] — toggle streaming\n"
                 "/name <name> — set your name\n"
                 "/host <url> — change Ollama host\n"
