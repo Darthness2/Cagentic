@@ -96,6 +96,7 @@ class ToolContext:
     engine: object | None = None
     background: object | None = None
     tasks: object | None = None
+    teams: object | None = None
     read_cache: dict | None = None
     # A tool that produces an image (e.g. browser_screenshot) appends raw
     # base64 PNG data here; the engine attaches it to the tool result
@@ -872,6 +873,26 @@ def t_mcp_read_resource(args: dict, ctx: ToolContext) -> str:
         elif "blob" in c:
             parts.append(f"[binary blob: {len(c['blob'])} chars b64]")
     return _truncate("\n".join(parts) if parts else "(empty resource)")
+
+
+def t_mcp_restart(args: dict, ctx: ToolContext) -> str:
+    """Stop and re-spawn one configured MCP server. Handy after editing its
+    environment or upgrading the server binary."""
+    mgr = _mcp_manager(ctx)
+    if mgr is None:
+        return "ERROR: MCP manager unavailable"
+    name = args.get("name") or args.get("server")
+    if not name:
+        return "ERROR: missing argument 'name'"
+    if not ctx.confirm("restart MCP server", str(name)):
+        return "ERROR: user denied"
+    try:
+        srv = mgr.get(str(name), start=False)
+        srv.stop()
+        srv.start()
+    except Exception as e:
+        return f"ERROR: {e}"
+    return f"OK: restarted MCP server '{name}'"
 
 
 # ============================================================================
@@ -1819,6 +1840,7 @@ TOOLS: dict[str, ToolFn] = {
     "mcp_call": t_mcp_call,
     "mcp_list_resources": t_mcp_list_resources,
     "mcp_read_resource": t_mcp_read_resource,
+    "mcp_restart": t_mcp_restart,
     # browser
     "browser_status": t_browser_status,
     "browser_tabs": t_browser_tabs,
@@ -2039,6 +2061,13 @@ TOOL_SCHEMAS: list[dict[str, Any]] = [
         "parameters": {"type": "object", "properties": {
             "server": {"type": "string"}, "uri": {"type": "string"},
         }, "required": ["server", "uri"]},
+    }},
+    {"type": "function", "function": {
+        "name": "mcp_restart",
+        "description": "Stop and respawn one configured MCP server.",
+        "parameters": {"type": "object", "properties": {
+            "name": {"type": "string"},
+        }, "required": ["name"]},
     }},
 
     # ---------- browser ----------
@@ -2276,8 +2305,9 @@ TOOL_SCHEMAS: list[dict[str, Any]] = [
 
 
 def _all_tools() -> dict[str, ToolFn]:
+    from .coding_tools import CODING_TOOLS
     from .github import GITHUB_TOOLS
-    return {**TOOLS, **GITHUB_TOOLS}
+    return {**TOOLS, **CODING_TOOLS, **GITHUB_TOOLS}
 
 
 # Tool groups — bundle related tools so the user can keep the prompt lean.
@@ -2290,18 +2320,28 @@ TOOL_GROUPS: dict[str, list[str]] = {
     "reminders": ["reminder_add", "reminder_list", "reminder_done",
                   "reminder_delete", "reminder_update"],
     "mcp": ["mcp_list_servers", "mcp_list_tools", "mcp_call",
-            "mcp_list_resources", "mcp_read_resource"],
+            "mcp_list_resources", "mcp_read_resource", "mcp_restart"],
     "browser": ["browser_status", "browser_tabs", "browser_read",
                 "browser_open", "browser_navigate", "browser_click",
                 "browser_fill", "browser_scroll", "browser_screenshot",
                 "browser_click_at", "browser_links", "browser_download",
                 "browser_eval", "browser_close"],
-    "shell": ["run_bash", "bash_async"],
-    "tasks": ["task_get", "task_list", "task_status", "task_wait", "task_output"],
+    "shell": ["run_bash", "bash_async", "powershell"],
+    "tasks": ["task_create", "task_update", "task_get", "task_list", "task_delete",
+              "task_status", "task_wait", "task_stop", "task_output", "brief"],
     "interaction": ["ask_user_question"],
     "planning": ["enter_plan_mode", "exit_plan_mode", "todo_write"],
     "system": ["config_get", "config_set", "sleep", "skill", "tool_search"],
+    # Coding-agent tools absorbed from Collama.
+    "coding": ["check_syntax", "multi_edit", "notebook_edit"],
+    "worktree": ["enter_worktree", "exit_worktree"],
+    "subagent": ["agent_call", "agent_call_async"],
     # off by default
+    "teams": [
+        "team_create", "team_delete", "team_list",
+        "teammate_create", "teammate_delete", "teammate_list",
+        "send_message", "inbox", "coordinator_tick", "coordinator_run",
+    ],
     "github": [
         "gh_whoami", "gh_list_repos", "gh_get_repo", "gh_get_file",
         "gh_list_issues", "gh_create_issue", "gh_list_pulls", "gh_get_pull",
@@ -2314,6 +2354,7 @@ TOOL_GROUPS: dict[str, list[str]] = {
 DEFAULT_GROUPS: set[str] = {
     "files", "web", "notes", "reminders", "mcp", "browser",
     "shell", "tasks", "interaction", "planning", "system",
+    "coding", "worktree", "subagent",
 }
 
 
@@ -2340,10 +2381,11 @@ def all_tool_schemas(
     enabled_groups: set[str] | None = None,
     compact: bool = True,
 ) -> list[dict]:
+    from .coding_tools import CODING_TOOL_SCHEMAS
     from .github import GITHUB_TOOL_SCHEMAS
     groups = DEFAULT_GROUPS if enabled_groups is None else set(enabled_groups)
     allowed = {n for g in groups for n in TOOL_GROUPS.get(g, ())}
-    schemas = TOOL_SCHEMAS + GITHUB_TOOL_SCHEMAS
+    schemas = TOOL_SCHEMAS + CODING_TOOL_SCHEMAS + GITHUB_TOOL_SCHEMAS
     filtered = [s for s in schemas if s.get("function", {}).get("name") in allowed]
     return [_compact_schema(s) for s in filtered] if compact else filtered
 
@@ -2381,6 +2423,8 @@ TOOL_ALIASES: dict[str, str] = {
     "remind":       "reminder_add",
     "add_reminder": "reminder_add",
     "todo_persistent": "reminder_add",
+    # Collama-era name for the server listing.
+    "mcp_servers":  "mcp_list_servers",
 }
 
 

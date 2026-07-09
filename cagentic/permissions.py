@@ -26,6 +26,10 @@ READ_ONLY: set[str] = {
     # tasks / state inspection
     "task_get", "task_list", "task_output", "task_status",
     "config_get", "sleep",
+    # coding inspection (parser-only; never executes the code under test)
+    "check_syntax",
+    # teams inspection
+    "inbox", "team_list", "teammate_list",
     # notes / reminders read paths
     "note_get", "note_list", "note_search",
     "reminder_list",

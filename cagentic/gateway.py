@@ -162,7 +162,22 @@ class Gateway:
         # Per-process secret required on every /api/* request. Bound to
         # localhost only, but this token defends against other local users
         # and (with the Host/Origin checks) against DNS-rebinding / CSRF.
-        self.token = secrets.token_urlsafe(32)
+        # A stable token can be pinned via config gateway.token so paired
+        # devices (the iOS app) survive gateway restarts.
+        gw_cfg = config.get("gateway") or {}
+        pinned = str(gw_cfg.get("token") or "").strip()
+        self.token = pinned or secrets.token_urlsafe(32)
+
+        # Opt-in LAN exposure (config gateway.lan=true): binds all interfaces
+        # so phones/tablets on the network can connect. Every /api/* request
+        # still requires the secret token — set gateway.token and enter it on
+        # the device. Off by default: loopback only.
+        self.lan = bool(gw_cfg.get("lan", False))
+
+        # Restore the persisted effort dial (set live via /api/effort).
+        effort = str(config.get("effort") or "").strip().lower()
+        if effort in ("low", "medium", "high"):
+            agent.state.update(effort=effort)
 
         # Simple in-memory rate limit for the email-verification endpoint:
         # list of monotonic timestamps of recent sends.
@@ -219,12 +234,14 @@ class Gateway:
     def start(self) -> bool:
         if self._server is not None:
             return True
+        # Loopback by default — the gateway exposes the full assistant
+        # (shell, files, browser, MCP). LAN binding is an explicit opt-in
+        # (config gateway.lan=true) and keeps the token requirement.
+        bind = "0.0.0.0" if self.lan else "127.0.0.1"
         try:
-            # Bind to loopback only — the gateway exposes the full assistant
-            # (shell, files, browser, MCP) and must never be reachable off-host.
-            server = ThreadingHTTPServer(("127.0.0.1", self.port), _Handler)
+            server = ThreadingHTTPServer((bind, self.port), _Handler)
         except OSError as e:
-            self.error = f"could not bind 127.0.0.1:{self.port} ({e})"
+            self.error = f"could not bind {bind}:{self.port} ({e})"
             return False
         server.gateway = self            # type: ignore[attr-defined]
         server.daemon_threads = True
@@ -798,15 +815,144 @@ IMPORTANT: When you use show_widget, do NOT repeat the widget title or type in y
         return {"model": model}
 
     def bootstrap(self) -> dict:
+        settings = self.get_settings()
         return {
             "version": __import__("cagentic").__version__,
             "user_name": self.agent.state.user_name,
             "model": self.agent.model,
             "chats": self.list_chats(),
             "current": self.current_chat(),
-            "settings": self.get_settings(),
+            "settings": settings,
             "projects": self.list_projects(),
+            # Collama-compat keys — the iOS coding tab reads these directly.
+            "workspace": str(self.agent.state.workspace),
+            "effort": getattr(self.agent.state, "effort", "medium"),
+            "yolo": self.agent.state.yolo,
+            "models": settings.get("models") or [],
         }
+
+    # -- Collama-compat surface (the iOS coding tab) -------------------------
+
+    def set_workspace(self, path: str) -> dict:
+        from pathlib import Path
+        p = Path(path).expanduser()
+        if not p.exists() or not p.is_dir():
+            return {"error": f"not a directory: {path}"}
+        self.agent.state.update(workspace=p.resolve())
+        try:
+            self.engine.refresh_system_prompt()
+        except Exception:
+            _log.warning("failed to refresh prompt after workspace switch", exc_info=True)
+        return {"ok": True, "workspace": str(p.resolve())}
+
+    def set_effort(self, level: str) -> dict:
+        from .engine import EFFORT_LEVELS
+        level = (level or "").strip().lower()
+        if level not in EFFORT_LEVELS:
+            return {"error": f"effort must be one of {', '.join(EFFORT_LEVELS)}"}
+        self.agent.state.update(effort=level)
+        try:
+            self.engine.refresh_system_prompt()
+        except Exception:
+            _log.warning("failed to refresh prompt after effort switch", exc_info=True)
+        self.config["effort"] = level
+        try:
+            _config.save(self.config)
+        except Exception:
+            _log.warning("failed to save config after effort switch", exc_info=True)
+        return {"ok": True, "effort": level}
+
+    def list_sessions_compat(self) -> dict:
+        """Chats reshaped the way the iOS coding tab expects."""
+        return {"sessions": [
+            {
+                "id": c["id"],
+                "title": c["title"],
+                "createdAt": int(c.get("updated_at") or 0),
+                "messages": int(c.get("turns") or 0),
+            }
+            for c in self.list_chats()
+        ]}
+
+    # GitHub proxy — lets the phone browse/edit GitHub with the PC's token.
+    def _github_ctx(self):
+        """Duck-typed ToolContext for cagentic.github._request: needs
+        .github_token and .insecure_ssl. Falls back to config github.token."""
+        import types
+        state = self.agent.state
+        token = state.github_token or ((self.config.get("github") or {}).get("token"))
+        return types.SimpleNamespace(
+            github_token=token,
+            insecure_ssl=bool(getattr(state, "insecure_ssl", False)),
+        )
+
+    def github_user(self) -> dict:
+        from .github import _request
+        status, body = _request("GET", "/user", self._github_ctx())
+        if status != 200 or not isinstance(body, dict):
+            return {"error": f"github user lookup failed (HTTP {status})"}
+        return {"user": {
+            "login": body.get("login") or "",
+            "name": body.get("name"),
+            "avatar": body.get("avatar_url"),
+        }}
+
+    def github_repos(self) -> dict:
+        from .github import _request
+        status, body = _request(
+            "GET", "/user/repos", self._github_ctx(),
+            params={"sort": "updated", "per_page": 100, "type": "all"},
+        )
+        if status != 200 or not isinstance(body, list):
+            return {"error": f"github repo listing failed (HTTP {status})"}
+        return {"repos": [
+            {
+                "name": r.get("full_name") or "",
+                "private": bool(r.get("private")),
+                "language": r.get("language"),
+                "url": r.get("html_url"),
+            }
+            for r in body if isinstance(r, dict)
+        ]}
+
+    def github_file_get(self, repo: str, path: str, ref: str | None = None) -> dict:
+        import base64
+        from urllib.parse import quote
+        from .github import _request
+        if not repo or not path:
+            return {"error": "repo and path are required"}
+        url_path = f"/repos/{repo}/contents/{quote(path)}"
+        params = {"ref": ref} if ref else None
+        status, body = _request("GET", url_path, self._github_ctx(), params=params)
+        if status != 200 or not isinstance(body, dict):
+            return {"error": f"github file read failed (HTTP {status})"}
+        try:
+            content = base64.b64decode(body.get("content") or "").decode("utf-8", errors="replace")
+        except Exception:
+            content = ""
+        return {"content": content, "sha": body.get("sha") or ""}
+
+    def github_file_put(self, data: dict) -> dict:
+        import base64
+        from urllib.parse import quote
+        from .github import _request
+        repo = str(data.get("repo") or "")
+        path = str(data.get("path") or "")
+        if not repo or not path:
+            return {"error": "repo and path are required"}
+        payload = {
+            "message": str(data.get("message") or f"Update {path}"),
+            "content": base64.b64encode(str(data.get("content") or "").encode("utf-8")).decode("ascii"),
+        }
+        if data.get("sha"):
+            payload["sha"] = str(data["sha"])
+        if data.get("branch"):
+            payload["branch"] = str(data["branch"])
+        url_path = f"/repos/{repo}/contents/{quote(path)}"
+        status, body = _request("PUT", url_path, self._github_ctx(), json=payload)
+        if status not in (200, 201):
+            return {"error": f"github file write failed (HTTP {status})"}
+        return {"ok": True}
 
     # -- a chat turn --------------------------------------------------------
 
@@ -893,8 +1039,8 @@ IMPORTANT: When you use show_widget, do NOT repeat the widget title or type in y
         """Execute a slash command from the web UI and return a result dict.
 
         Supported commands mirror the CLI: /new, /clear, /model, /models,
-        /diag, /tools, /groups, /yolo, /help, /plan, /stream, /name, /host,
-        /retry, /undo, /save, /notes, /mcp, /config, /set.
+        /diag, /tools, /groups, /yolo, /help, /plan, /effort, /stream,
+        /name, /host, /retry, /undo, /save, /notes, /mcp, /config, /set.
         """
         from .tools import DEFAULT_GROUPS, _all_tools
         from . import config as _cfg
@@ -914,6 +1060,7 @@ IMPORTANT: When you use show_widget, do NOT repeat the widget title or type in y
                 "/groups [enable|disable <name>] — show/change tool groups\n"
                 "/yolo [on|off] — toggle auto-approve\n"
                 "/plan [on|off] — toggle plan mode\n"
+                "/effort [low|medium|high] — how hard the model works\n"
                 "/stream [on|off] — toggle streaming\n"
                 "/name <name> — set your name\n"
                 "/host <url> — change Ollama host\n"
@@ -1024,6 +1171,15 @@ IMPORTANT: When you use show_widget, do NOT repeat the widget title or type in y
             cfg["yolo"] = agent.state.yolo
             _cfg.save(cfg)
             return {"ok": True, "text": f"yolo mode: {'ON (auto-approve)' if agent.state.yolo else 'OFF (ask every time)'}"}
+
+        if cmd == "effort":
+            from .engine import EFFORT_LEVELS
+            if not arg1:
+                return {"ok": True, "text": f"effort: {getattr(agent.state, 'effort', 'medium')}"}
+            res = self.set_effort(arg1)
+            if res.get("error"):
+                return {"ok": False, "text": res["error"]}
+            return {"ok": True, "text": f"effort: {res['effort']}"}
 
         if cmd == "plan":
             want = arg1.lower() if arg1 else ("off" if agent.state.plan_mode else "on")
@@ -1192,7 +1348,10 @@ class _Handler(BaseHTTPRequestHandler):
     def _authorized(self) -> bool:
         """Gate every /api/* request against DNS-rebinding, cross-origin
         (CSRF), and the per-process secret token. Returns True if allowed."""
-        if not self._host_is_local():
+        # In LAN mode (explicit opt-in) the Host header is the PC's LAN
+        # address, so the loopback-Host check can't apply — the secret token
+        # below is the gate. Loopback mode keeps the anti-rebinding check.
+        if not self._gw().lan and not self._host_is_local():
             _log.warning("rejected request with non-local Host header")
             return False
         if not self._origin_ok():
@@ -1200,8 +1359,10 @@ class _Handler(BaseHTTPRequestHandler):
             return False
         expected = self._gw().token
         # fetch() calls send the token via header; the SSE/EventSource stream
-        # (which can't set headers) sends it via ?token= query param.
-        supplied = self.headers.get("X-Cagentic-Token")
+        # (which can't set headers) sends it via ?token= query param. The iOS
+        # app sends its stored gateway token as X-Cagentic-Link — accept it
+        # as an alias so one saved credential works for the whole app.
+        supplied = self.headers.get("X-Cagentic-Token") or self.headers.get("X-Cagentic-Link")
         if not supplied:
             qs = parse_qs(urlparse(self.path).query)
             vals = qs.get("token")
@@ -1268,6 +1429,20 @@ class _Handler(BaseHTTPRequestHandler):
             self._json(self._gw().get_settings())
         elif path == "/api/projects":
             self._json(self._gw().list_projects())
+        elif path == "/api/sessions":
+            # Collama-compat: the iOS coding tab's session list.
+            self._json(self._gw().list_sessions_compat())
+        elif path == "/api/github/user":
+            self._json(self._gw().github_user())
+        elif path == "/api/github/repos":
+            self._json(self._gw().github_repos())
+        elif path == "/api/github/file":
+            qs = parse_qs(urlparse(self.path).query)
+            self._json(self._gw().github_file_get(
+                (qs.get("repo") or [""])[0],
+                (qs.get("path") or [""])[0],
+                (qs.get("ref") or [None])[0],
+            ))
         else:
             self._send(b"not found", "text/plain", status=404)
 
@@ -1287,7 +1462,10 @@ class _Handler(BaseHTTPRequestHandler):
         if path == "/api/chat":
             b = self._body()
             source = str(b.get("source", "pc"))
-            self._stream_chat(str(b.get("message", "")).strip(), source=source)
+            # "message" is the web UI's key; "prompt" is what the iOS coding
+            # tab sends (Collama-compat). Accept either.
+            message = str(b.get("message") or b.get("prompt") or "").strip()
+            self._stream_chat(message, source=source)
             return
         if path == "/api/chat/edit":
             b = self._body()
@@ -1314,6 +1492,34 @@ class _Handler(BaseHTTPRequestHandler):
             result = b.get("result", {})
             gw.deliver_phone_result(action_id, result)
             self._json({"ok": True})
+            return
+        # Collama-compat session routes (the iOS coding tab) — same chats,
+        # different paths and response shapes.
+        if path == "/api/session/new":
+            gw.new_chat()
+            self._json({"ok": True, "id": gw.session["id"]})
+            return
+        if path == "/api/session/load":
+            b = self._body()
+            self._json(gw.load_chat(str(b.get("id", ""))))
+            return
+        if path == "/api/session/delete":
+            b = self._body()
+            gw.delete_chat(str(b.get("id", "")))
+            self._json({"ok": True})
+            return
+        if path == "/api/workspace":
+            b = self._body()
+            res = gw.set_workspace(str(b.get("path", "")))
+            self._json(res, status=200 if res.get("ok") else 400)
+            return
+        if path == "/api/effort":
+            b = self._body()
+            res = gw.set_effort(str(b.get("effort", "")))
+            self._json(res, status=200 if res.get("ok") else 400)
+            return
+        if path == "/api/github/file":
+            self._json(gw.github_file_put(self._body()))
             return
         if path == "/api/chats/new":
             self._json({"current": gw.new_chat(), "chats": gw.list_chats()})

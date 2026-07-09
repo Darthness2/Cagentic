@@ -18,6 +18,7 @@ SLASH_COMMANDS: list[tuple[str, str]] = [
     ("/browser", "Chrome extension status + setup instructions"),
     ("/gateway", "start/stop the Cagentic web UI"),
     ("/plan", "toggle plan mode (read-only)"),
+    ("/effort", "how hard the model works: /effort low|medium|high"),
     ("/todo", "view or modify the session todo list"),
     ("/stream", "toggle token streaming on/off"),
     ("/diag", "print model / workspace / tools / mcp status"),

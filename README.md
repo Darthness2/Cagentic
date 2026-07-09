@@ -17,7 +17,10 @@ Cagentic **remembers things about you** across sessions, keeps a persistent remi
 - **Conversations persist** — sessions auto-save to `~/.config/cagentic/sessions/`. `/resume` to come back to one.
 - **Background jobs** — slow shell commands run in the background; their output gets injected back into the conversation when they finish.
 - **GitHub integration** (optional) — list repos, read files, browse issues/PRs with a personal access token.
+- **Full coding agent** (absorbed from Collama) — atomic `multi_edit` batches, parser-only `check_syntax` for 12+ languages, Jupyter `notebook_edit`, a worktree stack for sub-projects, PowerShell support, sub-agents (`agent_call` / `agent_call_async`), a persistent cross-session task graph, and an `/effort low|medium|high` dial for how hard the model works.
+- **Agent teams** (optional, `/groups enable teams`) — long-lived teammate personas with mailboxes; a coordinator processes each teammate's mail by forking sub-agents and can auto-claim matching tasks from the task graph.
 - **Multi-provider** — use Ollama locally, or connect OpenAI and Anthropic for cloud models when you need more power.
+- **iOS companion** — the Cagentic iOS app's chat *and* coding tabs both connect to the same `/gateway`. To reach it from your phone, set `"gateway": {"lan": true, "token": "<secret>"}` in `~/.config/cagentic/config.json` (LAN exposure is off by default; the token is required on every request).
 
 ## Requirements
 
@@ -183,8 +186,9 @@ Cagentic launches each server as a subprocess on first use and keeps a long-live
 | | |
 |---|---|
 | `/tools` | list every tool the model can call |
-| `/groups` | manage which tool groups are sent (default: files, web, notes, reminders, mcp, shell, tasks, interaction, planning, system) |
+| `/groups` | manage which tool groups are sent (default: files, web, notes, reminders, mcp, browser, shell, tasks, interaction, planning, system, coding, worktree, subagent; opt-in: teams, github) |
 | `/plan on\|off` | read-only mode |
+| `/effort low\|medium\|high` | how hard the model works per turn |
 | `/todo` | per-session todo list |
 | `/yolo` | toggle auto-approve for tool calls |
 
