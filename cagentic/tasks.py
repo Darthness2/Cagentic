@@ -5,9 +5,11 @@ task_create / task_update / task_get / task_list / task_delete tools to
 maintain a persistent record of what it's working on. Each task can carry
 an optional `worktree` (directory) for sub-projects.
 """
+
 from __future__ import annotations
 
 import json
+import re
 import secrets
 import time
 from dataclasses import asdict, dataclass, field
@@ -18,12 +20,12 @@ from .config import config_dir
 
 
 class TaskKind(str, Enum):
-    BASH    = "b"
-    TOOL    = "t"
-    AGENT   = "a"   # local_agent / sub-agent
-    REMOTE  = "r"
-    DREAM   = "d"   # background reflection
-    FLOW    = "f"
+    BASH = "b"
+    TOOL = "t"
+    AGENT = "a"  # local_agent / sub-agent
+    REMOTE = "r"
+    DREAM = "d"  # background reflection
+    FLOW = "f"
 
 
 VALID_STATUS = {"pending", "active", "done", "blocked", "failed", "cancelled"}
@@ -66,6 +68,10 @@ class TaskGraph:
         self.root.mkdir(parents=True, exist_ok=True)
 
     def _path(self, task_id: str) -> Path:
+        if not isinstance(task_id, str) or not re.fullmatch(
+            r"[A-Za-z0-9_-]{1,64}", task_id
+        ):
+            raise ValueError("invalid task id")
         return self.root / f"{task_id}.json"
 
     def create(
@@ -91,7 +97,10 @@ class TaskGraph:
         return task
 
     def get(self, task_id: str) -> Task | None:
-        p = self._path(task_id)
+        try:
+            p = self._path(task_id)
+        except ValueError:
+            return None
         if not p.exists():
             # Allow id prefixes ("t12ab..." → "t12ab*").
             for q in self.root.glob(f"{task_id}*.json"):
@@ -117,7 +126,9 @@ class TaskGraph:
         self._write(task)
         return task
 
-    def list(self, *, status: str | None = None, parent_id: str | None = None) -> list[Task]:
+    def list(
+        self, *, status: str | None = None, parent_id: str | None = None
+    ) -> list[Task]:
         out: list[Task] = []
         for p in sorted(self.root.glob("*.json")):
             try:

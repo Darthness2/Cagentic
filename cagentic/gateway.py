@@ -9,6 +9,7 @@ turn token-by-token. HUD panels appear as draggable floating windows.
 Tools that need approval surface an Approve / Deny prompt right in the
 page. Bound to localhost only.
 """
+
 from __future__ import annotations
 
 import json
@@ -24,7 +25,12 @@ from . import config as _config
 from . import sessions
 from . import projects
 from .workspaces import WorkspaceError, WorkspacePolicy
-from .providers import build_client as _build_client, parse_model as _parse_model, list_all_models as _all_models
+from .services.compact import SUMMARY_MARKER, approx_tokens, auto_compact
+from .providers import (
+    build_client as _build_client,
+    parse_model as _parse_model,
+    list_all_models as _all_models,
+)
 
 _log = logging.getLogger(__name__)
 
@@ -48,7 +54,9 @@ def _clean(text: str) -> str:
     return text.strip()
 
 
-def _tool_details(tool_calls: list[dict], messages: list[dict], start: int) -> list[dict]:
+def _tool_details(
+    tool_calls: list[dict], messages: list[dict], start: int
+) -> list[dict]:
     """Pair an assistant message's stored tool_calls with the result
     messages recorded right after it, in call order.
 
@@ -60,14 +68,14 @@ def _tool_details(tool_calls: list[dict], messages: list[dict], start: int) -> l
     from .engine import _summarize_args
 
     results: list[tuple[str, str]] = []  # (tool name, result text)
-    for m in messages[start:start + len(tool_calls) * 2]:
+    for m in messages[start : start + len(tool_calls) * 2]:
         role = m.get("role")
         content = m.get("content") or ""
         if role == "tool":
             results.append((m.get("name", "?"), content))
         elif role == "user" and content.startswith("Tool result for "):
             header, _, rest = content.partition("\n")
-            results.append((header[len("Tool result for "):].rstrip(":"), rest))
+            results.append((header[len("Tool result for ") :].rstrip(":"), rest))
         elif role == "system":
             continue  # loop-steering notes interleave with results
         else:
@@ -91,12 +99,14 @@ def _tool_details(tool_calls: list[dict], messages: list[dict], start: int) -> l
                 first_line = result.splitlines()[0][:120] if result else ""
                 results.pop(j)
                 break
-        details.append({
-            "name": name,
-            "summary": _summarize_args(name, args),
-            "ok": ok,
-            "first_line": first_line,
-        })
+        details.append(
+            {
+                "name": name,
+                "summary": _summarize_args(name, args),
+                "ok": ok,
+                "first_line": first_line,
+            }
+        )
     return details
 
 
@@ -159,6 +169,17 @@ class Gateway:
         self._server: ThreadingHTTPServer | None = None
         self._thread: threading.Thread | None = None
         self.error: str | None = None
+        configured_model = str(config.get("model") or "").strip()
+        _, configured_name = _parse_model(configured_model)
+        self._model_spec = (
+            agent.state.active_model_spec
+            or (
+                configured_model
+                if configured_model and configured_name == agent.model
+                else None
+            )
+            or agent.model
+        )
 
         # Per-process secret required on every /api/* request. Bound to
         # localhost only, but this token defends against other local users
@@ -183,19 +204,24 @@ class Gateway:
         # Simple in-memory rate limit for the email-verification endpoint:
         # list of monotonic timestamps of recent sends.
         self._email_send_times: list[float] = []
+        self._email_send_lock = threading.Lock()
 
         self._turn_lock = threading.Lock()
         self._active_emit = None
         self._active_source: str = "pc"  # "ios" or "pc" — who initiated this turn
         self._default_workspace = agent.state.workspace.resolve()
-        self.workspace_policy = WorkspacePolicy.from_config(config, self._default_workspace)
+        self.workspace_policy = WorkspacePolicy.from_config(
+            config, self._default_workspace
+        )
 
         # Permission prompt bridge. Each prompt gets a unique id; the client
         # must echo that id back when answering, so a stale/duplicate answer
         # can't resolve a different prompt (avoids the old set-before-clear
         # race on a single process-global answer).
         self._perm_cv = threading.Condition()
-        self._perm_id: str | None = None      # id of the prompt currently awaiting an answer
+        self._perm_id: str | None = (
+            None  # id of the prompt currently awaiting an answer
+        )
         self._perm_answers: dict[str, str] = {}  # prompt_id -> answer
 
         # Computer control approval bridge (iOS client approves/denies PC actions)
@@ -209,6 +235,7 @@ class Gateway:
         # The gateway's own engine — a separate conversation, but the SAME
         # shared state (notes, reminders, browser bridge, MCP, workspace).
         from .engine import QueryEngine
+
         self.engine = QueryEngine(
             client=agent.client,
             state=agent.state,
@@ -229,7 +256,7 @@ class Gateway:
         # Wire up widget action callback — emits SSE widget events
         self._setup_widget_action()
         # The current chat is a session record (shared store with the REPL).
-        self.session = sessions.make(agent.model)
+        self.session = sessions.make(self._model_spec)
         self.engine.session_id = self.session["id"]
 
     # -- lifecycle ----------------------------------------------------------
@@ -246,7 +273,7 @@ class Gateway:
         except OSError as e:
             self.error = f"could not bind {bind}:{self.port} ({e})"
             return False
-        server.gateway = self            # type: ignore[attr-defined]
+        server.gateway = self  # type: ignore[attr-defined]
         server.daemon_threads = True
         self._server = server
         self._thread = threading.Thread(target=server.serve_forever, daemon=True)
@@ -277,11 +304,15 @@ class Gateway:
             return "no"
         import uuid
         from .engine import _summarize_args
+
         prompt_id = str(uuid.uuid4())
         with self._perm_cv:
             self._perm_answers.pop(prompt_id, None)
             self._perm_id = prompt_id
-        emit("permission", {"id": prompt_id, "tool": name, "summary": _summarize_args(name, args)})
+        emit(
+            "permission",
+            {"id": prompt_id, "tool": name, "summary": _summarize_args(name, args)},
+        )
         try:
             with self._perm_cv:
                 deadline = time.monotonic() + 300
@@ -322,7 +353,9 @@ class Gateway:
             self._comp_approvals[action_id] = approved
             self._comp_cv.notify_all()
 
-    def wait_computer_approval(self, action_id: str, emit, event_type: str, data: dict, timeout: float = 300) -> bool:
+    def wait_computer_approval(
+        self, action_id: str, emit, event_type: str, data: dict, timeout: float = 300
+    ) -> bool:
         """Emit a computer control SSE event and wait for the iOS client to approve.
         Returns True if approved, False if denied or timed out."""
         with self._comp_cv:
@@ -345,7 +378,21 @@ class Gateway:
             self._phone_results[action_id] = result
             self._phone_cv.notify_all()
 
-    def wait_phone_result(self, action_id: str, emit, event_type: str, data: dict, timeout: float = 120) -> dict | None:
+    def allow_email_verification(self) -> bool:
+        """Allow at most five verification emails per rolling ten minutes."""
+        now = time.monotonic()
+        with self._email_send_lock:
+            self._email_send_times = [
+                t for t in self._email_send_times if now - t < 600
+            ]
+            if len(self._email_send_times) >= 5:
+                return False
+            self._email_send_times.append(now)
+            return True
+
+    def wait_phone_result(
+        self, action_id: str, emit, event_type: str, data: dict, timeout: float = 120
+    ) -> dict | None:
         """Emit a phone action SSE event and wait for the iOS client to execute it.
         Returns the result dict, or None on timeout."""
         with self._phone_cv:
@@ -394,14 +441,16 @@ IMPORTANT: When you use show_widget, do NOT repeat the widget title or type in y
 """
 
     _DEVICE_PROMPT_PC = ""
+
     def _inject_device_context(self, source: str) -> None:
         """Update the system prompt and tool groups based on who initiated the turn."""
         from .tools import DEFAULT_GROUPS
+
         suffix = self.engine.system_suffix or ""
         marker = "\n\n=== DEVICE CONTEXT ==="
         # Remove any previous device context injection
         if marker in suffix:
-            suffix = suffix[:suffix.index(marker)]
+            suffix = suffix[: suffix.index(marker)]
         if source == "ios":
             suffix += self._DEVICE_PROMPT_IOS
             # Enable phone tool group for iOS-originated turns
@@ -439,6 +488,7 @@ IMPORTANT: When you use show_widget, do NOT repeat the widget title or type in y
         def phone_action(action_type: str, payload: dict) -> dict | None:
             """Callback for phone control tools. Emits SSE event and waits for result."""
             import uuid
+
             action_id = str(uuid.uuid4())
             emit = gw._active_emit
             if emit is None:
@@ -466,10 +516,15 @@ IMPORTANT: When you use show_widget, do NOT repeat the widget title or type in y
     # -- chats --------------------------------------------------------------
 
     def _save_current(self) -> None:
-        msgs = [m for m in self.engine.messages if m.get("role") != "system"]
+        msgs = [
+            m
+            for m in self.engine.messages
+            if m.get("role") != "system"
+            or SUMMARY_MARKER in str(m.get("content") or "")
+        ]
         if not msgs:
             return  # don't persist empty chats
-        self.session["model"] = self.agent.model
+        self.session["model"] = self._model_spec
         self.session["messages"] = msgs
         sessions.save(self.session)
 
@@ -499,14 +554,18 @@ IMPORTANT: When you use show_widget, do NOT repeat the widget title or type in y
         self._save_current()
         out = []
         for s in sessions.list_all():
-            out.append({
-                "id": s["id"],
-                "title": s["title"] if s["title"] not in (None, "", "untitled") else "New chat",
-                "updated_at": s["updated_at"],
-                "turns": s["turns"],
-                "project_id": s.get("project_id", ""),
-                "project": s.get("project"),
-            })
+            out.append(
+                {
+                    "id": s["id"],
+                    "title": s["title"]
+                    if s["title"] not in (None, "", "untitled")
+                    else "New chat",
+                    "updated_at": s["updated_at"],
+                    "turns": s["turns"],
+                    "project_id": s.get("project_id", ""),
+                    "project": s.get("project"),
+                }
+            )
         return out
 
     def render_messages(self, messages: list[dict]) -> list[dict]:
@@ -518,17 +577,22 @@ IMPORTANT: When you use show_widget, do NOT repeat the widget title or type in y
                 continue
             content = (m.get("content") or "").strip()
             if role == "user":
-                if content.startswith((
-                    "Tool result for ", "[background] ", "STOP. ", "You called ",
-                )):
+                if content.startswith(
+                    (
+                        "Tool result for ",
+                        "[background] ",
+                        "STOP. ",
+                        "You called ",
+                        "[older context, compacted]",
+                    )
+                ):
                     continue
                 if content:
                     out.append({"role": "user", "content": content})
             elif role == "assistant":
                 tool_calls = m.get("tool_calls") or []
                 tools = [
-                    (tc.get("function") or {}).get("name", "?")
-                    for tc in tool_calls
+                    (tc.get("function") or {}).get("name", "?") for tc in tool_calls
                 ]
                 cleaned = _clean(content)
                 if cleaned or tools:
@@ -544,7 +608,7 @@ IMPORTANT: When you use show_widget, do NOT repeat the widget title or type in y
         current = {
             "id": self.session["id"],
             "title": self.session.get("title") or "New chat",
-            "model": self.agent.model,
+            "model": self._model_spec,
             "messages": self.render_messages(self.engine.messages),
         }
         if self.session.get("project") is not None:
@@ -562,7 +626,9 @@ IMPORTANT: When you use show_widget, do NOT repeat the widget title or type in y
 
     def _new_chat_unlocked(self, project: dict | None = None) -> dict:
         self._save_current()
-        self.session = sessions.make(self.agent.model, project=project)
+        if project is not None:
+            project = self.validate_project(project)
+        self.session = sessions.make(self._model_spec, project=project)
         self.engine.project_system_prompt = ""
         self.engine.project_context = ""
         self.engine.reset()
@@ -581,7 +647,9 @@ IMPORTANT: When you use show_widget, do NOT repeat the widget title or type in y
         if kind == "repository":
             value = str(value or "").strip()
             if not re.fullmatch(r"[A-Za-z0-9_.-]+/[A-Za-z0-9_.-]+", value):
-                raise WorkspaceError("repository project value must be owner/repository")
+                raise WorkspaceError(
+                    "repository project value must be owner/repository"
+                )
             return {"kind": kind, "value": value}
         raise WorkspaceError("project kind must be repository or gatewayFolder")
 
@@ -593,14 +661,21 @@ IMPORTANT: When you use show_widget, do NOT repeat the widget title or type in y
             raise WorkspaceError("session project is immutable", 409)
         if existing is None:
             self.session["project"] = requested
+            try:
+                self._activate_session_project()
+            except Exception:
+                self.session["project"] = None
+                raise
             sessions.save(self.session)
-        self._activate_session_project()
+        else:
+            self._activate_session_project()
         return requested
 
     def _activate_session_project(self) -> None:
         project = self.session.get("project")
         workspace = self._default_workspace
         repository = None
+        boundary = None
         context_parts = []
         pid = self.session.get("project_id")
         if pid:
@@ -609,11 +684,21 @@ IMPORTANT: When you use show_widget, do NOT repeat the widget title or type in y
                 context_parts.append(local_project["context"])
         if project and project.get("kind") == "gatewayFolder":
             workspace = self.workspace_policy.validate(project.get("value"))
-            context_parts.append(f"Pinned gateway folder project: {workspace}. Use it as the working directory.")
+            boundary = workspace
+            context_parts.append(
+                f"Pinned gateway folder project: {workspace}. Use it as the working directory."
+            )
         elif project and project.get("kind") == "repository":
             repository = project.get("value")
-            context_parts.append(f"Pinned GitHub repository project: {repository}. Use it as the default repository for GitHub operations.")
-        self.agent.state.update(workspace=workspace, default_repository=repository)
+            context_parts.append(
+                f"Pinned GitHub repository project: {repository}. Use it as the default repository for GitHub operations."
+            )
+        self.agent.state.update(
+            workspace=workspace,
+            default_repository=repository,
+            workspace_boundary=boundary,
+            worktree_stack=[],
+        )
         self.engine.project_context = "\n\n".join(context_parts)
         self.engine.refresh_system_prompt()
 
@@ -631,9 +716,15 @@ IMPORTANT: When you use show_widget, do NOT repeat the widget title or type in y
         data = sessions.load(chat_id)
         if not data:
             return {"error": f"chat {chat_id} not found"}
+        if data.get("project") is not None:
+            try:
+                data["project"] = self.validate_project(data["project"])
+            except WorkspaceError as exc:
+                return {"error": f"cannot load chat project: {exc}"}
+        model_error = self._activate_model(data.get("model") or self._model_spec)
+        if model_error:
+            return {"error": f"cannot load chat model: {model_error}"}
         self.session = data
-        self.agent.model = data.get("model") or self.agent.model
-        self.engine.model = self.agent.model
         self.engine.load_messages(data.get("messages", []))
         self.engine.session_id = self.session["id"]
         # Apply project config if chat belongs to a project
@@ -664,33 +755,44 @@ IMPORTANT: When you use show_widget, do NOT repeat the widget title or type in y
                     projects.remove_chat(proj["id"], chat_id)
             if chat_id == self.session.get("id"):
                 self._new_chat_unlocked()
-            return {"chats": self.list_chats(), "current": self.current_chat(), "projects": self.list_projects()}
+            return {
+                "chats": self.list_chats(),
+                "current": self.current_chat(),
+                "projects": self.list_projects(),
+            }
         finally:
             self._turn_lock.release()
 
     def autotitle_chat(self) -> dict:
         """Ask the model itself for a short title for the current chat."""
-        msgs = [m for m in self.engine.messages
-                if m.get("role") in ("user", "assistant") and (m.get("content") or "").strip()]
+        msgs = [
+            m
+            for m in self.engine.messages
+            if m.get("role") in ("user", "assistant")
+            and (m.get("content") or "").strip()
+        ]
         if not msgs:
             return {"title": self.session.get("title") or "New chat"}
 
         convo = "\n".join(
             f"{m['role']}: {_clean(m.get('content') or '')[:300]}" for m in msgs[:4]
         )
-        ask = [{
-            "role": "user",
-            "content": (
-                "Give this conversation a short title: 3-6 plain words, no "
-                "quotes, no trailing punctuation. Reply with the title only.\n\n"
-                + convo
-            ),
-        }]
+        ask = [
+            {
+                "role": "user",
+                "content": (
+                    "Give this conversation a short title: 3-6 plain words, no "
+                    "quotes, no trailing punctuation. Reply with the title only.\n\n"
+                    + convo
+                ),
+            }
+        ]
         title = ""
         try:
-            reply = self.agent.client.chat(self.agent.model, ask,
-                                           options={"temperature": 0.2})
-            lines = _clean(reply.get("content") or "").strip().strip('"\'').splitlines()
+            reply = self.agent.client.chat(
+                self.agent.model, ask, options={"temperature": 0.2}
+            )
+            lines = _clean(reply.get("content") or "").strip().strip("\"'").splitlines()
             title = lines[0].strip()[:60] if lines else ""
         except Exception:
             _log.warning("autotitle: model call failed, falling back", exc_info=True)
@@ -744,7 +846,11 @@ IMPORTANT: When you use show_widget, do NOT repeat the widget title or type in y
                 self.engine.project_system_prompt = proj.get("system_prompt", "")
                 self.engine.project_context = proj.get("context", "")
             self.engine.refresh_system_prompt()
-        return {"project": proj, "projects": self.list_projects(), "chats": self.list_chats()}
+        return {
+            "project": proj,
+            "projects": self.list_projects(),
+            "chats": self.list_chats(),
+        }
 
     def remove_chat_from_project(self, project_id: str, chat_id: str) -> dict:
         proj = projects.remove_chat(project_id, chat_id)
@@ -757,9 +863,15 @@ IMPORTANT: When you use show_widget, do NOT repeat the widget title or type in y
             self.engine.project_system_prompt = ""
             self.engine.project_context = ""
             self.engine.refresh_system_prompt()
-        return {"project": proj, "projects": self.list_projects(), "chats": self.list_chats()}
+        return {
+            "project": proj,
+            "projects": self.list_projects(),
+            "chats": self.list_chats(),
+        }
 
-    def update_project_config(self, project_id: str, system_prompt: str, context: str) -> dict:
+    def update_project_config(
+        self, project_id: str, system_prompt: str, context: str
+    ) -> dict:
         proj = projects.update_config(project_id, system_prompt, context)
         # If the current chat belongs to this project, refresh the system prompt
         if self.session.get("project_id") == project_id:
@@ -777,7 +889,7 @@ IMPORTANT: When you use show_widget, do NOT repeat the widget title or type in y
         for provider, mlist in all_provider_models.items():
             models.extend(mlist)
         # Current model shown with provider prefix if cloud.
-        current = self.agent.model
+        current = self._model_spec
         gw_cfg = self.config.get("gateway") or {}
         return {
             "model": current,
@@ -801,9 +913,10 @@ IMPORTANT: When you use show_widget, do NOT repeat the widget title or type in y
     def update_settings(self, data: dict) -> dict:
         cfg = self.config
         if data.get("model"):
-            self.agent.model = data["model"]
-            self.engine.model = data["model"]
-            cfg["model"] = data["model"]
+            error = self._activate_model(str(data["model"]))
+            if error:
+                return {**self.get_settings(), "error": error}
+            cfg["model"] = self._model_spec
         if "temperature" in data:
             try:
                 t = max(0.0, min(2.0, float(data["temperature"])))
@@ -828,9 +941,13 @@ IMPORTANT: When you use show_widget, do NOT repeat the widget title or type in y
                 if 1 <= port <= 65535:
                     _config.set_value(cfg, "gateway.port", port)
             except (TypeError, ValueError):
-                _log.warning("ignoring invalid gateway_port %r", data.get("gateway_port"))
+                _log.warning(
+                    "ignoring invalid gateway_port %r", data.get("gateway_port")
+                )
         if "gateway_auto_start" in data:
-            _config.set_value(cfg, "gateway.auto_start", bool(data["gateway_auto_start"]))
+            _config.set_value(
+                cfg, "gateway.auto_start", bool(data["gateway_auto_start"])
+            )
         if "system_prompt" in data:
             self._user_system_prompt = str(data["system_prompt"]).strip()
             self._rebuild_suffix()
@@ -849,32 +966,42 @@ IMPORTANT: When you use show_widget, do NOT repeat the widget title or type in y
         """
         model = (model or "").strip()
         if not model:
-            return {"model": self.agent.model}
-
-        provider, model_name = _parse_model(model)
-        if provider != "ollama":
-            try:
-                new_client = _build_client(self.config, provider)
-                self.agent.client = new_client
-                self.engine.client = new_client
-            except RuntimeError as e:
-                return {"error": str(e), "model": self.agent.model}
-
-        self.agent.model = model_name
-        self.engine.model = model_name
-        self.config["model"] = model  # persist provider:model
+            return {"model": self._model_spec}
+        error = self._activate_model(model)
+        if error:
+            return {"error": error, "model": self._model_spec}
+        self.config["model"] = self._model_spec
         try:
             _config.save(self.config)
         except Exception:
             _log.warning("failed to save config after model switch", exc_info=True)
-        return {"model": model}
+        return {"model": self._model_spec}
+
+    def _activate_model(self, model_spec: str) -> str | None:
+        """Switch model and provider clients as one atomic logical operation."""
+        model_spec = str(model_spec or "").strip()
+        provider, model_name = _parse_model(model_spec)
+        if not model_name:
+            return "model name is required"
+        try:
+            new_client = _build_client(self.config, provider)
+        except RuntimeError as exc:
+            return str(exc)
+        self.agent.client = new_client
+        self.agent.engine.client = new_client
+        self.engine.client = new_client
+        self.agent.model = model_name
+        self.engine.model = model_name
+        self._model_spec = model_spec if provider != "ollama" else model_name
+        self.agent.state.active_model_spec = self._model_spec
+        return None
 
     def bootstrap(self) -> dict:
         settings = self.get_settings()
         return {
             "version": __import__("cagentic").__version__,
             "user_name": self.agent.state.user_name,
-            "model": self.agent.model,
+            "model": self._model_spec,
             "chats": self.list_chats(),
             "current": self.current_chat(),
             "settings": settings,
@@ -895,7 +1022,9 @@ IMPORTANT: When you use show_widget, do NOT repeat the widget title or type in y
         try:
             self.engine.refresh_system_prompt()
         except Exception:
-            _log.warning("failed to refresh prompt after workspace switch", exc_info=True)
+            _log.warning(
+                "failed to refresh prompt after workspace switch", exc_info=True
+            )
         return {"ok": True, "workspace": str(p.resolve())}
 
     def browse_workspace(self, path: str) -> dict:
@@ -904,7 +1033,9 @@ IMPORTANT: When you use show_widget, do NOT repeat the widget title or type in y
     def begin_collama_turn(self, project) -> None:
         """Preflight a Collama turn while retaining the turn lock for streaming."""
         if not self._turn_lock.acquire(blocking=False):
-            raise WorkspaceError("Cagentic is still working on the previous message.", 409)
+            raise WorkspaceError(
+                "Cagentic is still working on the previous message.", 409
+            )
         try:
             if project is None and self.session.get("project") is None:
                 raise WorkspaceError("a project is required for Collama requests")
@@ -916,8 +1047,123 @@ IMPORTANT: When you use show_widget, do NOT repeat the widget title or type in y
             self._turn_lock.release()
             raise
 
+    def compact_context(
+        self, session_id: str, project, threshold: object = 0.90
+    ) -> tuple[dict, int]:
+        """Atomically compact one pinned Collama session."""
+        if not self._turn_lock.acquire(blocking=False):
+            return {
+                "error": "session is busy; try compaction again after the turn finishes"
+            }, 409
+        try:
+            try:
+                if not isinstance(threshold, (str, int, float)):
+                    raise TypeError
+                threshold_value = float(threshold)
+            except (TypeError, ValueError):
+                return {"error": "threshold must be a number between 0 and 1"}, 400
+            if not 0 < threshold_value <= 1:
+                return {"error": "threshold must be greater than 0 and at most 1"}, 400
+            try:
+                requested_project = self.validate_project(project)
+            except WorkspaceError as exc:
+                return {"error": str(exc)}, 400 if exc.status == 404 else exc.status
+
+            is_current = session_id == self.session.get("id")
+            target: dict | None
+            if is_current:
+                target = dict(self.session)
+                working = [dict(message) for message in self.engine.messages]
+            else:
+                target = sessions.load(session_id)
+                if target is None:
+                    # Reserve 404 for clients probing an unsupported endpoint.
+                    return {"error": f"session {session_id!r} does not exist"}, 400
+                working = [dict(message) for message in target.get("messages", [])]
+
+            assert target is not None
+
+            pinned = target.get("project")
+            try:
+                pinned = self.validate_project(pinned) if pinned is not None else None
+            except WorkspaceError:
+                pinned = target.get("project")
+            if pinned != requested_project:
+                return {
+                    "error": "project does not match the session's pinned project"
+                }, 409
+
+            try:
+                context_window = int(
+                    (self.config.get("ollama") or {}).get("num_ctx", 8192)
+                )
+            except (TypeError, ValueError):
+                context_window = 8192
+            context_window = max(1, context_window)
+            max_tokens = max(1, int(context_window * threshold_value))
+            before = approx_tokens(working)
+            report = auto_compact(
+                working,
+                max_tokens=max_tokens,
+                keep_recent=6,
+                summarize_with_model=lambda older: self._summarize_compaction(
+                    older, str(target.get("model") or self._model_spec)
+                ),
+            )
+            after = report.after if report.triggered else before
+
+            if report.triggered:
+                persisted = [
+                    message
+                    for message in working
+                    if message.get("role") != "system"
+                    or SUMMARY_MARKER in str(message.get("content") or "")
+                ]
+                target["messages"] = persisted
+                target["project"] = requested_project
+                sessions.save(target)
+                if is_current:
+                    self.session = target
+                    self.engine.messages = working
+
+            return {
+                "id": target["id"],
+                "messages": self.render_messages(working),
+                "before": before,
+                "after": after,
+                "usage": {"input": after},
+                "project": requested_project,
+            }, 200
+        finally:
+            self._turn_lock.release()
+
+    def _summarize_compaction(self, older: list[dict], model_spec: str) -> str | None:
+        """Create a durable handoff summary using the session's provider."""
+        provider, model_name = _parse_model(model_spec)
+        client = (
+            self.engine.client
+            if model_spec == self._model_spec
+            else _build_client(self.config, provider)
+        )
+        transcript = json.dumps(older, ensure_ascii=False, default=str)
+        prompt = (
+            "Create a compact but complete hidden context summary of the conversation below. "
+            "Preserve requirements, decisions and rationale, changed files, exact identifiers, "
+            "tool outcomes, errors, attempted fixes, validation results, and unfinished work. "
+            "Do not invent facts. Organize it for another model to continue the work without "
+            "seeing the omitted messages.\n\n" + transcript
+        )
+        result = client.chat(
+            model=model_name,
+            messages=[{"role": "user", "content": prompt}],
+            tools=None,
+            options={"temperature": 0.0},
+        )
+        return str(result.get("content") or "").strip() or None
+
     def set_effort(self, level: str) -> dict:
         from .engine import EFFORT_LEVELS
+
         level = (level or "").strip().lower()
         if level not in EFFORT_LEVELS:
             return {"error": f"effort must be one of {', '.join(EFFORT_LEVELS)}"}
@@ -935,22 +1181,29 @@ IMPORTANT: When you use show_widget, do NOT repeat the widget title or type in y
 
     def list_sessions_compat(self) -> dict:
         """Chats reshaped the way the iOS coding tab expects."""
-        return {"sessions": [
-            {
-                "id": c["id"],
-                "title": c["title"],
-                "createdAt": int(c.get("updated_at") or 0),
-                "messages": int(c.get("turns") or 0),
-                **({"project": c["project"]} if c.get("project") is not None else {}),
-            }
-            for c in self.list_chats()
-        ]}
+        return {
+            "sessions": [
+                {
+                    "id": c["id"],
+                    "title": c["title"],
+                    "createdAt": int(c.get("updated_at") or 0),
+                    "messages": int(c.get("turns") or 0),
+                    **(
+                        {"project": c["project"]}
+                        if c.get("project") is not None
+                        else {}
+                    ),
+                }
+                for c in self.list_chats()
+            ]
+        }
 
     # GitHub proxy — lets the phone browse/edit GitHub with the PC's token.
     def _github_ctx(self):
         """Duck-typed ToolContext for cagentic.github._request: needs
         .github_token and .insecure_ssl. Falls back to config github.token."""
         import types
+
         state = self.agent.state
         token = state.github_token or ((self.config.get("github") or {}).get("token"))
         return types.SimpleNamespace(
@@ -961,37 +1214,47 @@ IMPORTANT: When you use show_widget, do NOT repeat the widget title or type in y
 
     def github_user(self) -> dict:
         from .github import _request
+
         status, body = _request("GET", "/user", self._github_ctx())
         if status != 200 or not isinstance(body, dict):
             return {"error": f"github user lookup failed (HTTP {status})"}
-        return {"user": {
-            "login": body.get("login") or "",
-            "name": body.get("name"),
-            "avatar": body.get("avatar_url"),
-        }}
+        return {
+            "user": {
+                "login": body.get("login") or "",
+                "name": body.get("name"),
+                "avatar": body.get("avatar_url"),
+            }
+        }
 
     def github_repos(self) -> dict:
         from .github import _request
+
         status, body = _request(
-            "GET", "/user/repos", self._github_ctx(),
+            "GET",
+            "/user/repos",
+            self._github_ctx(),
             params={"sort": "updated", "per_page": 100, "type": "all"},
         )
         if status != 200 or not isinstance(body, list):
             return {"error": f"github repo listing failed (HTTP {status})"}
-        return {"repos": [
-            {
-                "name": r.get("full_name") or "",
-                "private": bool(r.get("private")),
-                "language": r.get("language"),
-                "url": r.get("html_url"),
-            }
-            for r in body if isinstance(r, dict)
-        ]}
+        return {
+            "repos": [
+                {
+                    "name": r.get("full_name") or "",
+                    "private": bool(r.get("private")),
+                    "language": r.get("language"),
+                    "url": r.get("html_url"),
+                }
+                for r in body
+                if isinstance(r, dict)
+            ]
+        }
 
     def github_file_get(self, repo: str, path: str, ref: str | None = None) -> dict:
         import base64
         from urllib.parse import quote
         from .github import _request
+
         repo = repo or self.agent.state.default_repository or ""
         if not repo or not path:
             return {"error": "repo and path are required"}
@@ -1001,7 +1264,9 @@ IMPORTANT: When you use show_widget, do NOT repeat the widget title or type in y
         if status != 200 or not isinstance(body, dict):
             return {"error": f"github file read failed (HTTP {status})"}
         try:
-            content = base64.b64decode(body.get("content") or "").decode("utf-8", errors="replace")
+            content = base64.b64decode(body.get("content") or "").decode(
+                "utf-8", errors="replace"
+            )
         except Exception:
             content = ""
         return {"content": content, "sha": body.get("sha") or ""}
@@ -1010,13 +1275,16 @@ IMPORTANT: When you use show_widget, do NOT repeat the widget title or type in y
         import base64
         from urllib.parse import quote
         from .github import _request
+
         repo = str(data.get("repo") or self.agent.state.default_repository or "")
         path = str(data.get("path") or "")
         if not repo or not path:
             return {"error": "repo and path are required"}
         payload = {
             "message": str(data.get("message") or f"Update {path}"),
-            "content": base64.b64encode(str(data.get("content") or "").encode("utf-8")).decode("ascii"),
+            "content": base64.b64encode(
+                str(data.get("content") or "").encode("utf-8")
+            ).decode("ascii"),
         }
         if data.get("sha"):
             payload["sha"] = str(data["sha"])
@@ -1037,10 +1305,14 @@ IMPORTANT: When you use show_widget, do NOT repeat the widget title or type in y
         # in-flight turn first so it can't keep appending into the history we
         # are about to rewrite.
         if not self._interrupt_turn():
-            emit("error", {"text": "Cagentic is still working on the previous message."})
+            emit(
+                "error", {"text": "Cagentic is still working on the previous message."}
+            )
             return
         # Find user messages in the engine's message list
-        user_indices = [i for i, m in enumerate(self.engine.messages) if m.get("role") == "user"]
+        user_indices = [
+            i for i, m in enumerate(self.engine.messages) if m.get("role") == "user"
+        ]
         if index < 0 or index >= len(user_indices):
             self._turn_lock.release()
             emit("error", {"text": f"invalid message index {index}"})
@@ -1071,7 +1343,9 @@ IMPORTANT: When you use show_widget, do NOT repeat the widget title or type in y
         if not locked:
             return {"error": "Cagentic is still working on the previous message."}
         try:
-            user_indices = [i for i, m in enumerate(self.engine.messages) if m.get("role") == "user"]
+            user_indices = [
+                i for i, m in enumerate(self.engine.messages) if m.get("role") == "user"
+            ]
             if index < 0 or index >= len(user_indices):
                 return {"error": f"invalid message index {index}"}
             target = user_indices[index]
@@ -1082,9 +1356,13 @@ IMPORTANT: When you use show_widget, do NOT repeat the widget title or type in y
         finally:
             self._turn_lock.release()
 
-    def run_turn(self, message: str, emit, source: str = "pc", prelocked: bool = False) -> None:
+    def run_turn(
+        self, message: str, emit, source: str = "pc", prelocked: bool = False
+    ) -> None:
         if not prelocked and not self._turn_lock.acquire(blocking=False):
-            emit("error", {"text": "Cagentic is still working on the previous message."})
+            emit(
+                "error", {"text": "Cagentic is still working on the previous message."}
+            )
             return
         self._active_emit = emit
         self._active_source = source
@@ -1124,28 +1402,31 @@ IMPORTANT: When you use show_widget, do NOT repeat the widget title or type in y
         cfg = self.config
 
         if cmd in ("help", "?"):
-            return {"ok": True, "text": (
-                "/new — start a new chat\n"
-                "/clear — clear the current chat\n"
-                "/model <name> — switch model\n"
-                "/models — list available models\n"
-                "/diag — show diagnostics\n"
-                "/tools — list active tools\n"
-                "/groups [enable|disable <name>] — show/change tool groups\n"
-                "/yolo [on|off] — toggle auto-approve\n"
-                "/plan [on|off] — toggle plan mode\n"
-                "/effort [low|medium|high] — how hard the model works\n"
-                "/stream [on|off] — toggle streaming\n"
-                "/name <name> — set your name\n"
-                "/host <url> — change Ollama host\n"
-                "/save — save current chat\n"
-                "/notes — list notes\n"
-                "/mcp — list MCP servers\n"
-                "/config — show config\n"
-                "/set <key> <value> — set config value\n"
-                "/undo — undo last exchange\n"
-                "/retry — retry last turn\n"
-            )}
+            return {
+                "ok": True,
+                "text": (
+                    "/new — start a new chat\n"
+                    "/clear — clear the current chat\n"
+                    "/model <name> — switch model\n"
+                    "/models — list available models\n"
+                    "/diag — show diagnostics\n"
+                    "/tools — list active tools\n"
+                    "/groups [enable|disable <name>] — show/change tool groups\n"
+                    "/yolo [on|off] — toggle auto-approve\n"
+                    "/plan [on|off] — toggle plan mode\n"
+                    "/effort [low|medium|high] — how hard the model works\n"
+                    "/stream [on|off] — toggle streaming\n"
+                    "/name <name> — set your name\n"
+                    "/host <url> — change Ollama host\n"
+                    "/save — save current chat\n"
+                    "/notes — list notes\n"
+                    "/mcp — list MCP servers\n"
+                    "/config — show config\n"
+                    "/set <key> <value> — set config value\n"
+                    "/undo — undo last exchange\n"
+                    "/retry — retry last turn\n"
+                ),
+            }
 
         if cmd == "new":
             cur = self.new_chat()
@@ -1153,7 +1434,10 @@ IMPORTANT: When you use show_widget, do NOT repeat the widget title or type in y
 
         if cmd == "clear":
             if not self._interrupt_turn():
-                return {"ok": False, "text": "Cagentic is still working on the previous message."}
+                return {
+                    "ok": False,
+                    "text": "Cagentic is still working on the previous message.",
+                }
             try:
                 self.engine.messages.clear()
                 self._save_current()
@@ -1167,21 +1451,35 @@ IMPORTANT: When you use show_widget, do NOT repeat the widget title or type in y
             result = self.set_model(arg1)
             if "error" in result:
                 return {"ok": False, "text": result["error"]}
-            return {"ok": True, "text": f"model → {result['model']}", "model": result["model"]}
+            return {
+                "ok": True,
+                "text": f"model → {result['model']}",
+                "model": result["model"],
+            }
 
         if cmd == "models":
             try:
                 models = agent.client.list_models()
             except Exception as e:
                 return {"ok": False, "text": f"could not list models: {e}"}
-            return {"ok": True, "text": "available models:\n" + "\n".join(f"  {m}" for m in models), "models": models}
+            return {
+                "ok": True,
+                "text": "available models:\n" + "\n".join(f"  {m}" for m in models),
+                "models": models,
+            }
 
         if cmd == "diag":
-            groups = agent.state.tool_groups if agent.state.tool_groups is not None else DEFAULT_GROUPS
+            groups = (
+                agent.state.tool_groups
+                if agent.state.tool_groups is not None
+                else DEFAULT_GROUPS
+            )
             lines = [f"model:    {agent.model}"]
             lines.append(f"name:     {agent.state.user_name or '(not set)'}")
             lines.append(f"workspace: {agent.state.workspace}")
-            lines.append(f"tools:    {'native' if agent.tools_enabled else 'text-protocol fallback'}")
+            lines.append(
+                f"tools:    {'native' if agent.tools_enabled else 'text-protocol fallback'}"
+            )
             lines.append(f"groups:   {', '.join(sorted(groups))}")
             lines.append(f"stream:   {'on' if agent.engine.stream else 'off'}")
             try:
@@ -1189,17 +1487,23 @@ IMPORTANT: When you use show_widget, do NOT repeat the widget title or type in y
                 if status is None:
                     lines.append("vram:     model not currently loaded")
                 elif status["fully_gpu"]:
-                    lines.append(f"vram:     {status['size_vram'] / (1024**3):.1f} GB · fully on GPU ✓")
+                    lines.append(
+                        f"vram:     {status['size_vram'] / (1024**3):.1f} GB · fully on GPU ✓"
+                    )
                 else:
                     size_gb = status["size"] / (1024**3)
                     cpu_gb = status["cpu_bytes"] / (1024**3)
                     pct = status["cpu_percent"]
-                    lines.append(f"vram:     {cpu_gb:.1f}/{size_gb:.1f} GB on CPU ({pct:.0f}% offloaded — slow)")
+                    lines.append(
+                        f"vram:     {cpu_gb:.1f}/{size_gb:.1f} GB on CPU ({pct:.0f}% offloaded — slow)"
+                    )
             except Exception:
                 _log.warning("could not read VRAM status", exc_info=True)
                 lines.append("vram:     (not available)")
             mcp_servers = list(((cfg.get("mcp") or {}).get("servers") or {}).keys())
-            lines.append(f"mcp:      {len(mcp_servers)} configured ({', '.join(mcp_servers) or 'none'})")
+            lines.append(
+                f"mcp:      {len(mcp_servers)} configured ({', '.join(mcp_servers) or 'none'})"
+            )
             return {"ok": True, "text": "\n".join(lines)}
 
         if cmd == "tools":
@@ -1211,9 +1515,14 @@ IMPORTANT: When you use show_widget, do NOT repeat the widget title or type in y
             return {"ok": True, "text": "\n".join(lines)}
 
         if cmd == "groups":
-            active = agent.state.tool_groups if agent.state.tool_groups is not None else DEFAULT_GROUPS
+            active = (
+                agent.state.tool_groups
+                if agent.state.tool_groups is not None
+                else DEFAULT_GROUPS
+            )
             if not arg1:
                 from .tools import TOOL_GROUPS
+
                 lines = ["tool groups (✓ = sent to the model):"]
                 for g, names in sorted(TOOL_GROUPS.items()):
                     mark = "✓" if g in active else "✗"
@@ -1226,7 +1535,10 @@ IMPORTANT: When you use show_widget, do NOT repeat the widget title or type in y
                 _cfg.set_value(cfg, "tool_groups", sorted(groups))
                 _cfg.save(cfg)
                 self.engine.refresh_system_prompt()
-                return {"ok": True, "text": f"enabled '{arg2}' — {len(groups)} group(s) active"}
+                return {
+                    "ok": True,
+                    "text": f"enabled '{arg2}' — {len(groups)} group(s) active",
+                }
             if arg1 == "disable" and arg2:
                 groups = set(active)
                 groups.discard(arg2)
@@ -1234,8 +1546,14 @@ IMPORTANT: When you use show_widget, do NOT repeat the widget title or type in y
                 _cfg.set_value(cfg, "tool_groups", sorted(groups))
                 _cfg.save(cfg)
                 self.engine.refresh_system_prompt()
-                return {"ok": True, "text": f"disabled '{arg2}' — {len(groups)} group(s) active"}
-            return {"ok": False, "text": "usage: /groups  |  /groups enable <name>  |  /groups disable <name>"}
+                return {
+                    "ok": True,
+                    "text": f"disabled '{arg2}' — {len(groups)} group(s) active",
+                }
+            return {
+                "ok": False,
+                "text": "usage: /groups  |  /groups enable <name>  |  /groups disable <name>",
+            }
 
         if cmd == "yolo":
             want = arg1.lower() if arg1 else ("off" if agent.state.yolo else "on")
@@ -1244,12 +1562,19 @@ IMPORTANT: When you use show_widget, do NOT repeat the widget title or type in y
             agent.state.update(yolo=(want == "on"))
             cfg["yolo"] = agent.state.yolo
             _cfg.save(cfg)
-            return {"ok": True, "text": f"yolo mode: {'ON (auto-approve)' if agent.state.yolo else 'OFF (ask every time)'}"}
+            return {
+                "ok": True,
+                "text": f"yolo mode: {'ON (auto-approve)' if agent.state.yolo else 'OFF (ask every time)'}",
+            }
 
         if cmd == "effort":
             from .engine import EFFORT_LEVELS
+
             if not arg1:
-                return {"ok": True, "text": f"effort: {getattr(agent.state, 'effort', 'medium')}"}
+                return {
+                    "ok": True,
+                    "text": f"effort: {getattr(agent.state, 'effort', 'medium')}",
+                }
             res = self.set_effort(arg1)
             if res.get("error"):
                 return {"ok": False, "text": res["error"]}
@@ -1261,20 +1586,29 @@ IMPORTANT: When you use show_widget, do NOT repeat the widget title or type in y
                 return {"ok": False, "text": "usage: /plan on|off"}
             agent.state.update(plan_mode=(want == "on"))
             self.engine.refresh_system_prompt()
-            return {"ok": True, "text": f"plan mode: {'ON (read-only)' if agent.state.plan_mode else 'OFF'}"}
+            return {
+                "ok": True,
+                "text": f"plan mode: {'ON (read-only)' if agent.state.plan_mode else 'OFF'}",
+            }
 
         if cmd == "stream":
             want = arg1.lower() if arg1 else ("off" if agent.engine.stream else "on")
             if want not in ("on", "off"):
                 return {"ok": False, "text": "usage: /stream on|off"}
-            agent.engine.stream = (want == "on")
+            agent.engine.stream = want == "on"
             _cfg.set_value(cfg, "ollama.stream", agent.engine.stream)
             _cfg.save(cfg)
-            return {"ok": True, "text": f"streaming: {'on' if agent.engine.stream else 'off'} (saved)"}
+            return {
+                "ok": True,
+                "text": f"streaming: {'on' if agent.engine.stream else 'off'} (saved)",
+            }
 
         if cmd == "name":
             if not arg1:
-                return {"ok": True, "text": f"your name: {agent.state.user_name or '(not set)'}"}
+                return {
+                    "ok": True,
+                    "text": f"your name: {agent.state.user_name or '(not set)'}",
+                }
             agent.state.update(user_name=arg1)
             self.engine.refresh_system_prompt()
             _cfg.set_value(cfg, "user_name", arg1)
@@ -1298,6 +1632,7 @@ IMPORTANT: When you use show_widget, do NOT repeat the widget title or type in y
 
         if cmd == "notes":
             from .notes import _notes
+
             all_notes = _notes.list_all()
             if not all_notes:
                 return {"ok": True, "text": "no notes"}
@@ -1308,7 +1643,10 @@ IMPORTANT: When you use show_widget, do NOT repeat the widget title or type in y
             mcp_servers = list(((cfg.get("mcp") or {}).get("servers") or {}).keys())
             if not mcp_servers:
                 return {"ok": True, "text": "no MCP servers configured"}
-            return {"ok": True, "text": "MCP servers:\n" + "\n".join(f"  {s}" for s in mcp_servers)}
+            return {
+                "ok": True,
+                "text": "MCP servers:\n" + "\n".join(f"  {s}" for s in mcp_servers),
+            }
 
         if cmd == "config":
             # Redact ALL secret-bearing values (github token, provider api_keys,
@@ -1327,7 +1665,10 @@ IMPORTANT: When you use show_widget, do NOT repeat the widget title or type in y
             # Remove last user + assistant messages. Must hold the turn lock —
             # a streaming turn appends to this list concurrently.
             if not self._interrupt_turn():
-                return {"ok": False, "text": "Cagentic is still working on the previous message."}
+                return {
+                    "ok": False,
+                    "text": "Cagentic is still working on the previous message.",
+                }
             try:
                 msgs = self.engine.messages
                 while msgs and msgs[-1].get("role") != "user":
@@ -1343,20 +1684,30 @@ IMPORTANT: When you use show_widget, do NOT repeat the widget title or type in y
             # Remove last assistant message so the engine re-generates. Same
             # turn-lock requirement as /undo.
             if not self._interrupt_turn():
-                return {"ok": False, "text": "Cagentic is still working on the previous message."}
+                return {
+                    "ok": False,
+                    "text": "Cagentic is still working on the previous message.",
+                }
             try:
                 msgs = self.engine.messages
                 while msgs and msgs[-1].get("role") == "assistant":
                     msgs.pop()
                 self._save_current()
-                return {"ok": True, "text": "removed last reply — send a message to retry"}
+                return {
+                    "ok": True,
+                    "text": "removed last reply — send a message to retry",
+                }
             finally:
                 self._turn_lock.release()
 
-        return {"ok": False, "text": f"unknown command: /{cmd}. Type /help for available commands."}
+        return {
+            "ok": False,
+            "text": f"unknown command: /{cmd}. Type /help for available commands.",
+        }
 
 
 # ---------------------------------------------------------------- handler ---
+
 
 class _Handler(BaseHTTPRequestHandler):
     protocol_version = "HTTP/1.1"
@@ -1436,7 +1787,9 @@ class _Handler(BaseHTTPRequestHandler):
         # (which can't set headers) sends it via ?token= query param. The iOS
         # app sends its stored gateway token as X-Cagentic-Link — accept it
         # as an alias so one saved credential works for the whole app.
-        supplied = self.headers.get("X-Cagentic-Token") or self.headers.get("X-Cagentic-Link")
+        supplied = self.headers.get("X-Cagentic-Token") or self.headers.get(
+            "X-Cagentic-Link"
+        )
         if not supplied:
             qs = parse_qs(urlparse(self.path).query)
             vals = qs.get("token")
@@ -1518,11 +1871,13 @@ class _Handler(BaseHTTPRequestHandler):
             self._json(self._gw().github_repos())
         elif path == "/api/github/file":
             qs = parse_qs(urlparse(self.path).query)
-            self._json(self._gw().github_file_get(
-                (qs.get("repo") or [""])[0],
-                (qs.get("path") or [""])[0],
-                (qs.get("ref") or [None])[0],
-            ))
+            self._json(
+                self._gw().github_file_get(
+                    (qs.get("repo") or [""])[0],
+                    (qs.get("path") or [""])[0],
+                    (qs.get("ref") or [None])[0],
+                )
+            )
         else:
             self._send(b"not found", "text/plain", status=404)
 
@@ -1538,6 +1893,18 @@ class _Handler(BaseHTTPRequestHandler):
         if path == "/api/abort":
             gw.abort_generation()
             self._json({"ok": True})
+            return
+        if path == "/api/context/compact":
+            b = self._body()
+            if b.get("client") != "collama":
+                self._json({"error": "client must be collama"}, status=400)
+                return
+            result, status = gw.compact_context(
+                str(b.get("id") or ""),
+                b.get("project"),
+                b.get("threshold", 0.90),
+            )
+            self._json(result, status=status)
             return
         if path == "/api/chat":
             b = self._body()
@@ -1557,14 +1924,20 @@ class _Handler(BaseHTTPRequestHandler):
             return
         if path == "/api/chat/edit":
             b = self._body()
-            self._stream_chat_edit(int(b.get("index", 0)), str(b.get("message", "")).strip())
+            self._stream_chat_edit(
+                int(b.get("index", 0)), str(b.get("message", "")).strip()
+            )
             return
         if path == "/api/chat/delete-msg":
             b = self._body()
             self._json(self._gw().delete_message(int(b.get("index", 0))))
             return
         if path == "/api/permission":
-            gw.deliver_permission(str(self._body().get("answer", "no")))
+            b = self._body()
+            gw.deliver_permission(
+                str(b.get("answer", "no")),
+                str(b["id"]) if b.get("id") else None,
+            )
             self._json({"ok": True})
             return
         if path == "/api/computer/approve":
@@ -1586,15 +1959,28 @@ class _Handler(BaseHTTPRequestHandler):
         if path == "/api/session/new":
             b = self._body()
             try:
-                project = gw.validate_project(b.get("project")) if b.get("client") == "collama" else None
+                project = (
+                    gw.validate_project(b.get("project"))
+                    if b.get("client") == "collama"
+                    else None
+                )
             except WorkspaceError as exc:
                 self._json({"error": str(exc)}, status=exc.status)
                 return
             if b.get("client") == "collama" and project is None:
-                self._json({"error": "a project is required for Collama requests"}, status=400)
+                self._json(
+                    {"error": "a project is required for Collama requests"}, status=400
+                )
                 return
             current = gw.new_chat(project)
-            self._json({"ok": True, "id": gw.session["id"], "session": current, "current": current})
+            self._json(
+                {
+                    "ok": True,
+                    "id": gw.session["id"],
+                    "session": current,
+                    "current": current,
+                }
+            )
             return
         if path == "/api/session/load":
             b = self._body()
@@ -1623,12 +2009,18 @@ class _Handler(BaseHTTPRequestHandler):
         if path == "/api/chats/new":
             b = self._body()
             try:
-                project = gw.validate_project(b.get("project")) if b.get("client") == "collama" else None
+                project = (
+                    gw.validate_project(b.get("project"))
+                    if b.get("client") == "collama"
+                    else None
+                )
             except WorkspaceError as exc:
                 self._json({"error": str(exc)}, status=exc.status)
                 return
             if b.get("client") == "collama" and project is None:
-                self._json({"error": "a project is required for Collama requests"}, status=400)
+                self._json(
+                    {"error": "a project is required for Collama requests"}, status=400
+                )
                 return
             self._json({"current": gw.new_chat(project), "chats": gw.list_chats()})
             return
@@ -1665,22 +2057,52 @@ class _Handler(BaseHTTPRequestHandler):
             return
         if path == "/api/projects/add_chat":
             b = self._body()
-            self._json(gw.add_chat_to_project(str(b.get("project_id", "")), str(b.get("chat_id", ""))))
+            self._json(
+                gw.add_chat_to_project(
+                    str(b.get("project_id", "")), str(b.get("chat_id", ""))
+                )
+            )
             return
         if path == "/api/projects/remove_chat":
             b = self._body()
-            self._json(gw.remove_chat_from_project(str(b.get("project_id", "")), str(b.get("chat_id", ""))))
+            self._json(
+                gw.remove_chat_from_project(
+                    str(b.get("project_id", "")), str(b.get("chat_id", ""))
+                )
+            )
             return
         if path == "/api/projects/config":
             b = self._body()
-            self._json(gw.update_project_config(str(b.get("id", "")), b.get("system_prompt", ""), b.get("context", "")))
+            self._json(
+                gw.update_project_config(
+                    str(b.get("id", "")),
+                    b.get("system_prompt", ""),
+                    b.get("context", ""),
+                )
+            )
             return
         if path == "/api/cmd":
             b = self._body()
-            self._json(gw.handle_cmd(str(b.get("cmd", "")), str(b.get("arg1", "")), str(b.get("arg2", ""))))
+            self._json(
+                gw.handle_cmd(
+                    str(b.get("cmd", "")),
+                    str(b.get("arg1", "")),
+                    str(b.get("arg2", "")),
+                )
+            )
             return
         if path == "/api/email/verification":
             from . import emailer
+
+            if not gw.allow_email_verification():
+                self._json(
+                    {
+                        "ok": False,
+                        "error": "too many verification emails; try again later",
+                    },
+                    status=429,
+                )
+                return
             b = self._body()
             err = emailer.send_verification(
                 gw.config,
@@ -1707,9 +2129,12 @@ class _Handler(BaseHTTPRequestHandler):
                 self.wfile.flush()
             except OSError:
                 raise _ClientGone()
+
         return emit
 
-    def _stream_chat(self, message: str, source: str = "pc", prelocked: bool = False) -> None:
+    def _stream_chat(
+        self, message: str, source: str = "pc", prelocked: bool = False
+    ) -> None:
         emit = self._begin_sse()
         if not message:
             try:
@@ -4649,7 +5074,7 @@ function showPermission(d){
   const btns=document.createElement('div'); btns.className='perm-btns';
   const answer=(a,past)=>{
     box.innerHTML='<div class="pq"><code>'+esc(d.tool)+'</code></div><div class="perm-decided">&#8594; '+past.toUpperCase()+'</div>';
-    fetch('/api/permission',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({answer:a})});
+    fetch('/api/permission',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({answer:a,id:d.id})});
   };
   [['yes','APPROVE','approved'],['always','ALWAYS ALLOW','always allowed'],['no','DENY','denied']].forEach(([a,l,p])=>{
     const b=document.createElement('button'); b.className=a; b.textContent=l; b.onclick=()=>answer(a,p); btns.appendChild(b);

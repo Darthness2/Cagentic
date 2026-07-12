@@ -3,11 +3,13 @@
 Each project is JSON at ~/.config/cagentic/projects/<id>.json with:
     {id, name, color, created_at, updated_at, chats: [session_id, ...]}
 """
+
 from __future__ import annotations
 
 import json
 import logging
 import os
+import re
 import stat
 import tempfile
 import threading
@@ -32,6 +34,10 @@ def projects_dir() -> Path:
 
 
 def _path(project_id: str) -> Path:
+    if not isinstance(project_id, str) or not re.fullmatch(
+        r"[A-Za-z0-9_-]{1,64}", project_id
+    ):
+        raise ValueError("invalid project id")
     return projects_dir() / f"{project_id}.json"
 
 
@@ -63,7 +69,9 @@ def save(proj: dict) -> Path:
     # Unique temp name + lock so concurrent savers can't clobber each other's
     # temp file or race the replace.
     with _SAVE_LOCK:
-        fd, tmp_name = tempfile.mkstemp(dir=str(d), prefix=f".{proj['id']}.", suffix=".tmp")
+        fd, tmp_name = tempfile.mkstemp(
+            dir=str(d), prefix=f".{proj['id']}.", suffix=".tmp"
+        )
         try:
             # fchmod is POSIX-only; on Windows it raises AttributeError (not
             # OSError), which the handler below wouldn't catch — leaking the fd
@@ -80,13 +88,18 @@ def save(proj: dict) -> Path:
             try:
                 os.unlink(tmp_name)
             except OSError:
-                logger.warning("could not clean up temp file %s", tmp_name, exc_info=True)
+                logger.warning(
+                    "could not clean up temp file %s", tmp_name, exc_info=True
+                )
             raise
     return p
 
 
 def load(project_id: str) -> dict | None:
-    p = _path(project_id)
+    try:
+        p = _path(project_id)
+    except ValueError:
+        return None
     if not p.exists():
         return None
     try:
@@ -96,7 +109,10 @@ def load(project_id: str) -> dict | None:
 
 
 def delete(project_id: str) -> bool:
-    p = _path(project_id)
+    try:
+        p = _path(project_id)
+    except ValueError:
+        return False
     if p.exists():
         p.unlink()
         return True
@@ -110,16 +126,18 @@ def list_all() -> list[dict]:
             data = json.loads(p.read_text(encoding="utf-8"))
         except (json.JSONDecodeError, OSError):
             continue
-        out.append({
-            "id": data.get("id", p.stem),
-            "name": data.get("name", "Untitled Project"),
-            "color": data.get("color", "#f0a87a"),
-            "system_prompt": data.get("system_prompt", ""),
-            "context": data.get("context", ""),
-            "updated_at": data.get("updated_at", 0),
-            "chat_count": len(data.get("chats", [])),
-            "chats": data.get("chats", []),
-        })
+        out.append(
+            {
+                "id": data.get("id", p.stem),
+                "name": data.get("name", "Untitled Project"),
+                "color": data.get("color", "#f0a87a"),
+                "system_prompt": data.get("system_prompt", ""),
+                "context": data.get("context", ""),
+                "updated_at": data.get("updated_at", 0),
+                "chat_count": len(data.get("chats", [])),
+                "chats": data.get("chats", []),
+            }
+        )
     out.sort(key=lambda p: p["updated_at"], reverse=True)
     return out
 
@@ -153,7 +171,9 @@ def rename(project_id: str, name: str) -> dict | None:
     return proj
 
 
-def update_config(project_id: str, system_prompt: str = "", context: str = "") -> dict | None:
+def update_config(
+    project_id: str, system_prompt: str = "", context: str = ""
+) -> dict | None:
     proj = load(project_id)
     if proj is None:
         return None

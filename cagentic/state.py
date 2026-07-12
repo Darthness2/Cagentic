@@ -3,6 +3,7 @@
 Mirrors the React `useAppState` pattern in plain Python: a single mutable
 record, observers register a callback and get notified on every update.
 """
+
 from __future__ import annotations
 
 import logging
@@ -28,11 +29,13 @@ class AppState:
     # service auth
     github_token: str | None = None
     default_repository: str | None = None
+    workspace_boundary: Path | None = None
+    active_model_spec: str | None = None
 
     # behavior switches
-    yolo: bool = False                  # auto-approve all tool calls
-    insecure_ssl: bool = False          # turn off TLS verify (school MITM)
-    tools_enabled: bool = True          # native ollama tool calls vs text-protocol
+    yolo: bool = False  # auto-approve all tool calls
+    insecure_ssl: bool = False  # turn off TLS verify (school MITM)
+    tools_enabled: bool = True  # native ollama tool calls vs text-protocol
 
     # Effort dial — how much effort/thoroughness the model applies. One of
     # "low" | "medium" | "high". Injected into the system prompt; higher means
@@ -122,5 +125,6 @@ class AppState:
             "yolo": self.yolo,
             "github_token": self.github_token,
             "default_repository": self.default_repository,
+            "workspace_boundary": self.workspace_boundary,
             "insecure_ssl": self.insecure_ssl,
         }

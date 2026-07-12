@@ -17,14 +17,17 @@ Helpers:
     find_compact_boundary(messages)   index of last boundary or -1
     messages_after_boundary(messages) slice after the boundary
 """
+
 from __future__ import annotations
 
 import json
 import logging
 import re
 from dataclasses import dataclass
+from typing import Callable
 
 BOUNDARY_MARKER = "<<COMPACT_BOUNDARY>>"
+SUMMARY_MARKER = "<<COMPACT_SUMMARY>>"
 
 _log = logging.getLogger(__name__)
 
@@ -89,12 +92,14 @@ def find_compact_boundary(messages: list[dict]) -> int:
 
 def messages_after_boundary(messages: list[dict]) -> list[dict]:
     idx = find_compact_boundary(messages)
-    return messages[idx + 1:] if idx >= 0 else list(messages)
+    return messages[idx + 1 :] if idx >= 0 else list(messages)
 
 
 # --------- snipCompact ---------------------------------------------------
 
-_SNIP_THINK_RX = re.compile(r"<think(?:ing)?>.*?</think(?:ing)?>", re.DOTALL | re.IGNORECASE)
+_SNIP_THINK_RX = re.compile(
+    r"<think(?:ing)?>.*?</think(?:ing)?>", re.DOTALL | re.IGNORECASE
+)
 
 
 def snip_compact(messages: list[dict], keep_recent_think: int = 2) -> int:
@@ -114,7 +119,11 @@ def snip_compact(messages: list[dict], keep_recent_think: int = 2) -> int:
             removed += 1
             continue
         # Drop exact-duplicate consecutive user/system frames.
-        if kept and kept[-1].get("role") == role and (kept[-1].get("content") or "") == m.get("content"):
+        if (
+            kept
+            and kept[-1].get("role") == role
+            and (kept[-1].get("content") or "") == m.get("content")
+        ):
             removed += 1
             continue
         kept.append(m)
@@ -137,6 +146,7 @@ def snip_compact(messages: list[dict], keep_recent_think: int = 2) -> int:
 
 # --------- contextCollapse -----------------------------------------------
 
+
 def context_collapse(messages: list[dict]) -> int:
     """Merge consecutive same-role plain-text messages. Returns count merged."""
     if len(messages) < 2:
@@ -146,15 +156,22 @@ def context_collapse(messages: list[dict]) -> int:
     for m in messages:
         role = m.get("role")
         # Don't collapse messages that carry tool_calls or names — they have structure.
-        plain = role in ("user", "assistant") and not m.get("tool_calls") and not m.get("name")
+        plain = (
+            role in ("user", "assistant")
+            and not m.get("tool_calls")
+            and not m.get("name")
+        )
         if (
-            plain and out
+            plain
+            and out
             and out[-1].get("role") == role
             and not out[-1].get("tool_calls")
             and not out[-1].get("name")
         ):
             prev = out[-1]
-            prev["content"] = ((prev.get("content") or "") + "\n\n" + (m.get("content") or "")).strip()
+            prev["content"] = (
+                (prev.get("content") or "") + "\n\n" + (m.get("content") or "")
+            ).strip()
             merged += 1
             continue
         out.append(m)
@@ -209,6 +226,10 @@ def _bulletize(messages: list[dict]) -> str:
             head = _flatten(content, _USER_BUDGET)
             if head:
                 bullets.append(f"- user: {head}")
+        elif role == "system" and SUMMARY_MARKER in content:
+            bullets.append(
+                f"- prior compacted context: {_flatten(content, _ASSISTANT_BUDGET)}"
+            )
     return "\n".join(bullets[-_FALLBACK_BULLETS_LIMIT:])
 
 
@@ -217,7 +238,7 @@ def auto_compact(
     *,
     max_tokens: int = 12000,
     keep_recent: int = 12,
-    summarize_with_model: callable | None = None,
+    summarize_with_model: Callable[[list[dict]], str | None] | None = None,
 ) -> CompactReport:
     """Compact `messages` in place if it crosses `max_tokens`.
 
@@ -226,11 +247,15 @@ def auto_compact(
     back to a deterministic bulleted summary.
     """
     before = _approx_tokens(messages)
-    if before <= max_tokens or len(messages) <= keep_recent + 2:
+    if before <= max_tokens:
         return CompactReport(False, before, before, "noop")
 
     head: list[dict] = []
-    if messages and messages[0].get("role") == "system":
+    if (
+        messages
+        and messages[0].get("role") == "system"
+        and SUMMARY_MARKER not in str(messages[0].get("content") or "")
+    ):
         head.append(messages[0])
 
     # Start the middle slice right after the head (the system prompt). The
@@ -241,8 +266,25 @@ def auto_compact(
     # the new middle (re-summarizing it) preserves it as a roll-up instead.
     middle_start = len(head)
 
-    tail = messages[-keep_recent:]
-    middle = messages[middle_start:-keep_recent] if len(messages) > middle_start + keep_recent else []
+    # Keep complete recent user turns rather than an arbitrary message count,
+    # which could split an assistant tool call from its result.
+    user_turns = [
+        i
+        for i, message in enumerate(messages)
+        if message.get("role") == "user"
+        and not str(message.get("content") or "").startswith(
+            ("Tool result for ", "[background] ")
+        )
+    ]
+    if len(user_turns) > keep_recent:
+        tail_start = user_turns[-keep_recent]
+    else:
+        # Every real user turn is recent, so there is nothing safe to remove.
+        # This also makes repeated compaction requests idempotent when the
+        # retained tail alone remains above the requested threshold.
+        tail_start = middle_start
+    tail = messages[tail_start:]
+    middle = messages[middle_start:tail_start]
 
     if not middle:
         return CompactReport(False, before, before, "noop")
@@ -254,14 +296,16 @@ def auto_compact(
         except Exception:
             # Deliberate fallback to the deterministic bulletizer — but log it
             # so a broken summarizer model isn't silently masked.
-            _log.warning("summarize_with_model failed; using bulletized fallback", exc_info=True)
+            _log.warning(
+                "summarize_with_model failed; using bulletized fallback", exc_info=True
+            )
             summary_text = None
     if not summary_text:
         summary_text = _bulletize(middle)
 
     summary_msg = {
-        "role": "user",
-        "content": "[older context, compacted]\n" + summary_text,
+        "role": "system",
+        "content": SUMMARY_MARKER + "\n" + summary_text,
     }
     boundary_msg = {"role": "system", "content": BOUNDARY_MARKER}
 
@@ -280,12 +324,13 @@ def auto_compact(
 
 # --------- one-stop ------------------------------------------------------
 
+
 def manage_context(
     messages: list[dict],
     *,
     max_tokens: int = 12000,
     keep_recent: int = 12,
-    summarize_with_model: callable | None = None,
+    summarize_with_model: Callable[[list[dict]], str | None] | None = None,
 ) -> list[CompactReport]:
     """Run the three strategies in order: snip → collapse → auto."""
     reports: list[CompactReport] = []

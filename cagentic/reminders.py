@@ -5,6 +5,7 @@ reminder has an id, text, optional due timestamp, and status. Differs from
 state.todos (which is per-session scratch): these are meant to live for
 days/weeks until you mark them done.
 """
+
 from __future__ import annotations
 
 import json
@@ -30,8 +31,8 @@ def _new_id() -> str:
 class Reminder:
     id: str
     text: str
-    status: str = "pending"          # pending | done | snoozed | cancelled
-    due_at: float | None = None      # unix timestamp; None = no specific time
+    status: str = "pending"  # pending | done | snoozed | cancelled
+    due_at: float | None = None  # unix timestamp; None = no specific time
     tags: list[str] = field(default_factory=list)
     created_at: float = field(default_factory=time.time)
     updated_at: float = field(default_factory=time.time)
@@ -40,7 +41,9 @@ class Reminder:
         return asdict(self)
 
     def short(self) -> str:
-        mark = {"done": "✓", "pending": " ", "snoozed": "z", "cancelled": "✗"}.get(self.status, "?")
+        mark = {"done": "✓", "pending": " ", "snoozed": "z", "cancelled": "✗"}.get(
+            self.status, "?"
+        )
         when = ""
         if self.due_at:
             d = self.due_at - time.time()
@@ -49,7 +52,9 @@ class Reminder:
             elif d < 86400 * 2:
                 when = f"  (in {_fmt_dt(d)})"
             else:
-                when = f"  (due {time.strftime('%a %b %d', time.localtime(self.due_at))})"
+                when = (
+                    f"  (due {time.strftime('%a %b %d', time.localtime(self.due_at))})"
+                )
         tags = f"  [{','.join(self.tags)}]" if self.tags else ""
         return f"  [{mark}] {self.id}  {self.text}{tags}{when}"
 
@@ -87,9 +92,7 @@ def _save_all(rems: list[Reminder]) -> None:
     p = _path()
     p.parent.mkdir(parents=True, exist_ok=True)
     tmp = p.with_suffix(".json.tmp")
-    tmp.write_text(
-        json.dumps([r.to_dict() for r in rems], indent=2), encoding="utf-8"
-    )
+    tmp.write_text(json.dumps([r.to_dict() for r in rems], indent=2), encoding="utf-8")
     tmp.replace(p)
     try:
         os.chmod(p, stat.S_IRUSR | stat.S_IWUSR)
@@ -97,7 +100,9 @@ def _save_all(rems: list[Reminder]) -> None:
         pass
 
 
-def add(text: str, *, due_at: float | None = None, tags: list[str] | None = None) -> Reminder:
+def add(
+    text: str, *, due_at: float | None = None, tags: list[str] | None = None
+) -> Reminder:
     rems = _load_all()
     r = Reminder(id=_new_id(), text=text.strip(), due_at=due_at, tags=list(tags or []))
     rems.append(r)
@@ -111,13 +116,10 @@ def update(rid: str, **changes) -> Reminder | None:
     if not rid:
         return None
     rems = _load_all()
-    target = None
-    for r in rems:
-        if r.id == rid or r.id.startswith(rid):
-            target = r
-            break
-    if not target:
+    matches = [r for r in rems if r.id == rid or r.id.startswith(rid)]
+    if len(matches) != 1:
         return None
+    target = matches[0]
     for k, v in changes.items():
         if hasattr(target, k):
             setattr(target, k, v)
@@ -132,25 +134,30 @@ def delete(rid: str) -> bool:
     if not rid:
         return False
     rems = _load_all()
-    n = len(rems)
-    rems = [r for r in rems if not (r.id == rid or r.id.startswith(rid))]
-    if len(rems) == n:
+    matches = [r for r in rems if r.id == rid or r.id.startswith(rid)]
+    if len(matches) != 1:
         return False
+    target = matches[0]
+    rems = [r for r in rems if r.id != target.id]
     _save_all(rems)
     return True
 
 
-def list_all(*, status: str | None = None, include_done: bool = False) -> list[Reminder]:
+def list_all(
+    *, status: str | None = None, include_done: bool = False
+) -> list[Reminder]:
     rems = _load_all()
     if status:
         rems = [r for r in rems if r.status == status]
     elif not include_done:
         rems = [r for r in rems if r.status != "done"]
+
     # Active first (pending), then snoozed, then done; within each, due soonest first
     def _key(r: Reminder) -> tuple:
         order = {"pending": 0, "snoozed": 1, "done": 2, "cancelled": 3}.get(r.status, 4)
         due = r.due_at if r.due_at is not None else float("inf")
         return (order, due, r.created_at)
+
     rems.sort(key=_key)
     return rems
 
@@ -174,6 +181,7 @@ def parse_when(text: str) -> float | None:
         return time.mktime((t.tm_year, t.tm_mon, t.tm_mday, 20, 0, 0, 0, 0, -1))
     # 'in N <unit>'
     import re as _re
+
     # The short-form unit char needs a trailing word boundary so "in 5 months"
     # doesn't match as 5 minutes (m), "in 5 decades" as 5 days (d), etc.
     # match() doesn't anchor the end, so without \b the first letter of any

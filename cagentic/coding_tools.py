@@ -18,6 +18,7 @@ from . import diff as _diff
 from .tools import (
     PathEscapeError,
     ToolContext,
+    _contain,
     _fuzzy_span,
     _norm_eol,
     _read_text_robust,
@@ -443,10 +444,14 @@ def t_notebook_edit(args: dict, ctx: ToolContext) -> str:
 # ============================================================================
 
 def t_enter_worktree(args: dict, ctx: ToolContext) -> str:
-    from pathlib import Path
     path = args["path"]
     create = bool(args.get("create", False))
     p = _resolve(path, ctx.root)
+    if ctx.workspace_boundary is not None:
+        try:
+            p = _contain(p, ctx.workspace_boundary)
+        except PathEscapeError as e:
+            return f"ERROR: pinned project boundary: {e}"
     if not p.exists():
         if not create:
             return f"ERROR: worktree dir not found: {p}. Pass create=true to mkdir it."

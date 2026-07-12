@@ -11,6 +11,7 @@ Implemented as a synchronous tick — the parent calls Coordinator.tick()
 or the model calls coordinator_tick() through a tool. Background mode is
 just `BackgroundExecutor.submit_dream(prompt, run=tick_callable)`.
 """
+
 from __future__ import annotations
 
 import logging
@@ -38,16 +39,26 @@ class CoordResult:
 def _claim_one_task(tasks: TaskGraph, tm: Teammate) -> str | None:
     """Find a pending task whose deps are all done, prefer ones whose
     description/title overlaps with the teammate's skills. Mark active+parent."""
-    pending = [t for t in tasks.list(status="pending") if all(
-        (tasks.get(d) and tasks.get(d).status == "done") for d in t.deps
-    )]
+
+    def deps_done(task) -> bool:
+        for dep_id in task.deps:
+            dependency = tasks.get(dep_id)
+            if dependency is None or dependency.status != "done":
+                return False
+        return True
+
+    pending = [task for task in tasks.list(status="pending") if deps_done(task)]
     if not pending:
         return None
     if tm.skills:
         skills_lc = [s.lower() for s in tm.skills]
-        pending.sort(key=lambda t: -sum(
-            int(s in (t.title + " " + t.description).lower()) for s in skills_lc
-        ))
+        pending.sort(
+            key=lambda t: (
+                -sum(
+                    int(s in (t.title + " " + t.description).lower()) for s in skills_lc
+                )
+            )
+        )
     pick = pending[0]
     tasks.update(pick.id, status="active", parent_id=tm.id)
     return pick.id
@@ -64,6 +75,7 @@ def tick(
     tasks = engine.task_graph
     results: list[CoordResult] = []
 
+    max_per_teammate = max(1, int(max_per_teammate))
     teammates = registry.list_teammates(team)
     for tm in teammates:
         if tm.busy:
@@ -80,7 +92,9 @@ def tick(
                     t = tasks.get(claimed_id)
                     if t:
                         registry.deliver(
-                            tm.team, tm.id, sender="coordinator",
+                            tm.team,
+                            tm.id,
+                            sender="coordinator",
                             kind="task",
                             content=f"[claimed task {t.id}]\n{t.title}\n\n{t.description}",
                         )
@@ -96,29 +110,35 @@ def tick(
                 mailbox = list(tm.mailbox[:max_per_teammate])
                 prompt = _format_prompt(tm, mailbox)
                 answer = fork_subagent(
-                    engine, prompt,
+                    engine,
+                    prompt,
                     title=f"{tm.team}/{tm.name}",
                     role=tm.role,
                 )
                 # Drain processed mail; keep any that came in during the run.
                 tm = registry.get_teammate(tm.team, tm.id) or tm
-                tm.mailbox = tm.mailbox[len(mailbox):]
-                tm.transcript.append({
-                    "ts": __import__("time").time(),
-                    "role": "outbound",
-                    "content": answer,
-                })
-                results.append(CoordResult(
-                    teammate=f"{tm.team}/{tm.name}",
-                    inbox_count=len(mailbox),
-                    answer=answer,
-                    claimed_task_id=claimed_id,
-                ))
+                tm.mailbox = tm.mailbox[len(mailbox) :]
+                tm.transcript.append(
+                    {
+                        "ts": __import__("time").time(),
+                        "role": "outbound",
+                        "content": answer,
+                    }
+                )
+                results.append(
+                    CoordResult(
+                        teammate=f"{tm.team}/{tm.name}",
+                        inbox_count=len(mailbox),
+                        answer=answer,
+                        claimed_task_id=claimed_id,
+                    )
+                )
                 # If we claimed a task, mark it done (or failed if 'ERROR').
                 if claimed_id:
                     t = tasks.get(claimed_id)
                     if t:
-                        status = "done" if not answer.startswith("ERROR") else "failed"
+                        failed = answer.lower().startswith(("error", "sub-agent error"))
+                        status = "failed" if failed else "done"
                         tasks.update(claimed_id, status=status, result=answer[:2000])
             finally:
                 tm.busy = False
@@ -126,14 +146,19 @@ def tick(
         except Exception as e:
             _log.warning(
                 "coordinator: teammate %s/%s failed: %s",
-                tm.team, tm.name, e, exc_info=True,
+                tm.team,
+                tm.name,
+                e,
+                exc_info=True,
             )
-            results.append(CoordResult(
-                teammate=f"{tm.team}/{tm.name}",
-                inbox_count=len(tm.mailbox),
-                answer=f"ERROR: coordinator failed processing teammate: {type(e).__name__}: {e}",
-                claimed_task_id=None,
-            ))
+            results.append(
+                CoordResult(
+                    teammate=f"{tm.team}/{tm.name}",
+                    inbox_count=len(tm.mailbox),
+                    answer=f"ERROR: coordinator failed processing teammate: {type(e).__name__}: {e}",
+                    claimed_task_id=None,
+                )
+            )
 
     return results
 
@@ -145,7 +170,7 @@ def _format_prompt(tm: Teammate, mailbox: list[dict]) -> str:
     if tm.skills:
         head += f"\nSkills: {', '.join(tm.skills)}"
     body = "\n\n".join(
-        f"From {m.get('from','?')} ({m.get('kind','msg')}):\n{m.get('content','')}"
+        f"From {m.get('from', '?')} ({m.get('kind', 'msg')}):\n{m.get('content', '')}"
         for m in mailbox
     )
     return f"{head}\n\nIncoming:\n{body}\n\nRespond concisely and act if needed."

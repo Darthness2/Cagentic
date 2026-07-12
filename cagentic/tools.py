@@ -91,6 +91,7 @@ class ToolContext:
     yolo: bool = False
     github_token: str | None = None
     default_repository: str | None = None
+    workspace_boundary: Path | None = None
     insecure_ssl: bool = False
     # Plumbing populated by the QueryEngine.
     state: object | None = None
@@ -572,6 +573,11 @@ def t_set_workspace(args: dict, ctx: ToolContext) -> str:
     path = args["path"]
     create = bool(args.get("create", False))
     p = _resolve(path, ctx.root)
+    if ctx.workspace_boundary is not None:
+        try:
+            p = _contain(p, ctx.workspace_boundary)
+        except PathEscapeError as e:
+            return f"ERROR: pinned project boundary: {e}"
     if not p.exists():
         if not create:
             return f"ERROR: directory does not exist: {p}. Pass create=true to mkdir it."

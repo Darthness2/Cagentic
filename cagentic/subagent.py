@@ -40,6 +40,8 @@ def fork_subagent(
         workspace=parent.state.workspace,
         home=parent.state.home,
         github_token=parent.state.github_token,
+        default_repository=parent.state.default_repository,
+        workspace_boundary=parent.state.workspace_boundary,
         yolo=parent.state.yolo,
         insecure_ssl=parent.state.insecure_ssl,
         tools_enabled=parent.state.tools_enabled,

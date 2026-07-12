@@ -30,6 +30,7 @@ talk to it. So the bridge is *not* trusted to its bind address alone:
 Every mutating browser action still goes through Cagentic's normal approval
 prompt before it's queued.
 """
+
 from __future__ import annotations
 
 import hmac
@@ -78,18 +79,19 @@ class BrowserBridge:
         self.token: str = ""
         self._server: ThreadingHTTPServer | None = None
         self._thread: threading.Thread | None = None
-        self._lock = threading.Lock()
+        self._lock = threading.RLock()
         self._cv = threading.Condition(self._lock)
-        self._queue: list[dict] = []         # commands awaiting the extension
+        self._queue: list[dict] = []  # commands awaiting the extension
         self._results: dict[int, dict] = {}  # command id -> result
+        self._pending: set[int] = set()  # command ids still awaited by send()
         self._next_id = 1
-        self._last_poll = 0.0                # monotonic time of last extension poll
-        self.error: str | None = None        # set if start() failed
+        self._last_poll = 0.0  # monotonic time of last extension poll
+        self.error: str | None = None  # set if start() failed
         # Live status surfaced to the extension popup.
-        self.model: str | None = None        # the loaded Ollama model
-        self.activity: str = "idle"          # what the assistant is doing
+        self.model: str | None = None  # the loaded Ollama model
+        self.activity: str = "idle"  # what the assistant is doing
         self.activity_at: float = time.time()
-        self._recent: list[dict] = []        # last browser actions, newest first
+        self._recent: list[dict] = []  # last browser actions, newest first
 
     # -- lifecycle ----------------------------------------------------------
 
@@ -104,7 +106,7 @@ class BrowserBridge:
         except OSError as e:
             self.error = f"could not bind 127.0.0.1:{self.port} ({e})"
             return False
-        server.bridge = self            # type: ignore[attr-defined]
+        server.bridge = self  # type: ignore[attr-defined]
         server.daemon_threads = True
         self._server = server
         self._thread = threading.Thread(target=server.serve_forever, daemon=True)
@@ -175,7 +177,9 @@ class BrowserBridge:
 
     # -- live status (for the extension popup) ------------------------------
 
-    def set_status(self, *, model: str | None = None, activity: str | None = None) -> None:
+    def set_status(
+        self, *, model: str | None = None, activity: str | None = None
+    ) -> None:
         """Update what the popup shows — the loaded model and current activity."""
         with self._lock:
             if model is not None:
@@ -186,9 +190,15 @@ class BrowserBridge:
 
     def _record(self, action: str, summary: str, ok: bool) -> None:
         with self._lock:
-            self._recent.insert(0, {
-                "action": action, "summary": summary, "ok": ok, "ts": time.time(),
-            })
+            self._recent.insert(
+                0,
+                {
+                    "action": action,
+                    "summary": summary,
+                    "ok": ok,
+                    "ts": time.time(),
+                },
+            )
             del self._recent[8:]
 
     def status(self) -> dict:
@@ -205,7 +215,9 @@ class BrowserBridge:
 
     # -- agent side ---------------------------------------------------------
 
-    def send(self, action: str, params: dict | None = None, timeout: float = 30.0) -> dict:
+    def send(
+        self, action: str, params: dict | None = None, timeout: float = 30.0
+    ) -> dict:
         """Queue a command for the extension and block until its result
         comes back. Returns {"ok": bool, "result"|"error": ...}."""
         params = params or {}
@@ -215,6 +227,7 @@ class BrowserBridge:
         with self._cv:
             cmd_id = self._next_id
             self._next_id += 1
+            self._pending.add(cmd_id)
             self._queue.append({"id": cmd_id, "action": action, "params": params})
             self._cv.notify_all()
             deadline = time.monotonic() + timeout
@@ -223,15 +236,23 @@ class BrowserBridge:
                 if remaining <= 0:
                     # Give up: drop the command so the extension doesn't run it late.
                     self._queue = [c for c in self._queue if c["id"] != cmd_id]
+                    self._pending.discard(cmd_id)
                     self._record(action, summary, False)
                     if not self.is_connected():
-                        return {"ok": False, "error": (
-                            "the Cagentic Chrome extension isn't connected — "
-                            "install or enable it (run /browser for setup steps)"
-                        )}
-                    return {"ok": False, "error": f"browser command '{action}' timed out"}
+                        return {
+                            "ok": False,
+                            "error": (
+                                "the Cagentic Chrome extension isn't connected — "
+                                "install or enable it (run /browser for setup steps)"
+                            ),
+                        }
+                    return {
+                        "ok": False,
+                        "error": f"browser command '{action}' timed out",
+                    }
                 self._cv.wait(remaining)
             result = self._results.pop(cmd_id)
+            self._pending.discard(cmd_id)
         self._record(action, summary, bool(result.get("ok")))
         return result
 
@@ -250,6 +271,8 @@ class BrowserBridge:
 
     def _deliver_result(self, cmd_id: int, ok: bool, result) -> None:
         with self._cv:
+            if cmd_id not in self._pending:
+                return
             self._results[cmd_id] = {"ok": ok, "result": result}
             self._cv.notify_all()
 
@@ -333,6 +356,7 @@ class _Handler(BaseHTTPRequestHandler):
             key, _, val = part.partition("=")
             if key == "token" and val:
                 from urllib.parse import unquote
+
                 return unquote(val)
         return None
 

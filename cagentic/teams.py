@@ -9,11 +9,13 @@ teammates outlive a session.
 Mailbox shape: [{ts, from, kind, content}, ...]
 Transcript shape: [{ts, role, from?, content}, ...]
 """
+
 from __future__ import annotations
 
 import json
 import logging
 import os
+import re
 import tempfile
 import threading
 import time
@@ -30,6 +32,17 @@ _log = logging.getLogger(__name__)
 _write_lock = threading.Lock()
 
 
+def _safe_component(value: str, label: str) -> str:
+    value = str(value or "").strip()
+    if (
+        not value
+        or value in (".", "..")
+        or not re.fullmatch(r"[A-Za-z0-9_. -]{1,80}", value)
+    ):
+        raise ValueError(f"invalid {label}")
+    return value
+
+
 def teams_root() -> Path:
     d = config_dir() / "teams"
     d.mkdir(parents=True, exist_ok=True)
@@ -41,13 +54,15 @@ class Teammate:
     id: str
     team: str
     name: str
-    role: str = ""                     # system-prompt addendum
-    skills: list[str] = field(default_factory=list)  # advisory tags for coordinator auto-claim
+    role: str = ""  # system-prompt addendum
+    skills: list[str] = field(
+        default_factory=list
+    )  # advisory tags for coordinator auto-claim
     mailbox: list[dict] = field(default_factory=list)
     transcript: list[dict] = field(default_factory=list)
     created_at: float = field(default_factory=time.time)
     updated_at: float = field(default_factory=time.time)
-    busy: bool = False                  # true while coordinator is processing this teammate
+    busy: bool = False  # true while coordinator is processing this teammate
 
     def to_dict(self) -> dict:
         return asdict(self)
@@ -68,12 +83,12 @@ class TeamRegistry:
     # -- teams -----------------------------------------------------------
 
     def create_team(self, name: str) -> Path:
-        d = self.root / name
+        d = self.root / _safe_component(name, "team name")
         d.mkdir(parents=True, exist_ok=True)
         return d
 
     def delete_team(self, name: str) -> bool:
-        d = self.root / name
+        d = self.root / _safe_component(name, "team name")
         if not d.exists():
             return False
         for f in d.glob("*.json"):
@@ -87,23 +102,33 @@ class TeamRegistry:
     # -- teammates -------------------------------------------------------
 
     def add_teammate(
-        self, team: str, name: str, role: str = "", skills: list[str] | None = None,
+        self,
+        team: str,
+        name: str,
+        role: str = "",
+        skills: list[str] | None = None,
     ) -> Teammate:
         self.create_team(team)
         tm = Teammate(
             id=new_id(TaskKind.AGENT),
-            team=team, name=name, role=role,
+            team=team,
+            name=name,
+            role=role,
             skills=list(skills or []),
         )
         self._write(tm)
         return tm
 
     def get_teammate(self, team: str, name_or_id: str) -> Teammate | None:
-        d = self.root / team
+        d = self.root / _safe_component(team, "team name")
         if not d.exists():
             return None
         # try id first (filename), then name
-        p = d / f"{name_or_id}.json"
+        try:
+            safe_lookup = _safe_component(name_or_id, "teammate name or id")
+        except ValueError:
+            safe_lookup = ""
+        p = d / f"{safe_lookup}.json" if safe_lookup else d / ".invalid"
         if not p.exists():
             for q in d.glob("*.json"):
                 try:
@@ -124,7 +149,7 @@ class TeamRegistry:
         out: list[Teammate] = []
         teams = [team] if team else self.list_teams()
         for t in teams:
-            d = self.root / t
+            d = self.root / _safe_component(t, "team name")
             if not d.exists():
                 continue
             for p in sorted(d.glob("*.json")):
@@ -143,7 +168,11 @@ class TeamRegistry:
         tm = self.get_teammate(team, name_or_id)
         if not tm:
             return False
-        p = self.root / team / f"{tm.id}.json"
+        p = (
+            self.root
+            / _safe_component(team, "team name")
+            / f"{_safe_component(tm.id, 'teammate id')}.json"
+        )
         try:
             p.unlink()
             return True
@@ -153,26 +182,36 @@ class TeamRegistry:
     # -- protocol: deliver a message to a teammate's mailbox -------------
 
     def deliver(
-        self, team: str, recipient: str, sender: str, content: str, *, kind: str = "msg",
+        self,
+        team: str,
+        recipient: str,
+        sender: str,
+        content: str,
+        *,
+        kind: str = "msg",
     ) -> Teammate | None:
         tm = self.get_teammate(team, recipient)
         if not tm:
             return None
         entry = {"ts": time.time(), "from": sender, "kind": kind, "content": content}
         tm.mailbox.append(entry)
-        tm.transcript.append({"ts": entry["ts"], "role": "inbound", "from": sender, "content": content})
+        tm.transcript.append(
+            {"ts": entry["ts"], "role": "inbound", "from": sender, "content": content}
+        )
         return self.update_teammate(tm)
 
     # -- internals -------------------------------------------------------
 
     def _write(self, tm: Teammate) -> None:
-        d = self.root / tm.team
+        d = self.root / _safe_component(tm.team, "team name")
         d.mkdir(parents=True, exist_ok=True)
-        p = d / f"{tm.id}.json"
+        p = d / f"{_safe_component(tm.id, 'teammate id')}.json"
         payload = json.dumps(tm.to_dict(), indent=2)
         # Unique temp name + lock avoids the fixed-temp corruption race.
         with _write_lock:
-            fd, tmp_name = tempfile.mkstemp(dir=str(d), prefix=f"{tm.id}.", suffix=".json.tmp")
+            fd, tmp_name = tempfile.mkstemp(
+                dir=str(d), prefix=f"{tm.id}.", suffix=".json.tmp"
+            )
             try:
                 with os.fdopen(fd, "w", encoding="utf-8") as f:
                     f.write(payload)

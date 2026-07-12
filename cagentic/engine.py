@@ -2,6 +2,7 @@
 
 Event-stream architecture with a personal-assistant system prompt.
 """
+
 from __future__ import annotations
 
 import json
@@ -19,6 +20,7 @@ from .ollama_client import OllamaClient, OllamaError, ToolsUnsupportedError
 from .permissions import CONCURRENT_SAFE, Resolver, auto_deny_resolver, can_use_tool
 from .services.compact import (
     BOUNDARY_MARKER,
+    SUMMARY_MARKER,
     approx_tokens as estimate_tokens,
     manage_context,
 )
@@ -48,9 +50,21 @@ COMPACT_KEEP_RECENT = 24
 
 
 EventKind = Literal[
-    "system", "user", "thinking", "plan", "narration", "delta", "assistant",
-    "tool_call", "tool_denied", "tool_result",
-    "info", "warn", "error", "compact", "done",
+    "system",
+    "user",
+    "thinking",
+    "plan",
+    "narration",
+    "delta",
+    "assistant",
+    "tool_call",
+    "tool_denied",
+    "tool_result",
+    "info",
+    "warn",
+    "error",
+    "compact",
+    "done",
 ]
 
 
@@ -63,7 +77,9 @@ class Message:
 
 _TOOL_TAG_RX = re.compile(r"<tool>\s*(\{.*?\})\s*</tool>", re.DOTALL)
 _PLAN_RX = re.compile(r"<plan>(.*?)</plan>", re.DOTALL | re.IGNORECASE)
-_THINK_RX = re.compile(r"<think(?:ing)?>(.*?)</think(?:ing)?>", re.DOTALL | re.IGNORECASE)
+_THINK_RX = re.compile(
+    r"<think(?:ing)?>(.*?)</think(?:ing)?>", re.DOTALL | re.IGNORECASE
+)
 _FENCE_RX = re.compile(r"```(?:json|JSON)?\s*\n?(.*?)\n?\s*```", re.DOTALL)
 _DS_BAR = r"[｜|]"
 _DEEPSEEK_CALL_RX = re.compile(
@@ -159,21 +175,25 @@ def _extract_plan(text: str) -> tuple[list[str], str]:
         s = re.sub(r"^(?:[-*•]|\d+[.)])\s*", "", s)
         if s:
             steps.append(s)
-    cleaned = (text[:m.start()] + text[m.end():]).strip()
+    cleaned = (text[: m.start()] + text[m.end() :]).strip()
     return steps, cleaned
 
 
 def _extract_thinking(text: str) -> tuple[list[str], str]:
     blocks: list[str] = []
+
     def _consume(m):
         blocks.append(m.group(1).strip())
         return ""
+
     cleaned = _THINK_RX.sub(_consume, text).strip()
     return blocks, cleaned
 
 
 def _strip_fakes(text: str) -> tuple[bool, str]:
-    had = bool(_DEEPSEEK_OUTPUTS_BLOCK_RX.search(text) or _DEEPSEEK_STRAY_TOKEN_RX.search(text))
+    had = bool(
+        _DEEPSEEK_OUTPUTS_BLOCK_RX.search(text) or _DEEPSEEK_STRAY_TOKEN_RX.search(text)
+    )
     out = _DEEPSEEK_OUTPUTS_BLOCK_RX.sub("", text)
     out = _DEEPSEEK_STRAY_TOKEN_RX.sub("", out)
     return had, out
@@ -211,9 +231,12 @@ def _summarize_args(name: str, args: dict) -> str:
         code = str(args.get("code", ""))
         return code if len(code) < 60 else code[:57] + "…"
     if name == "browser_scroll":
-        return str(args.get("selector") or
-                   (f"y={args['y']}" if args.get("y") is not None else "")
-                   or args.get("to") or "bottom")
+        return str(
+            args.get("selector")
+            or (f"y={args['y']}" if args.get("y") is not None else "")
+            or args.get("to")
+            or "bottom"
+        )
     if name == "browser_click_at":
         return f"({args.get('x')}, {args.get('y')})"
     if name == "browser_links":
@@ -224,7 +247,9 @@ def _summarize_args(name: str, args: dict) -> str:
     return ""
 
 
-def _poke_browser(state, *, model: str | None = None, activity: str | None = None) -> None:
+def _poke_browser(
+    state, *, model: str | None = None, activity: str | None = None
+) -> None:
     """Push the assistant's live status to the browser bridge (if one is up)
     so the Chrome extension popup can show what Cagentic is doing."""
     bridge = getattr(state, "browser", None)
@@ -442,6 +467,7 @@ After the call, STOP. The harness emits tool outputs; you must NOT.
     # picture of who it's talking to ("Sam, vegetarian, lives in Seattle…").
     try:
         from . import notes as _notes
+
         for profile_name in ("profile", "about-me", "me"):
             n = _notes.get(profile_name)
             if n:
@@ -468,6 +494,7 @@ def _resolve_mention(token: str, workspace: Path, home: Path):
             line_start = int(m.group(1))
             line_end = int(m.group(2)) if m.group(2) else line_start
     import os as _os
+
     expanded = _os.path.expanduser(_os.path.expandvars(path_part))
     p = Path(expanded)
     if not p.is_absolute():
@@ -477,7 +504,9 @@ def _resolve_mention(token: str, workspace: Path, home: Path):
     return None
 
 
-def process_user_input(raw: str, workspace: Path | None = None, home: Path | None = None) -> dict:
+def process_user_input(
+    raw: str, workspace: Path | None = None, home: Path | None = None
+) -> dict:
     if not workspace or "@" not in raw:
         return {"role": "user", "content": raw}
     attachments: list[str] = []
@@ -494,6 +523,7 @@ def process_user_input(raw: str, workspace: Path | None = None, home: Path | Non
         # any plain file — so "summarize @report.pdf" works in one shot.
         try:
             from . import documents as _documents
+
             if _documents.is_document(p):
                 text = _documents.extract_text(p)
             else:
@@ -509,7 +539,9 @@ def process_user_input(raw: str, workspace: Path | None = None, home: Path | Non
         selected = lines[lo:hi]
         numbered = "\n".join(f"{lo + i + 1:>5}  {ln}" for i, ln in enumerate(selected))
         range_hdr = f":{s}-{e}" if s else ""
-        attachments.append(f"--- @{p}{range_hdr}  ({len(lines)} lines total) ---\n{numbered}")
+        attachments.append(
+            f"--- @{p}{range_hdr}  ({len(lines)} lines total) ---\n{numbered}"
+        )
     if not attachments:
         return {"role": "user", "content": raw}
     body = raw + "\n\n" + "\n\n".join(attachments)
@@ -522,7 +554,9 @@ def normalize_messages_for_api(messages: list[dict]) -> list[dict]:
     out: list[dict] = []
     for m in messages:
         cleaned = {k: v for k, v in m.items() if k in keep_keys}
-        if cleaned.get("role") == "system" and BOUNDARY_MARKER in (cleaned.get("content") or ""):
+        if cleaned.get("role") == "system" and BOUNDARY_MARKER in (
+            cleaned.get("content") or ""
+        ):
             continue
         out.append(cleaned)
     return out
@@ -584,19 +618,36 @@ class StreamingToolExecutor:
         name, args, role = call
         tid = new_id(TaskKind.BASH if name == "run_bash" else TaskKind.TOOL)
         summary = _summarize_args(name, args)
-        yield Message("tool_call", {
-            "id": tid, "name": name, "args": args, "role": role,
-            "summary": summary,
-        }, task_id=tid)
+        yield Message(
+            "tool_call",
+            {
+                "id": tid,
+                "name": name,
+                "args": args,
+                "role": role,
+                "summary": summary,
+            },
+            task_id=tid,
+        )
 
         allowed, reason = can_use_tool(name, args, self.state, self.resolver)
         if not allowed:
             err = f"ERROR: permission denied ({reason})"
-            yield Message("tool_denied", {"id": tid, "name": name, "reason": reason}, task_id=tid)
-            yield Message("tool_result", {
-                "id": tid, "name": name, "result": err,
-                "ok": False, "first_line": err, "role": role,
-            }, task_id=tid)
+            yield Message(
+                "tool_denied", {"id": tid, "name": name, "reason": reason}, task_id=tid
+            )
+            yield Message(
+                "tool_result",
+                {
+                    "id": tid,
+                    "name": name,
+                    "result": err,
+                    "ok": False,
+                    "first_line": err,
+                    "role": role,
+                },
+                task_id=tid,
+            )
             return
 
         ctx = ToolContext(
@@ -621,12 +672,20 @@ class StreamingToolExecutor:
         # Tools (browser_screenshot) stash inline images here; pass them
         # through so _execute_and_record can attach them to the message.
         images = list(getattr(ctx, "pending_images", None) or [])
-        yield Message("tool_result", {
-            "id": tid, "name": name, "result": result,
-            "ok": ok, "first_line": first_line, "role": role,
-            "ctx_root": str(ctx.root),
-            "images": images,
-        }, task_id=tid)
+        yield Message(
+            "tool_result",
+            {
+                "id": tid,
+                "name": name,
+                "result": result,
+                "ok": ok,
+                "first_line": first_line,
+                "role": role,
+                "ctx_root": str(ctx.root),
+                "images": images,
+            },
+            task_id=tid,
+        )
 
     def _run_one_collect(self, call):
         return list(self._run_one(call))
@@ -657,11 +716,15 @@ class QueryEngine:
         self.task_graph = TaskGraph()
         self.background = BackgroundExecutor(tasks=self.task_graph)
         from .teams import TeamRegistry
+
         self.teams = TeamRegistry()
         self.executor = StreamingToolExecutor(
-            state, self.permission_resolver,
-            engine=self, background=self.background,
-            tasks=self.task_graph, teams=self.teams,
+            state,
+            self.permission_resolver,
+            engine=self,
+            background=self.background,
+            tasks=self.task_graph,
+            teams=self.teams,
         )
         # Optional extra instructions appended to the system prompt (e.g. the
         # gateway teaches the model to drive its HUD). Empty for the REPL.
@@ -670,7 +733,9 @@ class QueryEngine:
         # that belongs to a project.
         self.project_system_prompt: str = ""
         self.project_context: str = ""
-        self.messages: list[dict] = [{"role": "system", "content": self._system_content()}]
+        self.messages: list[dict] = [
+            {"role": "system", "content": self._system_content()}
+        ]
         self._recent_calls: list[tuple[str, str]] = []
         self._recent_results: list[tuple[str, str]] = []
         # Signatures already counted toward loop detection in the CURRENT
@@ -708,8 +773,16 @@ class QueryEngine:
         self._usage = {"input": 0, "output": 0, "ms": 0}
 
     def load_messages(self, messages: list[dict]) -> None:
-        if not messages or messages[0].get("role") != "system":
-            messages = [{"role": "system", "content": self._system_content()}] + list(messages)
+        first_content = str(messages[0].get("content") or "") if messages else ""
+        if (
+            not messages
+            or messages[0].get("role") != "system"
+            or SUMMARY_MARKER in first_content
+            or BOUNDARY_MARKER in first_content
+        ):
+            messages = [{"role": "system", "content": self._system_content()}] + list(
+                messages
+            )
         self.messages = list(messages)
 
     def refresh_system_prompt(self) -> None:
@@ -734,7 +807,9 @@ class QueryEngine:
             self.state.update(**resets)
         _poke_browser(self.state, model=self.model, activity="thinking")
 
-        user_msg = process_user_input(prompt, workspace=self.state.workspace, home=self.state.home)
+        user_msg = process_user_input(
+            prompt, workspace=self.state.workspace, home=self.state.home
+        )
         yield Message("user", {"text": prompt})
 
         record_transcript(self.session_id or "", "user", prompt)
@@ -743,9 +818,12 @@ class QueryEngine:
         _pre = estimate_tokens(self.messages)
         will_compact = _pre > COMPACT_TOKENS
         if will_compact:
-            yield Message("info", {
-                "text": f"compacting context (~{_pre:,} → ≤{COMPACT_TOKENS:,} tokens)…"
-            })
+            yield Message(
+                "info",
+                {
+                    "text": f"compacting context (~{_pre:,} → ≤{COMPACT_TOKENS:,} tokens)…"
+                },
+            )
         summarize_fn = (
             self._summarize_with_model
             if (self.config and self.config.get("ollama", {}).get("llm_summarize"))
@@ -758,9 +836,14 @@ class QueryEngine:
             summarize_with_model=summarize_fn,
         ):
             if r.triggered:
-                yield Message("compact", {
-                    "strategy": r.strategy, "before": r.before, "after": r.after,
-                })
+                yield Message(
+                    "compact",
+                    {
+                        "strategy": r.strategy,
+                        "before": r.before,
+                        "after": r.after,
+                    },
+                )
 
         for _ in range(MAX_TOOL_ITERATIONS):
             for note in self.background.drain_notifications():
@@ -769,16 +852,26 @@ class QueryEngine:
                     f"finished ({note['status']}): {note['label']}\n{note['result']}"
                 )
                 self.messages.append({"role": "user", "content": inject})
-                yield Message("warn", {"text": f"background {note['id']} {note['status']} — injected"})
+                yield Message(
+                    "warn",
+                    {"text": f"background {note['id']} {note['status']} — injected"},
+                )
             est_tokens = estimate_tokens(self.messages)
             if est_tokens >= 4000:
-                tool_count = len(all_tool_schemas(self.state.tool_groups)) if self.state.tools_enabled else 0
-                yield Message("info", {
-                    "text": (
-                        f"sending ~{est_tokens:,} tokens to {self.model}"
-                        + (f" · {tool_count} tools" if tool_count else "")
-                    ),
-                })
+                tool_count = (
+                    len(all_tool_schemas(self.state.tool_groups))
+                    if self.state.tools_enabled
+                    else 0
+                )
+                yield Message(
+                    "info",
+                    {
+                        "text": (
+                            f"sending ~{est_tokens:,} tokens to {self.model}"
+                            + (f" · {tool_count} tools" if tool_count else "")
+                        ),
+                    },
+                )
             try:
                 msg, usage = self._chat_once(yield_deltas=self.stream)
                 if isinstance(msg, _StreamGen):
@@ -809,12 +902,17 @@ class QueryEngine:
                     except OllamaError as e:
                         spinner.stop()
                         watchdog.stop()
-                        yield Message("warn", {
-                            "text": f"streaming connection broke ({e}); retrying without streaming."
-                        })
+                        yield Message(
+                            "warn",
+                            {
+                                "text": f"streaming connection broke ({e}); retrying without streaming."
+                            },
+                        )
                         msg = self._chat_nonstream()
                         if msg is None:
-                            yield Message("error", {"text": "non-streaming retry also failed"})
+                            yield Message(
+                                "error", {"text": "non-streaming retry also failed"}
+                            )
                             return
                         usage = {}
                         final_msg = "RETRIED"
@@ -822,15 +920,18 @@ class QueryEngine:
                         spinner.stop()
                         watchdog.stop()
                     if final_msg is None:
-                        yield Message("warn", {
-                            "text": "stream produced no chunks — try /retry"
-                        })
+                        yield Message(
+                            "warn", {"text": "stream produced no chunks — try /retry"}
+                        )
                         return
                     if final_msg != "RETRIED":
                         if final_msg.get("truncated"):
-                            yield Message("warn", {
-                                "text": "response was truncated (stream closed early); using what arrived"
-                            })
+                            yield Message(
+                                "warn",
+                                {
+                                    "text": "response was truncated (stream closed early); using what arrived"
+                                },
+                            )
                         msg = final_msg["message"]
                         usage = {
                             "input": final_msg.get("prompt_eval_count", 0),
@@ -838,11 +939,18 @@ class QueryEngine:
                             "ms": final_msg.get("total_duration_ns", 0) // 1_000_000,
                         }
             except ToolsUnsupportedError:
-                yield Message("warn", {"text": f"model '{self.model}' lacks native tool support — switching to text-protocol fallback."})
+                yield Message(
+                    "warn",
+                    {
+                        "text": f"model '{self.model}' lacks native tool support — switching to text-protocol fallback."
+                    },
+                )
                 self.state.update(tools_enabled=False)
                 self.refresh_system_prompt()
                 if self.config is not None:
-                    set_value(self.config, f"models.{self.model}.tools_supported", False)
+                    set_value(
+                        self.config, f"models.{self.model}.tools_supported", False
+                    )
                 continue
             except OllamaError as e:
                 yield Message("error", {"text": str(e)})
@@ -859,18 +967,25 @@ class QueryEngine:
             self.messages.append(msg)
 
             record_transcript(
-                self.session_id or "", "assistant", cleaned,
+                self.session_id or "",
+                "assistant",
+                cleaned,
                 tool_calls=msg.get("tool_calls") or [],
             )
 
             if had_fakes:
-                yield Message("warn", {"text": "model fabricated tool outputs — asking it to retry."})
-                self.messages.append({
-                    "role": "system",
-                    "content": (
-                        "STOP. Tool outputs are mine to emit. Send a single tool call and STOP."
-                    ),
-                })
+                yield Message(
+                    "warn",
+                    {"text": "model fabricated tool outputs — asking it to retry."},
+                )
+                self.messages.append(
+                    {
+                        "role": "system",
+                        "content": (
+                            "STOP. Tool outputs are mine to emit. Send a single tool call and STOP."
+                        ),
+                    }
+                )
                 continue
 
             thinks, content = _extract_thinking(cleaned)
@@ -890,11 +1005,14 @@ class QueryEngine:
                 if narration:
                     yield Message("assistant", {"text": narration})
                 _poke_browser(self.state, activity="idle")
-                yield Message("done", {
-                    "text": narration,
-                    "usage": dict(self._usage),
-                    "session_id": self.session_id,
-                })
+                yield Message(
+                    "done",
+                    {
+                        "text": narration,
+                        "usage": dict(self._usage),
+                        "session_id": self.session_id,
+                    },
+                )
                 return
 
             if narration and not self.stream:
@@ -907,22 +1025,32 @@ class QueryEngine:
             if self._abort_turn:
                 salvaged = self._last_assistant_narration()
                 if salvaged:
-                    yield Message("assistant", {"text": (
-                        salvaged + "\n\n_(I got stuck. Try /retry.)_"
-                    )})
+                    yield Message(
+                        "assistant",
+                        {"text": (salvaged + "\n\n_(I got stuck. Try /retry.)_")},
+                    )
                 _poke_browser(self.state, activity="idle")
-                yield Message("done", {
-                    "text": "Stopped: stuck in a loop. Try /retry or /new for a fresh context.",
-                    "usage": dict(self._usage),
-                    "session_id": self.session_id,
-                })
+                yield Message(
+                    "done",
+                    {
+                        "text": "Stopped: stuck in a loop. Try /retry or /new for a fresh context.",
+                        "usage": dict(self._usage),
+                        "session_id": self.session_id,
+                    },
+                )
                 return
 
-        yield Message("error", {"text": f"hit tool-call limit ({MAX_TOOL_ITERATIONS}); stopping."})
+        yield Message(
+            "error", {"text": f"hit tool-call limit ({MAX_TOOL_ITERATIONS}); stopping."}
+        )
 
     def _chat_once(self, *, yield_deltas: bool):
         api_messages = normalize_messages_for_api(self.messages)
-        tools = all_tool_schemas(self.state.tool_groups, compact=self.compact_schemas) if self.state.tools_enabled else None
+        tools = (
+            all_tool_schemas(self.state.tool_groups, compact=self.compact_schemas)
+            if self.state.tools_enabled
+            else None
+        )
 
         if yield_deltas and hasattr(self.client, "chat_stream_assembled"):
             gen = self.client.chat_stream_assembled(
@@ -944,7 +1072,11 @@ class QueryEngine:
 
     def _chat_nonstream(self) -> dict | None:
         api_messages = normalize_messages_for_api(self.messages)
-        tools = all_tool_schemas(self.state.tool_groups, compact=self.compact_schemas) if self.state.tools_enabled else None
+        tools = (
+            all_tool_schemas(self.state.tool_groups, compact=self.compact_schemas)
+            if self.state.tools_enabled
+            else None
+        )
         try:
             with ui.Spinner("retrying (no stream)"):
                 return self.client.chat(
@@ -965,11 +1097,16 @@ class QueryEngine:
                 content = (m.get("content") or "")[:1500]
                 short.append({"role": m.get("role"), "content": content})
             req = [
-                {"role": "system", "content": "Summarize the following conversation as a tight bullet list. <=200 words."},
+                {
+                    "role": "system",
+                    "content": "Summarize the following conversation as a tight bullet list. <=200 words.",
+                },
                 {"role": "user", "content": json.dumps(short)},
             ]
             res = self.client.chat(
-                model=self.model, messages=req, tools=None,
+                model=self.model,
+                messages=req,
+                tools=None,
                 options={"temperature": 0.0},
             )
             return (res.get("content") or "").strip() or None
@@ -1022,13 +1159,15 @@ class QueryEngine:
         self._recent_calls = self._recent_calls[-12:]
         if run >= LOOP_THRESHOLD:
             self._recent_calls = []
-            self.messages.append({
-                "role": "user",
-                "content": (
-                    f"You called {name} with the same arguments across {run} turns. "
-                    f"Stop repeating. Try a different approach or ask a clarifying question."
-                ),
-            })
+            self.messages.append(
+                {
+                    "role": "user",
+                    "content": (
+                        f"You called {name} with the same arguments across {run} turns. "
+                        f"Stop repeating. Try a different approach or ask a clarifying question."
+                    ),
+                }
+            )
             return True
         return False
 
@@ -1051,9 +1190,13 @@ class QueryEngine:
     # SHOULD call these multiple times in a turn.
     _LOOP_EXEMPT = {
         "sleep",
-        "browser_tabs", "browser_status",
-        "task_status", "task_list", "task_wait",
-        "reminder_list", "note_list",
+        "browser_tabs",
+        "browser_status",
+        "task_status",
+        "task_list",
+        "task_wait",
+        "reminder_list",
+        "note_list",
     }
 
     def _result_loop_count(self, name: str, result: str) -> int:
@@ -1095,7 +1238,9 @@ class QueryEngine:
 
         for ev in self.executor.execute(cleaned_calls):
             if ev.kind == "tool_call":
-                _poke_browser(self.state, activity=f"running {ev.data.get('name', 'a tool')}")
+                _poke_browser(
+                    self.state, activity=f"running {ev.data.get('name', 'a tool')}"
+                )
             yield ev
             if ev.kind == "tool_result":
                 d = ev.data
@@ -1125,33 +1270,45 @@ class QueryEngine:
                 steer_key = (name, (result or "")[:240])
                 if seen >= LOOP_THRESHOLD * 2:
                     # Hard abort takes precedence — the soft steer didn't work.
-                    yield Message("warn", {
-                        "text": f"loop unbroken after {seen} identical results — ending turn"
-                    })
+                    yield Message(
+                        "warn",
+                        {
+                            "text": f"loop unbroken after {seen} identical results — ending turn"
+                        },
+                    )
                     self._abort_turn = True
                     return
-                if seen >= LOOP_THRESHOLD and steer_key not in self._steered_result_keys:
+                if (
+                    seen >= LOOP_THRESHOLD
+                    and steer_key not in self._steered_result_keys
+                ):
                     # Fire on >= (not ==): counts can jump past the exact value
                     # when exempt/CACHED/concurrent results land, which silently
                     # skipped the old `== LOOP_THRESHOLD` branch. Steer once per
                     # repeated key per turn so we don't re-inject on every
                     # subsequent identical result.
                     self._steered_result_keys.add(steer_key)
-                    yield Message("warn", {
-                        "text": f"loop: {name} returned the same result {seen}× — steering hard"
-                    })
-                    self.messages.append({
-                        "role": "system",
-                        "content": (
-                            f"STOP. You have called {name} and received the SAME result {seen} "
-                            f"times. Do NOT call {name} again. Either act on what you have, "
-                            f"or give the user a short final answer."
-                        ),
-                    })
+                    yield Message(
+                        "warn",
+                        {
+                            "text": f"loop: {name} returned the same result {seen}× — steering hard"
+                        },
+                    )
+                    self.messages.append(
+                        {
+                            "role": "system",
+                            "content": (
+                                f"STOP. You have called {name} and received the SAME result {seen} "
+                                f"times. Do NOT call {name} again. Either act on what you have, "
+                                f"or give the user a short final answer."
+                            ),
+                        }
+                    )
 
 
 class _StreamGen:
     def __init__(self, gen):
         self.gen = gen
+
     def iter(self):
         return self.gen

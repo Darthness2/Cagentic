@@ -78,9 +78,10 @@ class BackgroundExecutor:
             if self.tasks is not None:
                 task = self.tasks.create(
                     title=f"bash: {command[:60]}",
-                    kind=TaskKind.BASH, status="active",
+                    kind=TaskKind.BASH,
                     description=command, worktree=str(cwd),
                 )
+                self.tasks.update(task.id, status="active")
                 job.task_id = task.id
             with self._lock:
                 self._jobs[job_id] = job
