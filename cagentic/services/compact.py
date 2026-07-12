@@ -97,9 +97,7 @@ def messages_after_boundary(messages: list[dict]) -> list[dict]:
 
 # --------- snipCompact ---------------------------------------------------
 
-_SNIP_THINK_RX = re.compile(
-    r"<think(?:ing)?>.*?</think(?:ing)?>", re.DOTALL | re.IGNORECASE
-)
+_SNIP_THINK_RX = re.compile(r"<think(?:ing)?>.*?</think(?:ing)?>", re.DOTALL | re.IGNORECASE)
 
 
 def snip_compact(messages: list[dict], keep_recent_think: int = 2) -> int:
@@ -156,11 +154,7 @@ def context_collapse(messages: list[dict]) -> int:
     for m in messages:
         role = m.get("role")
         # Don't collapse messages that carry tool_calls or names — they have structure.
-        plain = (
-            role in ("user", "assistant")
-            and not m.get("tool_calls")
-            and not m.get("name")
-        )
+        plain = role in ("user", "assistant") and not m.get("tool_calls") and not m.get("name")
         if (
             plain
             and out
@@ -227,9 +221,7 @@ def _bulletize(messages: list[dict]) -> str:
             if head:
                 bullets.append(f"- user: {head}")
         elif role == "system" and SUMMARY_MARKER in content:
-            bullets.append(
-                f"- prior compacted context: {_flatten(content, _ASSISTANT_BUDGET)}"
-            )
+            bullets.append(f"- prior compacted context: {_flatten(content, _ASSISTANT_BUDGET)}")
     return "\n".join(bullets[-_FALLBACK_BULLETS_LIMIT:])
 
 
@@ -272,9 +264,7 @@ def auto_compact(
         i
         for i, message in enumerate(messages)
         if message.get("role") == "user"
-        and not str(message.get("content") or "").startswith(
-            ("Tool result for ", "[background] ")
-        )
+        and not str(message.get("content") or "").startswith(("Tool result for ", "[background] "))
     ]
     if len(user_turns) > keep_recent:
         tail_start = user_turns[-keep_recent]
@@ -296,9 +286,7 @@ def auto_compact(
         except Exception:
             # Deliberate fallback to the deterministic bulletizer — but log it
             # so a broken summarizer model isn't silently masked.
-            _log.warning(
-                "summarize_with_model failed; using bulletized fallback", exc_info=True
-            )
+            _log.warning("summarize_with_model failed; using bulletized fallback", exc_info=True)
             summary_text = None
     if not summary_text:
         summary_text = _bulletize(middle)

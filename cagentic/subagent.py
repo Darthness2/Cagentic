@@ -6,6 +6,7 @@ its own plan, tools, loop — and returns a single string answer to the
 parent. The parent's main conversation stays focused; the sub-agent
 acts as a black-box research/specialist call.
 """
+
 from __future__ import annotations
 
 import logging

@@ -9,6 +9,7 @@ and the multi-agent team/coordinator surface.
 Follows the same pattern as `cagentic.github`: a TOOLS dict plus a
 TOOL_SCHEMAS list that `cagentic.tools` merges into its registry.
 """
+
 from __future__ import annotations
 
 import os
@@ -29,31 +30,30 @@ from .tools import (
     _write_text_raw,
 )
 
-
 # ============================================================================
 # check_syntax — parser-only syntax linting across many languages
 # ============================================================================
 
 _SYNTAX_EXT_LANG = {
-    ".py":   "python",
-    ".pyi":  "python",
+    ".py": "python",
+    ".pyi": "python",
     ".json": "json",
     ".yaml": "yaml",
-    ".yml":  "yaml",
-    ".js":   "javascript",
-    ".mjs":  "javascript",
-    ".cjs":  "javascript",
-    ".jsx":  "javascript",
-    ".ts":   "typescript",
-    ".tsx":  "typescript",
-    ".sh":   "bash",
+    ".yml": "yaml",
+    ".js": "javascript",
+    ".mjs": "javascript",
+    ".cjs": "javascript",
+    ".jsx": "javascript",
+    ".ts": "typescript",
+    ".tsx": "typescript",
+    ".sh": "bash",
     ".bash": "bash",
-    ".go":   "go",
-    ".rs":   "rust",
+    ".go": "go",
+    ".rs": "rust",
     ".toml": "toml",
     ".html": "html",
-    ".xml":  "xml",
-    ".css":  "css",
+    ".xml": "xml",
+    ".css": "css",
 }
 
 
@@ -68,6 +68,7 @@ def _check_python(src: str, label: str) -> tuple[bool, str]:
 
 def _check_json(src: str, label: str) -> tuple[bool, str]:
     import json as _json
+
     try:
         _json.loads(src)
     except _json.JSONDecodeError as e:
@@ -110,7 +111,8 @@ def _check_via_cmd(cmd: list[str], src: str | None, label: str) -> tuple[bool, s
             cmd,
             input=src if src is not None else None,
             capture_output=True,
-            encoding="utf-8", errors="replace",
+            encoding="utf-8",
+            errors="replace",
             timeout=15,
         )
     except FileNotFoundError:
@@ -128,8 +130,10 @@ def _check_js(src: str, label: str, is_ts: bool) -> tuple[bool, str]:
     # parser; use tsc only when present.
     if is_ts:
         import shutil
+
         if shutil.which("tsc"):
             import tempfile
+
             suffix = ".tsx" if label.endswith(".tsx") else ".ts"
             with tempfile.NamedTemporaryFile("w", suffix=suffix, delete=False) as f:
                 f.write(src)
@@ -157,6 +161,7 @@ def _check_rust(src: str, label: str) -> tuple[bool, str]:
     # No stdin parse mode; write temp and use `rustc --emit=metadata`.
     import shutil
     import tempfile
+
     if not shutil.which("rustc"):
         return True, "skipped (rustc not installed)"
     with tempfile.NamedTemporaryFile("w", suffix=".rs", delete=False) as f:
@@ -165,7 +170,8 @@ def _check_rust(src: str, label: str) -> tuple[bool, str]:
     try:
         return _check_via_cmd(
             ["rustc", "--edition=2021", "--emit=metadata", "-o", os.devnull, tmp],
-            None, label,
+            None,
+            label,
         )
     finally:
         try:
@@ -182,6 +188,7 @@ def _check_xml_like(src: str, label: str) -> tuple[bool, str]:
         class _P(HTMLParser):
             def error(self, msg):
                 raise ValueError(msg)
+
         p = _P()
         try:
             p.feed(src)
@@ -190,6 +197,7 @@ def _check_xml_like(src: str, label: str) -> tuple[bool, str]:
             return False, f"HTMLParseError in {label}: {e}"
         return True, "ok"
     import xml.etree.ElementTree as ET
+
     try:
         ET.fromstring(src)
     except ET.ParseError as e:
@@ -214,18 +222,18 @@ def _check_css(src: str, label: str) -> tuple[bool, str]:
 
 
 _SYNTAX_CHECKERS = {
-    "python":     lambda s, l: _check_python(s, l),
-    "json":       lambda s, l: _check_json(s, l),
-    "yaml":       lambda s, l: _check_yaml(s, l),
+    "python": lambda s, l: _check_python(s, l),
+    "json": lambda s, l: _check_json(s, l),
+    "yaml": lambda s, l: _check_yaml(s, l),
     "javascript": lambda s, l: _check_js(s, l, is_ts=False),
     "typescript": lambda s, l: _check_js(s, l, is_ts=True),
-    "bash":       lambda s, l: _check_bash(s, l),
-    "go":         lambda s, l: _check_go(s, l),
-    "rust":       lambda s, l: _check_rust(s, l),
-    "toml":       lambda s, l: _check_toml(s, l),
-    "html":       lambda s, l: _check_xml_like(s, l),
-    "xml":        lambda s, l: _check_xml_like(s, l),
-    "css":        lambda s, l: _check_css(s, l),
+    "bash": lambda s, l: _check_bash(s, l),
+    "go": lambda s, l: _check_go(s, l),
+    "rust": lambda s, l: _check_rust(s, l),
+    "toml": lambda s, l: _check_toml(s, l),
+    "html": lambda s, l: _check_xml_like(s, l),
+    "xml": lambda s, l: _check_xml_like(s, l),
+    "css": lambda s, l: _check_css(s, l),
 }
 
 
@@ -289,6 +297,7 @@ def t_check_syntax(args: dict, ctx: ToolContext) -> str:
 # ============================================================================
 # multi_edit — atomic batch of edits against one file
 # ============================================================================
+
 
 def _apply_one_edit(text: str, old: str, new: str, replace_all: bool):
     """Resolve one edit against `text`. Returns (new_text | None, note).
@@ -372,8 +381,10 @@ def t_multi_edit(args: dict, ctx: ToolContext) -> str:
 # notebook_edit — get/insert/replace/delete cells in a Jupyter .ipynb
 # ============================================================================
 
+
 def t_notebook_edit(args: dict, ctx: ToolContext) -> str:
     import json as _json
+
     path = args["path"]
     op = args.get("op", "replace")  # replace | insert | delete | get
     cell_index = args.get("cell_index")
@@ -398,17 +409,26 @@ def t_notebook_edit(args: dict, ctx: ToolContext) -> str:
 
     if op == "get":
         if cell_index is None:
-            return _truncate("\n\n".join(
-                f"# cell {i} [{c.get('cell_type', '?')}]\n" +
-                ("".join(c.get("source", [])) if isinstance(c.get("source"), list) else (c.get("source") or ""))
-                for i, c in enumerate(cells)
-            ))
+            return _truncate(
+                "\n\n".join(
+                    f"# cell {i} [{c.get('cell_type', '?')}]\n"
+                    + (
+                        "".join(c.get("source", []))
+                        if isinstance(c.get("source"), list)
+                        else (c.get("source") or "")
+                    )
+                    for i, c in enumerate(cells)
+                )
+            )
         i = int(cell_index)
         if not 0 <= i < len(cells):
             return f"ERROR: cell_index {i} out of range"
         c = cells[i]
         return f"cell {i} [{c.get('cell_type', '?')}]\n" + (
-            "".join(c.get("source", [])) if isinstance(c.get("source"), list) else (c.get("source") or ""))
+            "".join(c.get("source", []))
+            if isinstance(c.get("source"), list)
+            else (c.get("source") or "")
+        )
 
     if not ctx.confirm("notebook edit", f"{op} {path} [cell {cell_index}]"):
         return "ERROR: user denied"
@@ -443,6 +463,7 @@ def t_notebook_edit(args: dict, ctx: ToolContext) -> str:
 # enter_worktree / exit_worktree — push/pop the workspace stack
 # ============================================================================
 
+
 def t_enter_worktree(args: dict, ctx: ToolContext) -> str:
     path = args["path"]
     create = bool(args.get("create", False))
@@ -471,6 +492,7 @@ def t_enter_worktree(args: dict, ctx: ToolContext) -> str:
 
 def t_exit_worktree(args: dict, ctx: ToolContext) -> str:
     from pathlib import Path
+
     state = getattr(ctx, "state", None)
     if state is None:
         return "ERROR: worktree stack not available"
@@ -487,8 +509,10 @@ def t_exit_worktree(args: dict, ctx: ToolContext) -> str:
 # powershell — run a command via pwsh / powershell.exe
 # ============================================================================
 
+
 def t_powershell(args: dict, ctx: ToolContext) -> str:
     import shutil as _shutil
+
     pwsh = _shutil.which("pwsh") or _shutil.which("powershell")
     if not pwsh:
         return "ERROR: PowerShell not installed (pwsh / powershell.exe not on PATH)"
@@ -499,8 +523,11 @@ def t_powershell(args: dict, ctx: ToolContext) -> str:
     try:
         proc = subprocess.run(
             [pwsh, "-NoProfile", "-NonInteractive", "-Command", cmd],
-            cwd=str(ctx.root), capture_output=True,
-            encoding="utf-8", errors="replace", timeout=timeout,
+            cwd=str(ctx.root),
+            capture_output=True,
+            encoding="utf-8",
+            errors="replace",
+            timeout=timeout,
         )
     except subprocess.TimeoutExpired:
         return f"ERROR: timed out after {timeout}s"
@@ -517,11 +544,13 @@ def t_powershell(args: dict, ctx: ToolContext) -> str:
 # agent_call / agent_call_async — fork a sub-agent on a fresh conversation
 # ============================================================================
 
+
 def t_agent_call(args: dict, ctx: ToolContext) -> str:
     engine = getattr(ctx, "engine", None)
     if engine is None:
         return "ERROR: engine not available for sub-agent"
     from .subagent import fork_subagent
+
     prompt = args["prompt"]
     model = args.get("model")
     answer = fork_subagent(engine, prompt, model=model, title=args.get("title", "subagent"))
@@ -534,6 +563,7 @@ def t_agent_call_async(args: dict, ctx: ToolContext) -> str:
     if engine is None or bg is None:
         return "ERROR: engine/background not available"
     from .subagent import fork_subagent
+
     prompt = args["prompt"]
     model = args.get("model")
 
@@ -547,6 +577,7 @@ def t_agent_call_async(args: dict, ctx: ToolContext) -> str:
 # ============================================================================
 # Persistent task graph writers + briefs (readers live in cagentic.tools)
 # ============================================================================
+
 
 def _task_graph(ctx: ToolContext):
     return getattr(ctx, "tasks", None)
@@ -612,7 +643,9 @@ def t_brief(args: dict, ctx: ToolContext) -> str:
     if op == "get":
         return state.briefs.get(name, f"(no brief named '{name}')")
     if op == "list":
-        return "\n".join(f"- {k}  ({len(v)} chars)" for k, v in state.briefs.items()) or "(no briefs)"
+        return (
+            "\n".join(f"- {k}  ({len(v)} chars)" for k, v in state.briefs.items()) or "(no briefs)"
+        )
     if op == "delete":
         state.briefs.pop(name, None)
         state.update(briefs=dict(state.briefs))
@@ -626,6 +659,7 @@ def t_brief(args: dict, ctx: ToolContext) -> str:
 # ============================================================================
 # Teams + mailboxes + coordinator — multi-agent collaboration
 # ============================================================================
+
 
 def _teams(ctx: ToolContext):
     return getattr(ctx, "teams", None)
@@ -683,9 +717,11 @@ def t_teammate_delete(args: dict, ctx: ToolContext) -> str:
     reg = _teams(ctx)
     if reg is None:
         return "ERROR: team registry not available"
-    return ("OK: deleted"
-            if reg.delete_teammate(args["team"], args["name"])
-            else f"ERROR: no teammate {args['name']} on {args['team']}")
+    return (
+        "OK: deleted"
+        if reg.delete_teammate(args["team"], args["name"])
+        else f"ERROR: no teammate {args['name']} on {args['team']}"
+    )
 
 
 def t_teammate_list(args: dict, ctx: ToolContext) -> str:
@@ -735,6 +771,7 @@ def t_coordinator_tick(args: dict, ctx: ToolContext) -> str:
     if engine is None:
         return "ERROR: engine not available"
     from .coordinator import tick as _coordinator_tick
+
     results = _coordinator_tick(
         engine,
         team=args.get("team"),
@@ -759,6 +796,7 @@ def t_coordinator_run(args: dict, ctx: ToolContext) -> str:
     if engine is None:
         return "ERROR: engine not available"
     from .coordinator import tick as _coordinator_tick
+
     max_rounds = int(args.get("max_rounds", 5))
     auto_claim = bool(args.get("auto_claim", True))
     team = args.get("team")
@@ -776,236 +814,411 @@ def t_coordinator_run(args: dict, ctx: ToolContext) -> str:
 # ============================================================================
 
 CODING_TOOLS = {
-    "check_syntax":     t_check_syntax,
-    "multi_edit":       t_multi_edit,
-    "notebook_edit":    t_notebook_edit,
-    "enter_worktree":   t_enter_worktree,
-    "exit_worktree":    t_exit_worktree,
-    "powershell":       t_powershell,
-    "agent_call":       t_agent_call,
+    "check_syntax": t_check_syntax,
+    "multi_edit": t_multi_edit,
+    "notebook_edit": t_notebook_edit,
+    "enter_worktree": t_enter_worktree,
+    "exit_worktree": t_exit_worktree,
+    "powershell": t_powershell,
+    "agent_call": t_agent_call,
     "agent_call_async": t_agent_call_async,
-    "task_create":      t_task_create,
-    "task_update":      t_task_update,
-    "task_delete":      t_task_delete,
-    "task_stop":        t_task_stop,
-    "brief":            t_brief,
-    "team_create":      t_team_create,
-    "team_delete":      t_team_delete,
-    "team_list":        t_team_list,
-    "teammate_create":  t_teammate_create,
-    "teammate_delete":  t_teammate_delete,
-    "teammate_list":    t_teammate_list,
-    "send_message":     t_send_message,
-    "inbox":            t_inbox,
+    "task_create": t_task_create,
+    "task_update": t_task_update,
+    "task_delete": t_task_delete,
+    "task_stop": t_task_stop,
+    "brief": t_brief,
+    "team_create": t_team_create,
+    "team_delete": t_team_delete,
+    "team_list": t_team_list,
+    "teammate_create": t_teammate_create,
+    "teammate_delete": t_teammate_delete,
+    "teammate_list": t_teammate_list,
+    "send_message": t_send_message,
+    "inbox": t_inbox,
     "coordinator_tick": t_coordinator_tick,
-    "coordinator_run":  t_coordinator_run,
+    "coordinator_run": t_coordinator_run,
 }
 
 
 CODING_TOOL_SCHEMAS = [
-    {"type": "function", "function": {
-        "name": "check_syntax",
-        "description": (
-            "Parser-only syntax check for one or more files (or an inline snippet). "
-            "Read-only — never executes the code. Use after edits to confirm the "
-            "file still parses. Languages auto-detected from extension: python, "
-            "json, yaml, javascript, typescript, bash, go, rust, toml, html, xml, "
-            "css. External-tool checkers skip gracefully when the binary is missing."
-        ),
-        "parameters": {"type": "object", "properties": {
-            "paths": {"type": "array", "items": {"type": "string"},
-                      "description": "Files to check (absolute or workspace-relative)."},
-            "path": {"type": "string", "description": "Single-file convenience alias for 'paths'."},
-            "content": {"type": "string", "description": "Inline source to check instead of a file."},
-            "language": {"type": "string",
-                         "description": "Force language (python|json|yaml|javascript|typescript|bash|go|rust|toml|html|xml|css). Required with 'content'."},
-        }},
-    }},
-    {"type": "function", "function": {
-        "name": "multi_edit",
-        "description": (
-            "Apply MANY {old_string, new_string} edits to ONE file in a single "
-            "atomic call. Edits apply in order, each against the result of the "
-            "previous one; if any edit fails to match, nothing is written."
-        ),
-        "parameters": {"type": "object", "properties": {
-            "path": {"type": "string"},
-            "edits": {"type": "array", "items": {"type": "object", "properties": {
-                "old_string": {"type": "string"},
-                "new_string": {"type": "string"},
-                "replace_all": {"type": "boolean"},
-            }, "required": ["old_string", "new_string"]}},
-            "allow_empty": {"type": "boolean"},
-        }, "required": ["path", "edits"]},
-    }},
-    {"type": "function", "function": {
-        "name": "notebook_edit",
-        "description": "Get/insert/replace/delete a cell in a Jupyter .ipynb file.",
-        "parameters": {"type": "object", "properties": {
-            "path": {"type": "string"},
-            "op": {"type": "string", "enum": ["get", "insert", "replace", "delete"]},
-            "cell_index": {"type": "integer"},
-            "source": {"type": "string"},
-            "cell_type": {"type": "string", "enum": ["code", "markdown", "raw"]},
-        }, "required": ["path"]},
-    }},
-    {"type": "function", "function": {
-        "name": "enter_worktree",
-        "description": "Push the current workspace onto a stack and switch to `path`. Use when working on a sub-task in its own directory. Pair with exit_worktree.",
-        "parameters": {"type": "object", "properties": {
-            "path": {"type": "string"},
-            "create": {"type": "boolean"},
-        }, "required": ["path"]},
-    }},
-    {"type": "function", "function": {
-        "name": "exit_worktree",
-        "description": "Pop the worktree stack and restore the previous workspace.",
-        "parameters": {"type": "object", "properties": {}},
-    }},
-    {"type": "function", "function": {
-        "name": "powershell",
-        "description": "Run a command via pwsh / powershell.exe (Windows or PowerShell Core). Asks for approval like run_bash.",
-        "parameters": {"type": "object", "properties": {
-            "command": {"type": "string"},
-            "timeout": {"type": "integer"},
-        }, "required": ["command"]},
-    }},
-    {"type": "function", "function": {
-        "name": "agent_call",
-        "description": (
-            "Fork a sub-agent on a FRESH conversation to handle a focused subtask "
-            "(e.g. 'find every file that imports requests and summarize'). Returns "
-            "the sub-agent's final answer. Inherits workspace, tokens, etc., but "
-            "its messages are isolated so the main context stays clean."
-        ),
-        "parameters": {"type": "object", "properties": {
-            "prompt": {"type": "string"},
-            "model": {"type": "string", "description": "Override model for this sub-agent. Default: same as parent."},
-            "title": {"type": "string"},
-        }, "required": ["prompt"]},
-    }},
-    {"type": "function", "function": {
-        "name": "agent_call_async",
-        "description": "Like agent_call but runs in the background; result is auto-injected on completion. Useful for long research while you keep working.",
-        "parameters": {"type": "object", "properties": {
-            "prompt": {"type": "string"},
-            "model": {"type": "string"},
-        }, "required": ["prompt"]},
-    }},
-    {"type": "function", "function": {
-        "name": "task_create",
-        "description": "Create a persistent task with status tracking and optional dependencies. Returns the new task id (e.g. t9f3e2c1).",
-        "parameters": {"type": "object", "properties": {
-            "title": {"type": "string"},
-            "description": {"type": "string"},
-            "deps": {"type": "array", "items": {"type": "string"}},
-            "parent_id": {"type": "string"},
-            "worktree": {"type": "string", "description": "Optional worktree directory bound to this task."},
-        }, "required": ["title"]},
-    }},
-    {"type": "function", "function": {
-        "name": "task_update",
-        "description": "Update a task. Common: status (pending|active|done|blocked|failed|cancelled) and result.",
-        "parameters": {"type": "object", "properties": {
-            "id": {"type": "string"},
-            "status": {"type": "string"},
-            "title": {"type": "string"},
-            "description": {"type": "string"},
-            "result": {"type": "string"},
-            "deps": {"type": "array", "items": {"type": "string"}},
-            "worktree": {"type": "string"},
-        }, "required": ["id"]},
-    }},
-    {"type": "function", "function": {
-        "name": "task_delete",
-        "description": "Delete a task by id.",
-        "parameters": {"type": "object", "properties": {"id": {"type": "string"}}, "required": ["id"]},
-    }},
-    {"type": "function", "function": {
-        "name": "task_stop",
-        "description": "Mark a task or background job cancelled.",
-        "parameters": {"type": "object", "properties": {"id": {"type": "string"}}, "required": ["id"]},
-    }},
-    {"type": "function", "function": {
-        "name": "brief",
-        "description": "Store / retrieve / list a named markdown brief in this session.",
-        "parameters": {"type": "object", "properties": {
-            "op": {"type": "string", "enum": ["set", "get", "list", "delete"]},
-            "name": {"type": "string"},
-            "content": {"type": "string"},
-        }, "required": ["name"]},
-    }},
-    {"type": "function", "function": {
-        "name": "team_create",
-        "description": "Create a persistent team (a directory of long-lived teammate personas).",
-        "parameters": {"type": "object", "properties": {"name": {"type": "string"}}, "required": ["name"]},
-    }},
-    {"type": "function", "function": {
-        "name": "team_delete",
-        "description": "Delete a team and all its teammates. Requires user approval.",
-        "parameters": {"type": "object", "properties": {"name": {"type": "string"}}, "required": ["name"]},
-    }},
-    {"type": "function", "function": {
-        "name": "team_list",
-        "description": "List all teams and their teammates.",
-        "parameters": {"type": "object", "properties": {}},
-    }},
-    {"type": "function", "function": {
-        "name": "teammate_create",
-        "description": "Add a teammate to a team. `role` is appended to the system prompt for that teammate; `skills` are tags used by the coordinator's auto-claim.",
-        "parameters": {"type": "object", "properties": {
-            "team": {"type": "string"},
-            "name": {"type": "string"},
-            "role": {"type": "string"},
-            "skills": {"type": "array", "items": {"type": "string"}},
-        }, "required": ["team", "name"]},
-    }},
-    {"type": "function", "function": {
-        "name": "teammate_delete",
-        "description": "Remove a teammate from a team.",
-        "parameters": {"type": "object", "properties": {
-            "team": {"type": "string"}, "name": {"type": "string"},
-        }, "required": ["team", "name"]},
-    }},
-    {"type": "function", "function": {
-        "name": "teammate_list",
-        "description": "List teammates, optionally filtered to one team.",
-        "parameters": {"type": "object", "properties": {"team": {"type": "string"}}},
-    }},
-    {"type": "function", "function": {
-        "name": "send_message",
-        "description": "Send a message to a teammate's inbox (request-response protocol). Recipient processes mail next coordinator_tick / coordinator_run.",
-        "parameters": {"type": "object", "properties": {
-            "team": {"type": "string"},
-            "to": {"type": "string", "description": "Recipient teammate name or id."},
-            "content": {"type": "string"},
-            "from": {"type": "string", "description": "Sender label. Default 'lead'."},
-            "kind": {"type": "string", "description": "msg | task | question | reply"},
-        }, "required": ["team", "to", "content"]},
-    }},
-    {"type": "function", "function": {
-        "name": "inbox",
-        "description": "Read a teammate's pending mailbox.",
-        "parameters": {"type": "object", "properties": {
-            "team": {"type": "string"}, "name": {"type": "string"},
-        }, "required": ["team", "name"]},
-    }},
-    {"type": "function", "function": {
-        "name": "coordinator_tick",
-        "description": "One coordinator tick: process every teammate's mailbox by spawning a sub-agent. With auto_claim=true, idle teammates also pick up matching pending tasks from the task graph.",
-        "parameters": {"type": "object", "properties": {
-            "team": {"type": "string", "description": "Limit to one team. Default: all teams."},
-            "auto_claim": {"type": "boolean"},
-            "max_per_teammate": {"type": "integer"},
-        }},
-    }},
-    {"type": "function", "function": {
-        "name": "coordinator_run",
-        "description": "Tick the coordinator repeatedly until no teammate has work (or max_rounds is reached).",
-        "parameters": {"type": "object", "properties": {
-            "team": {"type": "string"},
-            "max_rounds": {"type": "integer"},
-            "auto_claim": {"type": "boolean"},
-        }},
-    }},
+    {
+        "type": "function",
+        "function": {
+            "name": "check_syntax",
+            "description": (
+                "Parser-only syntax check for one or more files (or an inline snippet). "
+                "Read-only — never executes the code. Use after edits to confirm the "
+                "file still parses. Languages auto-detected from extension: python, "
+                "json, yaml, javascript, typescript, bash, go, rust, toml, html, xml, "
+                "css. External-tool checkers skip gracefully when the binary is missing."
+            ),
+            "parameters": {
+                "type": "object",
+                "properties": {
+                    "paths": {
+                        "type": "array",
+                        "items": {"type": "string"},
+                        "description": "Files to check (absolute or workspace-relative).",
+                    },
+                    "path": {
+                        "type": "string",
+                        "description": "Single-file convenience alias for 'paths'.",
+                    },
+                    "content": {
+                        "type": "string",
+                        "description": "Inline source to check instead of a file.",
+                    },
+                    "language": {
+                        "type": "string",
+                        "description": "Force language (python|json|yaml|javascript|typescript|bash|go|rust|toml|html|xml|css). Required with 'content'.",
+                    },
+                },
+            },
+        },
+    },
+    {
+        "type": "function",
+        "function": {
+            "name": "multi_edit",
+            "description": (
+                "Apply MANY {old_string, new_string} edits to ONE file in a single "
+                "atomic call. Edits apply in order, each against the result of the "
+                "previous one; if any edit fails to match, nothing is written."
+            ),
+            "parameters": {
+                "type": "object",
+                "properties": {
+                    "path": {"type": "string"},
+                    "edits": {
+                        "type": "array",
+                        "items": {
+                            "type": "object",
+                            "properties": {
+                                "old_string": {"type": "string"},
+                                "new_string": {"type": "string"},
+                                "replace_all": {"type": "boolean"},
+                            },
+                            "required": ["old_string", "new_string"],
+                        },
+                    },
+                    "allow_empty": {"type": "boolean"},
+                },
+                "required": ["path", "edits"],
+            },
+        },
+    },
+    {
+        "type": "function",
+        "function": {
+            "name": "notebook_edit",
+            "description": "Get/insert/replace/delete a cell in a Jupyter .ipynb file.",
+            "parameters": {
+                "type": "object",
+                "properties": {
+                    "path": {"type": "string"},
+                    "op": {"type": "string", "enum": ["get", "insert", "replace", "delete"]},
+                    "cell_index": {"type": "integer"},
+                    "source": {"type": "string"},
+                    "cell_type": {"type": "string", "enum": ["code", "markdown", "raw"]},
+                },
+                "required": ["path"],
+            },
+        },
+    },
+    {
+        "type": "function",
+        "function": {
+            "name": "enter_worktree",
+            "description": "Push the current workspace onto a stack and switch to `path`. Use when working on a sub-task in its own directory. Pair with exit_worktree.",
+            "parameters": {
+                "type": "object",
+                "properties": {
+                    "path": {"type": "string"},
+                    "create": {"type": "boolean"},
+                },
+                "required": ["path"],
+            },
+        },
+    },
+    {
+        "type": "function",
+        "function": {
+            "name": "exit_worktree",
+            "description": "Pop the worktree stack and restore the previous workspace.",
+            "parameters": {"type": "object", "properties": {}},
+        },
+    },
+    {
+        "type": "function",
+        "function": {
+            "name": "powershell",
+            "description": "Run a command via pwsh / powershell.exe (Windows or PowerShell Core). Asks for approval like run_bash.",
+            "parameters": {
+                "type": "object",
+                "properties": {
+                    "command": {"type": "string"},
+                    "timeout": {"type": "integer"},
+                },
+                "required": ["command"],
+            },
+        },
+    },
+    {
+        "type": "function",
+        "function": {
+            "name": "agent_call",
+            "description": (
+                "Fork a sub-agent on a FRESH conversation to handle a focused subtask "
+                "(e.g. 'find every file that imports requests and summarize'). Returns "
+                "the sub-agent's final answer. Inherits workspace, tokens, etc., but "
+                "its messages are isolated so the main context stays clean."
+            ),
+            "parameters": {
+                "type": "object",
+                "properties": {
+                    "prompt": {"type": "string"},
+                    "model": {
+                        "type": "string",
+                        "description": "Override model for this sub-agent. Default: same as parent.",
+                    },
+                    "title": {"type": "string"},
+                },
+                "required": ["prompt"],
+            },
+        },
+    },
+    {
+        "type": "function",
+        "function": {
+            "name": "agent_call_async",
+            "description": "Like agent_call but runs in the background; result is auto-injected on completion. Useful for long research while you keep working.",
+            "parameters": {
+                "type": "object",
+                "properties": {
+                    "prompt": {"type": "string"},
+                    "model": {"type": "string"},
+                },
+                "required": ["prompt"],
+            },
+        },
+    },
+    {
+        "type": "function",
+        "function": {
+            "name": "task_create",
+            "description": "Create a persistent task with status tracking and optional dependencies. Returns the new task id (e.g. t9f3e2c1).",
+            "parameters": {
+                "type": "object",
+                "properties": {
+                    "title": {"type": "string"},
+                    "description": {"type": "string"},
+                    "deps": {"type": "array", "items": {"type": "string"}},
+                    "parent_id": {"type": "string"},
+                    "worktree": {
+                        "type": "string",
+                        "description": "Optional worktree directory bound to this task.",
+                    },
+                },
+                "required": ["title"],
+            },
+        },
+    },
+    {
+        "type": "function",
+        "function": {
+            "name": "task_update",
+            "description": "Update a task. Common: status (pending|active|done|blocked|failed|cancelled) and result.",
+            "parameters": {
+                "type": "object",
+                "properties": {
+                    "id": {"type": "string"},
+                    "status": {"type": "string"},
+                    "title": {"type": "string"},
+                    "description": {"type": "string"},
+                    "result": {"type": "string"},
+                    "deps": {"type": "array", "items": {"type": "string"}},
+                    "worktree": {"type": "string"},
+                },
+                "required": ["id"],
+            },
+        },
+    },
+    {
+        "type": "function",
+        "function": {
+            "name": "task_delete",
+            "description": "Delete a task by id.",
+            "parameters": {
+                "type": "object",
+                "properties": {"id": {"type": "string"}},
+                "required": ["id"],
+            },
+        },
+    },
+    {
+        "type": "function",
+        "function": {
+            "name": "task_stop",
+            "description": "Mark a task or background job cancelled.",
+            "parameters": {
+                "type": "object",
+                "properties": {"id": {"type": "string"}},
+                "required": ["id"],
+            },
+        },
+    },
+    {
+        "type": "function",
+        "function": {
+            "name": "brief",
+            "description": "Store / retrieve / list a named markdown brief in this session.",
+            "parameters": {
+                "type": "object",
+                "properties": {
+                    "op": {"type": "string", "enum": ["set", "get", "list", "delete"]},
+                    "name": {"type": "string"},
+                    "content": {"type": "string"},
+                },
+                "required": ["name"],
+            },
+        },
+    },
+    {
+        "type": "function",
+        "function": {
+            "name": "team_create",
+            "description": "Create a persistent team (a directory of long-lived teammate personas).",
+            "parameters": {
+                "type": "object",
+                "properties": {"name": {"type": "string"}},
+                "required": ["name"],
+            },
+        },
+    },
+    {
+        "type": "function",
+        "function": {
+            "name": "team_delete",
+            "description": "Delete a team and all its teammates. Requires user approval.",
+            "parameters": {
+                "type": "object",
+                "properties": {"name": {"type": "string"}},
+                "required": ["name"],
+            },
+        },
+    },
+    {
+        "type": "function",
+        "function": {
+            "name": "team_list",
+            "description": "List all teams and their teammates.",
+            "parameters": {"type": "object", "properties": {}},
+        },
+    },
+    {
+        "type": "function",
+        "function": {
+            "name": "teammate_create",
+            "description": "Add a teammate to a team. `role` is appended to the system prompt for that teammate; `skills` are tags used by the coordinator's auto-claim.",
+            "parameters": {
+                "type": "object",
+                "properties": {
+                    "team": {"type": "string"},
+                    "name": {"type": "string"},
+                    "role": {"type": "string"},
+                    "skills": {"type": "array", "items": {"type": "string"}},
+                },
+                "required": ["team", "name"],
+            },
+        },
+    },
+    {
+        "type": "function",
+        "function": {
+            "name": "teammate_delete",
+            "description": "Remove a teammate from a team.",
+            "parameters": {
+                "type": "object",
+                "properties": {
+                    "team": {"type": "string"},
+                    "name": {"type": "string"},
+                },
+                "required": ["team", "name"],
+            },
+        },
+    },
+    {
+        "type": "function",
+        "function": {
+            "name": "teammate_list",
+            "description": "List teammates, optionally filtered to one team.",
+            "parameters": {"type": "object", "properties": {"team": {"type": "string"}}},
+        },
+    },
+    {
+        "type": "function",
+        "function": {
+            "name": "send_message",
+            "description": "Send a message to a teammate's inbox (request-response protocol). Recipient processes mail next coordinator_tick / coordinator_run.",
+            "parameters": {
+                "type": "object",
+                "properties": {
+                    "team": {"type": "string"},
+                    "to": {"type": "string", "description": "Recipient teammate name or id."},
+                    "content": {"type": "string"},
+                    "from": {"type": "string", "description": "Sender label. Default 'lead'."},
+                    "kind": {"type": "string", "description": "msg | task | question | reply"},
+                },
+                "required": ["team", "to", "content"],
+            },
+        },
+    },
+    {
+        "type": "function",
+        "function": {
+            "name": "inbox",
+            "description": "Read a teammate's pending mailbox.",
+            "parameters": {
+                "type": "object",
+                "properties": {
+                    "team": {"type": "string"},
+                    "name": {"type": "string"},
+                },
+                "required": ["team", "name"],
+            },
+        },
+    },
+    {
+        "type": "function",
+        "function": {
+            "name": "coordinator_tick",
+            "description": "One coordinator tick: process every teammate's mailbox by spawning a sub-agent. With auto_claim=true, idle teammates also pick up matching pending tasks from the task graph.",
+            "parameters": {
+                "type": "object",
+                "properties": {
+                    "team": {
+                        "type": "string",
+                        "description": "Limit to one team. Default: all teams.",
+                    },
+                    "auto_claim": {"type": "boolean"},
+                    "max_per_teammate": {"type": "integer"},
+                },
+            },
+        },
+    },
+    {
+        "type": "function",
+        "function": {
+            "name": "coordinator_run",
+            "description": "Tick the coordinator repeatedly until no teammate has work (or max_rounds is reached).",
+            "parameters": {
+                "type": "object",
+                "properties": {
+                    "team": {"type": "string"},
+                    "max_rounds": {"type": "integer"},
+                    "auto_claim": {"type": "boolean"},
+                },
+            },
+        },
+    },
 ]

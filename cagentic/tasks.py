@@ -16,6 +16,7 @@ from dataclasses import asdict, dataclass, field
 from enum import Enum
 from pathlib import Path
 
+from . import storage
 from .config import config_dir
 
 
@@ -64,13 +65,14 @@ class TaskGraph:
     """File-backed CRUD for Task objects."""
 
     def __init__(self, root: Path | None = None) -> None:
+        self._sqlite = root is None
         self.root = root or (config_dir() / "tasks")
         self.root.mkdir(parents=True, exist_ok=True)
+        if self._sqlite:
+            storage.migrate_json_files("tasks", self.root.glob("*.json"))
 
     def _path(self, task_id: str) -> Path:
-        if not isinstance(task_id, str) or not re.fullmatch(
-            r"[A-Za-z0-9_-]{1,64}", task_id
-        ):
+        if not isinstance(task_id, str) or not re.fullmatch(r"[A-Za-z0-9_-]{1,64}", task_id):
             raise ValueError("invalid task id")
         return self.root / f"{task_id}.json"
 
@@ -101,6 +103,24 @@ class TaskGraph:
             p = self._path(task_id)
         except ValueError:
             return None
+        if self._sqlite:
+            exact = storage.get("tasks", task_id)
+            if isinstance(exact, dict):
+                try:
+                    return Task(**exact)
+                except TypeError:
+                    return None
+            matches = [
+                value
+                for value in storage.list_values("tasks")
+                if isinstance(value, dict) and str(value.get("id", "")).startswith(task_id)
+            ]
+            if len(matches) == 1:
+                try:
+                    return Task(**matches[0])
+                except TypeError:
+                    return None
+            return None
         if not p.exists():
             # Allow id prefixes ("t12ab..." → "t12ab*").
             for q in self.root.glob(f"{task_id}*.json"):
@@ -126,10 +146,22 @@ class TaskGraph:
         self._write(task)
         return task
 
-    def list(
-        self, *, status: str | None = None, parent_id: str | None = None
-    ) -> list[Task]:
+    def list(self, *, status: str | None = None, parent_id: str | None = None) -> list[Task]:
         out: list[Task] = []
+        if self._sqlite:
+            for value in storage.list_values("tasks"):
+                if not isinstance(value, dict):
+                    continue
+                try:
+                    task = Task(**value)
+                except TypeError:
+                    continue
+                if status and task.status != status:
+                    continue
+                if parent_id and task.parent_id != parent_id:
+                    continue
+                out.append(task)
+            return out
         for p in sorted(self.root.glob("*.json")):
             try:
                 t = Task(**json.loads(p.read_text(encoding="utf-8")))
@@ -147,14 +179,17 @@ class TaskGraph:
         task = self.get(task_id)
         if not task:
             return False
+        deleted = storage.delete("tasks", task.id) if self._sqlite else False
         try:
             self._path(task.id).unlink()
             return True
         except OSError:
-            return False
+            return deleted
 
     def _write(self, task: Task) -> None:
         p = self._path(task.id)
         tmp = p.with_suffix(".json.tmp")
         tmp.write_text(json.dumps(task.to_dict(), indent=2), encoding="utf-8")
         tmp.replace(p)
+        if self._sqlite:
+            storage.put("tasks", task.id, task.to_dict(), task.updated_at)

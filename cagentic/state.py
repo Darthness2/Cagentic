@@ -108,9 +108,7 @@ class AppState:
                     # A listener failing (e.g. a silent autosave) must not
                     # abort the update or the other listeners — but it should
                     # be visible in the logs rather than vanishing.
-                    logger.warning(
-                        "AppState listener failed on update of %r", key, exc_info=True
-                    )
+                    logger.warning("AppState listener failed on update of %r", key, exc_info=True)
 
     def push_file(self, path: str) -> None:
         if path in self.file_history:

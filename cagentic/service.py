@@ -4,6 +4,7 @@ macOS uses a launchd LaunchAgent; Linux uses a systemd user unit. Either way
 the gateway runs `cagentic --serve` whenever the machine is on — no CLI
 session needed — and restarts automatically if it crashes.
 """
+
 from __future__ import annotations
 
 import subprocess
@@ -91,21 +92,23 @@ def uninstall() -> int:
 
 # ---------------------------------------------------------------- macOS --
 
+
 def _install_launchd() -> int:
     log = Path.home() / "Library" / "Logs" / "cagentic-gateway.log"
     path = _launchd_plist_path()
     path.parent.mkdir(parents=True, exist_ok=True)
-    path.write_text(_LAUNCHD_PLIST.format(
-        label=LABEL,
-        python=sys.executable,
-        home=Path.home(),
-        log=log,
-    ))
+    path.write_text(
+        _LAUNCHD_PLIST.format(
+            label=LABEL,
+            python=sys.executable,
+            home=Path.home(),
+            log=log,
+        )
+    )
 
     # Reload cleanly if a previous version is already running.
     subprocess.run(["launchctl", "unload", str(path)], capture_output=True)
-    res = subprocess.run(["launchctl", "load", "-w", str(path)],
-                         capture_output=True, text=True)
+    res = subprocess.run(["launchctl", "load", "-w", str(path)], capture_output=True, text=True)
     if res.returncode != 0:
         ui.error(f"launchctl load failed: {res.stderr.strip() or res.stdout.strip()}")
         return 1
@@ -129,13 +132,16 @@ def _uninstall_launchd() -> int:
 
 # ---------------------------------------------------------------- Linux --
 
+
 def _install_systemd() -> int:
     path = _systemd_unit_path()
     path.parent.mkdir(parents=True, exist_ok=True)
     path.write_text(_SYSTEMD_UNIT.format(python=sys.executable))
 
-    for cmd in (["systemctl", "--user", "daemon-reload"],
-                ["systemctl", "--user", "enable", "--now", "cagentic-gateway.service"]):
+    for cmd in (
+        ["systemctl", "--user", "daemon-reload"],
+        ["systemctl", "--user", "enable", "--now", "cagentic-gateway.service"],
+    ):
         res = subprocess.run(cmd, capture_output=True, text=True)
         if res.returncode != 0:
             ui.error(f"{' '.join(cmd)} failed: {res.stderr.strip()}")
@@ -152,8 +158,9 @@ def _uninstall_systemd() -> int:
     if not path.exists():
         ui.info("gateway service is not installed.")
         return 0
-    subprocess.run(["systemctl", "--user", "disable", "--now", "cagentic-gateway.service"],
-                   capture_output=True)
+    subprocess.run(
+        ["systemctl", "--user", "disable", "--now", "cagentic-gateway.service"], capture_output=True
+    )
     path.unlink()
     subprocess.run(["systemctl", "--user", "daemon-reload"], capture_output=True)
     ui.info("gateway service removed.")

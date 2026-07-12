@@ -56,9 +56,7 @@ _ALLOWED_HOSTS = frozenset({"localhost", "127.0.0.1", "[::1]", "::1"})
 
 def _token_path() -> str:
     """Path to the persisted shared-secret token file."""
-    base = os.environ.get("XDG_CONFIG_HOME") or os.path.join(
-        os.path.expanduser("~"), ".config"
-    )
+    base = os.environ.get("XDG_CONFIG_HOME") or os.path.join(os.path.expanduser("~"), ".config")
     return os.path.join(base, "cagentic", "browser_token")
 
 
@@ -177,9 +175,7 @@ class BrowserBridge:
 
     # -- live status (for the extension popup) ------------------------------
 
-    def set_status(
-        self, *, model: str | None = None, activity: str | None = None
-    ) -> None:
+    def set_status(self, *, model: str | None = None, activity: str | None = None) -> None:
         """Update what the popup shows — the loaded model and current activity."""
         with self._lock:
             if model is not None:
@@ -215,9 +211,7 @@ class BrowserBridge:
 
     # -- agent side ---------------------------------------------------------
 
-    def send(
-        self, action: str, params: dict | None = None, timeout: float = 30.0
-    ) -> dict:
+    def send(self, action: str, params: dict | None = None, timeout: float = 30.0) -> dict:
         """Queue a command for the extension and block until its result
         comes back. Returns {"ok": bool, "result"|"error": ...}."""
         params = params or {}

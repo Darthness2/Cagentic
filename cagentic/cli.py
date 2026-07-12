@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import argparse
+import json
 import logging
 import os
 import sys
@@ -14,17 +15,23 @@ logger = logging.getLogger(__name__)
 from . import (
     __version__,
     config,
-    notes as _notes,
-    reminders as _reminders,
     sessions,
     ui,
 )
 from . import diff as _diff
+from . import (
+    notes as _notes,
+)
+from . import (
+    reminders as _reminders,
+)
 from .agent import Agent
 from .ollama_client import OllamaClient, OllamaError, _is_apple_silicon
 from .prompt import Prompt
 from .providers import (
     build_client as _build_client,
+)
+from .providers import (
     parse_model as _parse_model_provider,
 )
 from .services.compact import SUMMARY_MARKER
@@ -41,18 +48,29 @@ def parse_args(argv: list[str]) -> argparse.Namespace:
     p.add_argument("-C", "--cwd", default=".", help="Working dir (default: cwd).")
     p.add_argument("--yolo", action="store_true", help="Auto-approve all tool calls.")
     p.add_argument("-t", "--temperature", type=float)
-    p.add_argument(
-        "--name", help="What the assistant should call you (e.g. --name Alex)."
-    )
+    p.add_argument("--name", help="What the assistant should call you (e.g. --name Alex).")
     p.add_argument("--reset-config", action="store_true")
+    p.add_argument("--doctor", action="store_true", help="Run diagnostics and exit.")
+    p.add_argument(
+        "--json", action="store_true", help="Emit machine-readable JSON where supported."
+    )
+    p.add_argument("--setup", action="store_true", help="Run the interactive setup wizard.")
+    p.add_argument(
+        "--completion", choices=("bash", "zsh", "fish"), help="Print shell completion script."
+    )
+    p.add_argument("--sessions", action="store_true", help="List saved sessions and exit.")
+    p.add_argument("--search", metavar="TEXT", help="Search saved session titles/messages.")
+    p.add_argument("--context", metavar="SESSION", help="Show context usage for a session.")
+    p.add_argument("--compact", metavar="SESSION", help="Compact a saved session and exit.")
+    p.add_argument(
+        "--threshold", type=float, default=0.9, help="Compaction threshold (default: 0.9)."
+    )
     p.add_argument(
         "--serve",
         action="store_true",
         help="Run the gateway web UI headless (no REPL) until killed.",
     )
-    p.add_argument(
-        "--port", type=int, help="Gateway port for --serve (default: config or 8700)."
-    )
+    p.add_argument("--port", type=int, help="Gateway port for --serve (default: config or 8700).")
     p.add_argument(
         "--install-service",
         action="store_true",
@@ -63,9 +81,7 @@ def parse_args(argv: list[str]) -> argparse.Namespace:
         action="store_true",
         help="Remove the background gateway service.",
     )
-    p.add_argument(
-        "-V", "--version", action="version", version=f"cagentic {__version__}"
-    )
+    p.add_argument("-V", "--version", action="version", version=f"cagentic {__version__}")
     return p.parse_args(argv)
 
 
@@ -105,12 +121,83 @@ Slash commands:
   /new [title]           start a new conversation
   /resume [id|num]       list/resume saved conversations
   /sessions              list saved conversations
+  /search <text>         search saved conversation titles and messages
+  /context               show current context usage
+  /compact               compact older context and keep recent turns
   /save [title]          force-save current conversation
   /rename <new title>    rename current conversation
   /delete <id|num>       delete a saved conversation
   /yolo [on|off]         toggle auto-approve
   /exit, /quit           leave
 """
+
+
+def _search_sessions(query: str) -> list[dict]:
+    needle = query.casefold().strip()
+    if not needle:
+        return []
+    results = []
+    for data in sessions.search(needle):
+        results.append(
+            {
+                "id": data.get("id", ""),
+                "title": data.get("title", "untitled"),
+                "model": data.get("model", "?"),
+                "updated_at": data.get("updated_at", 0),
+                "turns": sum(
+                    1 for message in data.get("messages", []) if message.get("role") == "user"
+                ),
+            }
+        )
+    return results
+
+
+def _setup_wizard(cfg: dict) -> None:
+    ui.info("Cagentic setup — press Enter to keep the current value.")
+    current_model = str(cfg.get("model") or "")
+    model = input(f"Model [{current_model or 'none'}]: ").strip() or current_model
+    if model:
+        cfg["model"] = model
+    name = input(f"Your name [{cfg.get('user_name') or ''}]: ").strip()
+    if name:
+        cfg["user_name"] = name
+    roots = input("Allowed workspace roots (separate with OS path separator): ").strip()
+    if roots:
+        config.set_value(cfg, "gateway.workspace_roots", roots.split(os.pathsep))
+    lan = input("Enable LAN gateway access? [y/N]: ").strip().lower()
+    if lan in ("y", "yes"):
+        config.set_value(cfg, "gateway.lan", True)
+        if not config.get_value(cfg, "gateway.token"):
+            import secrets
+
+            config.set_value(cfg, "gateway.token", secrets.token_urlsafe(32))
+    config.save(cfg)
+    ui.info(f"saved setup to {config.config_path()}")
+
+
+def _print_context(session_id: str, threshold: float, compact: bool = False) -> int:
+    from .services.compact import SUMMARY_MARKER, auto_compact
+    from .token_count import count_messages
+
+    data = sessions.load(session_id)
+    if data is None:
+        ui.error(f"session not found: {session_id}")
+        return 1
+    messages = [dict(message) for message in data.get("messages", [])]
+    before = count_messages(messages, str(data.get("model") or ""))
+    limit = max(1, int(8192 * threshold))
+    if compact:
+        auto_compact(messages, max_tokens=limit, keep_recent=6)
+        data["messages"] = [
+            message
+            for message in messages
+            if message.get("role") != "system"
+            or SUMMARY_MARKER in str(message.get("content") or "")
+        ]
+        sessions.save(data)
+    after = count_messages(messages, str(data.get("model") or ""))
+    print(json.dumps({"id": session_id, "before": before, "after": after}, indent=2))
+    return 0
 
 
 def _pick_model_interactive(client: OllamaClient) -> str | None:
@@ -131,9 +218,7 @@ def _pick_model_interactive(client: OllamaClient) -> str | None:
         prompt = "Choose a number, or type a model name: "
     else:
         ui.warn("No models installed locally.")
-        ui.warn(
-            "Suggested for general assistant use: llama3.1:8b, qwen2.5:7b, mistral-nemo"
-        )
+        ui.warn("Suggested for general assistant use: llama3.1:8b, qwen2.5:7b, mistral-nemo")
         prompt = "Type a model name: "
 
     try:
@@ -277,9 +362,7 @@ def _replay_conversation(messages: list[dict], max_turns: int = 12) -> None:
                 ui.assistant(content)
             for tc in m.get("tool_calls") or []:
                 fn = tc.get("function", {}) or {}
-                print(
-                    ui.color("  ↳ ", ui.DUSK) + ui.color(fn.get("name", "?"), ui.DUSK)
-                )
+                print(ui.color("  ↳ ", ui.DUSK) + ui.color(fn.get("name", "?"), ui.DUSK))
         elif role == "tool":
             first = content.splitlines()[0][:120] if content else ""
             ui.tool_result(first, ok=not first.startswith("ERROR"))
@@ -298,9 +381,7 @@ def _settle_in(agent: Agent) -> None:
         rems, notes_n = [], 0
     import time as _t
 
-    overdue = [
-        r for r in rems if r.due_at and r.due_at < _t.time() and r.status == "pending"
-    ]
+    overdue = [r for r in rems if r.due_at and r.due_at < _t.time() and r.status == "pending"]
 
     bits = []
     if rems:
@@ -382,7 +463,7 @@ def repl(agent: Agent, cfg: dict, gateway_holder: dict | None = None) -> int:
                     print(f"  - {n}")
                 continue
             if cmd == "groups":
-                from .tools import TOOL_GROUPS, DEFAULT_GROUPS
+                from .tools import DEFAULT_GROUPS, TOOL_GROUPS
 
                 active = (
                     agent.state.tool_groups
@@ -392,11 +473,7 @@ def repl(agent: Agent, cfg: dict, gateway_holder: dict | None = None) -> int:
                 if not arg1:
                     ui.info("tool groups (✓ = sent to the model):")
                     for g, names in TOOL_GROUPS.items():
-                        mark = (
-                            ui.color("✓", ui.OK)
-                            if g in active
-                            else ui.color("·", ui.SOFT)
-                        )
+                        mark = ui.color("✓", ui.OK) if g in active else ui.color("·", ui.SOFT)
                         print(f"  {mark} {g:<12} ({len(names)} tools)")
                     continue
                 if arg1 in ("enable", "disable") and arg2:
@@ -414,9 +491,7 @@ def repl(agent: Agent, cfg: dict, gateway_holder: dict | None = None) -> int:
                     config.save(cfg)
                     ui.info(f"{arg1}d '{arg2}' — {len(groups)} group(s) active")
                 else:
-                    ui.warn(
-                        "usage: /groups  |  /groups enable <name>  |  /groups disable <name>"
-                    )
+                    ui.warn("usage: /groups  |  /groups enable <name>  |  /groups disable <name>")
                 continue
             if cmd == "cd":
                 if not arg1:
@@ -479,11 +554,7 @@ def repl(agent: Agent, cfg: dict, gateway_holder: dict | None = None) -> int:
                         ui.warn("usage: /remind done <id>")
                         continue
                     r = _reminders.update(arg2, status="done")
-                    ui.info(
-                        f"marked done: {r.short().strip()}"
-                        if r
-                        else f"no reminder {arg2}"
-                    )
+                    ui.info(f"marked done: {r.short().strip()}" if r else f"no reminder {arg2}")
                     continue
                 if arg1 == "delete":
                     if not arg2:
@@ -565,9 +636,7 @@ def repl(agent: Agent, cfg: dict, gateway_holder: dict | None = None) -> int:
                     ui.error(f"browser bridge couldn't start: {b.error}")
                 elif b.is_connected():
                     ui.info(f"Chrome extension is connected — bridge on port {b.port}.")
-                    ui.info(
-                        "Cagentic can read pages, open tabs, click, and fill forms."
-                    )
+                    ui.info("Cagentic can read pages, open tabs, click, and fill forms.")
                 else:
                     ui.warn(
                         f"bridge running on port {b.port}, but the Chrome extension "
@@ -578,9 +647,7 @@ def repl(agent: Agent, cfg: dict, gateway_holder: dict | None = None) -> int:
                     print(f"  2. Turn on 'Developer mode' (top-right)")
                     print(f"  3. Click 'Load unpacked' and pick this folder:")
                     print(ui.color(f"       {ext_dir}", ui.GLOW))
-                    print(
-                        f"  4. The extension connects automatically; re-run /browser."
-                    )
+                    print(f"  4. The extension connects automatically; re-run /browser.")
                 continue
             if cmd == "gateway":
                 from .gateway import Gateway
@@ -611,17 +678,13 @@ def repl(agent: Agent, cfg: dict, gateway_holder: dict | None = None) -> int:
                 continue
 
             if cmd == "plan":
-                want = (
-                    arg1.lower() if arg1 else ("off" if agent.state.plan_mode else "on")
-                )
+                want = arg1.lower() if arg1 else ("off" if agent.state.plan_mode else "on")
                 if want not in ("on", "off"):
                     ui.warn("usage: /plan on|off")
                     continue
                 agent.state.update(plan_mode=(want == "on"))
                 agent.engine.refresh_system_prompt()
-                ui.info(
-                    f"plan mode: {'ON (read-only)' if agent.state.plan_mode else 'off'}"
-                )
+                ui.info(f"plan mode: {'ON (read-only)' if agent.state.plan_mode else 'off'}")
                 continue
             if cmd == "effort":
                 from .engine import EFFORT_LEVELS
@@ -676,9 +739,7 @@ def repl(agent: Agent, cfg: dict, gateway_holder: dict | None = None) -> int:
                     agent.state.update(todos=[])
                     ui.info("cleared todos")
                     continue
-                ui.warn(
-                    "usage: /todo  |  /todo add <text>  |  /todo done <n>  |  /todo clear"
-                )
+                ui.warn("usage: /todo  |  /todo add <text>  |  /todo done <n>  |  /todo clear")
                 continue
             if cmd == "diag":
                 from .tools import DEFAULT_GROUPS
@@ -689,9 +750,7 @@ def repl(agent: Agent, cfg: dict, gateway_holder: dict | None = None) -> int:
                     else DEFAULT_GROUPS
                 )
                 ui.info(f"model:    {agent.model}")
-                ui.info(
-                    f"name:     {agent.state.user_name or '(not set — /name <your name>)'}"
-                )
+                ui.info(f"name:     {agent.state.user_name or '(not set — /name <your name>)'}")
                 ui.info(f"workspace: {agent.state.workspace}")
                 ui.info(f"home:     {Path.home()}")
                 ui.info(
@@ -708,9 +767,7 @@ def repl(agent: Agent, cfg: dict, gateway_holder: dict | None = None) -> int:
                         ui.info(f"{label}:    model not currently loaded")
                     elif status["fully_gpu"]:
                         place = "in Metal buffer (unified)" if mac else "fully on GPU ✓"
-                        ui.info(
-                            f"{label}:    {status['size_vram'] / (1024**3):.1f} GB · {place}"
-                        )
+                        ui.info(f"{label}:    {status['size_vram'] / (1024**3):.1f} GB · {place}")
                     else:
                         size_gb = status["size"] / (1024**3)
                         cpu_gb = status["cpu_bytes"] / (1024**3)
@@ -728,15 +785,11 @@ def repl(agent: Agent, cfg: dict, gateway_holder: dict | None = None) -> int:
                 notes_n = len(_notes.list_all())
                 rems_n = len(_reminders.list_all())
                 ui.info(f"data:     {notes_n} notes · {rems_n} active reminders")
-                ui.info(
-                    f"github:   {'logged in' if agent.state.github_token else 'no token'}"
-                )
+                ui.info(f"github:   {'logged in' if agent.state.github_token else 'no token'}")
                 ui.info(f"input:    {prompt.backend}")
                 continue
             if cmd == "stream":
-                want = (
-                    arg1.lower() if arg1 else ("off" if agent.engine.stream else "on")
-                )
+                want = arg1.lower() if arg1 else ("off" if agent.engine.stream else "on")
                 if want not in ("on", "off"):
                     ui.warn("usage: /stream on|off")
                     continue
@@ -747,9 +800,7 @@ def repl(agent: Agent, cfg: dict, gateway_holder: dict | None = None) -> int:
                 continue
             if cmd == "model":
                 if not arg1:
-                    ui.info(
-                        f"current model: {agent.state.active_model_spec or agent.model}"
-                    )
+                    ui.info(f"current model: {agent.state.active_model_spec or agent.model}")
                 else:
                     try:
                         _activate_model(agent, cfg, arg1)
@@ -758,9 +809,7 @@ def repl(agent: Agent, cfg: dict, gateway_holder: dict | None = None) -> int:
                         continue
                     cfg["model"] = arg1  # save full provider:model
                     config.save(cfg)
-                    supported = config.get_value(
-                        cfg, f"models.{agent.model}.tools_supported", True
-                    )
+                    supported = config.get_value(cfg, f"models.{agent.model}.tools_supported", True)
                     agent.tools_enabled = bool(supported)
                     agent.engine.refresh_system_prompt()
                     ui.info(f"switched to {arg1} (saved)")
@@ -812,15 +861,12 @@ def repl(agent: Agent, cfg: dict, gateway_holder: dict | None = None) -> int:
                 config.save(cfg)
                 applied = _apply_setting_live(agent, arg1, v)
                 ui.info(
-                    f"set {arg1} = {v}"
-                    + ("  → applied live" if applied else "  → config only")
+                    f"set {arg1} = {v}" + ("  → applied live" if applied else "  → config only")
                 )
                 continue
             if cmd == "name":
                 if not arg1:
-                    ui.info(
-                        f"I'm calling you: {agent.state.user_name or '(no name set)'}"
-                    )
+                    ui.info(f"I'm calling you: {agent.state.user_name or '(no name set)'}")
                     continue
                 full = (arg1 + (" " + arg2 if arg2 else "")).strip()
                 agent.state.update(user_name=full)
@@ -931,16 +977,12 @@ def repl(agent: Agent, cfg: dict, gateway_holder: dict | None = None) -> int:
                     ui.info(f"saved {session['id']}")
                 session.clear()
                 session.update(
-                    sessions.make(
-                        agent.state.active_model_spec or agent.model, title=title
-                    )
+                    sessions.make(agent.state.active_model_spec or agent.model, title=title)
                 )
                 agent.reset()
                 agent.on_turn_complete = _on_turn
                 agent.engine.session_id = session["id"]
-                ui.info(
-                    "fresh start — clean slate. (Notes and reminders are still with me.)"
-                )
+                ui.info("fresh start — clean slate. (Notes and reminders are still with me.)")
                 continue
             if cmd == "resume":
                 listed = _print_sessions(active_id=session.get("id"))
@@ -974,6 +1016,45 @@ def repl(agent: Agent, cfg: dict, gateway_holder: dict | None = None) -> int:
                 continue
             if cmd == "sessions":
                 _print_sessions(active_id=session.get("id"))
+                continue
+            if cmd == "search":
+                query = (arg1 + (" " + arg2 if arg2 else "")).strip()
+                if not query:
+                    ui.warn("usage: /search <text>")
+                    continue
+                found = _search_sessions(query)
+                if not found:
+                    ui.info("no matching sessions")
+                for item in found:
+                    print(f"  {item['id']}  {item['title']}")
+                continue
+            if cmd == "context":
+                from .token_count import count_messages
+
+                used = count_messages(agent.messages, agent.state.active_model_spec or agent.model)
+                limit = int(config.get_value(cfg, "ollama.num_ctx", 8192) or 8192)
+                ui.info(f"context: {used:,} / {limit:,} tokens ({used / max(1, limit):.0%})")
+                continue
+            if cmd == "compact":
+                from .services.compact import auto_compact
+                from .token_count import count_messages
+
+                before = count_messages(
+                    agent.messages, agent.state.active_model_spec or agent.model
+                )
+                report = auto_compact(
+                    agent.messages,
+                    max_tokens=int((config.get_value(cfg, "ollama.num_ctx", 8192) or 8192) * 0.9),
+                    keep_recent=6,
+                    summarize_with_model=agent.engine._summarize_with_model,
+                )
+                _autosave(session, agent)
+                after = count_messages(agent.messages, agent.state.active_model_spec or agent.model)
+                ui.info(
+                    f"context compacted: {before:,} → {after:,} tokens"
+                    if report.triggered
+                    else f"context already compact enough ({after:,} tokens)"
+                )
                 continue
             if cmd == "save":
                 if arg1 or arg2:
@@ -1027,7 +1108,14 @@ def repl(agent: Agent, cfg: dict, gateway_holder: dict | None = None) -> int:
                 ui.info(f"retrying: {last_user_input[:80]}")
                 line = last_user_input
             else:
-                ui.warn(f"unknown command: /{cmd}")
+                import difflib
+
+                from .prompt import SLASH_COMMANDS
+
+                names = [name.lstrip("/") for name, _hint in SLASH_COMMANDS]
+                suggestion = difflib.get_close_matches(cmd, names, n=1, cutoff=0.5)
+                hint = f" Did you mean /{suggestion[0]}?" if suggestion else ""
+                ui.warn(f"unknown command: /{cmd}.{hint}")
                 continue
 
         last_user_input = line
@@ -1070,6 +1158,12 @@ def _list_models_with_retry(client, attempts: int = 5, delay: float = 2.0):
 def main(argv: list[str] | None = None) -> int:
     args = parse_args(argv if argv is not None else sys.argv[1:])
 
+    if args.completion:
+        from .completion import script
+
+        print(script(args.completion))
+        return 0
+
     if args.install_service or args.uninstall_service:
         from . import service
 
@@ -1083,6 +1177,36 @@ def main(argv: list[str] | None = None) -> int:
             ui.info("no config to reset")
 
     cfg = config.load()
+
+    if args.setup:
+        _setup_wizard(cfg)
+        return 0
+    if args.doctor:
+        from .diagnostics import run
+
+        report = run(cfg)
+        if args.json:
+            print(json.dumps(report, indent=2))
+        else:
+            for check in report["checks"]:
+                mark = "OK" if check["ok"] else "FAIL"
+                print(f"{mark:<4} {check['name']:<18} {check['detail']}")
+        return 0 if report["ok"] else 1
+    if args.sessions:
+        _print_sessions()
+        return 0
+    if args.search is not None:
+        found = _search_sessions(args.search)
+        if args.json:
+            print(json.dumps(found, indent=2))
+        else:
+            for item in found:
+                print(f"{item['id']}  {item['title']}")
+        return 0
+    if args.context:
+        return _print_context(args.context, args.threshold)
+    if args.compact:
+        return _print_context(args.compact, args.threshold, compact=True)
 
     if args.name:
         config.set_value(cfg, "user_name", args.name)
@@ -1107,9 +1231,7 @@ def main(argv: list[str] | None = None) -> int:
     # Normalize the Ollama host so /config shows the routable address.
     if isinstance(client, OllamaClient):
         raw_host = (
-            args.host
-            or os.environ.get("OLLAMA_HOST")
-            or cfg.get("host", "http://localhost:11434")
+            args.host or os.environ.get("OLLAMA_HOST") or cfg.get("host", "http://localhost:11434")
         )
         cfg["host"] = client.host
         if "0.0.0.0" in raw_host or raw_host.strip() in ("::", "[::]", "0"):
@@ -1160,9 +1282,7 @@ def main(argv: list[str] | None = None) -> int:
             return 1
     if model not in models and models:
         if isinstance(client, OllamaClient):
-            ui.warn(
-                f"model '{model}' not installed locally. Available: {', '.join(models[:8])}"
-            )
+            ui.warn(f"model '{model}' not installed locally. Available: {', '.join(models[:8])}")
             ui.warn(f"Pull it with:  ollama pull {model}")
         else:
             ui.warn(
@@ -1170,18 +1290,14 @@ def main(argv: list[str] | None = None) -> int:
             )
 
     temperature = (
-        args.temperature
-        if args.temperature is not None
-        else float(cfg.get("temperature", 0.4))
+        args.temperature if args.temperature is not None else float(cfg.get("temperature", 0.4))
     )
     yolo = args.yolo or bool(cfg.get("yolo", False))
     user_name = cfg.get("user_name")
 
     tools_supported = config.get_value(cfg, f"models.{model}.tools_supported", True)
     if tools_supported is False:
-        ui.warn(
-            f"note: '{model}' is known not to support tool calls — running tool-less."
-        )
+        ui.warn(f"note: '{model}' is known not to support tool calls — running tool-less.")
 
     def _remember_no_tools(_a):
         # Persist under the agent's CURRENT model, not the startup `model` this
@@ -1202,9 +1318,7 @@ def main(argv: list[str] | None = None) -> int:
         config=cfg,
         user_name=user_name,
     )
-    agent.state.active_model_spec = (
-        f"{provider}:{model}" if provider != "ollama" else model
-    )
+    agent.state.active_model_spec = f"{provider}:{model}" if provider != "ollama" else model
     agent.state.github_token = config.get_value(cfg, "github.token")
     agent.state.insecure_ssl = bool(config.get_value(cfg, "insecure_ssl", False))
 

@@ -23,7 +23,7 @@ from dataclasses import asdict, dataclass, field
 from pathlib import Path
 
 from .config import config_dir
-from .tasks import new_id, TaskKind
+from .tasks import TaskKind, new_id
 
 _log = logging.getLogger(__name__)
 
@@ -34,11 +34,7 @@ _write_lock = threading.Lock()
 
 def _safe_component(value: str, label: str) -> str:
     value = str(value or "").strip()
-    if (
-        not value
-        or value in (".", "..")
-        or not re.fullmatch(r"[A-Za-z0-9_. -]{1,80}", value)
-    ):
+    if not value or value in (".", "..") or not re.fullmatch(r"[A-Za-z0-9_. -]{1,80}", value):
         raise ValueError(f"invalid {label}")
     return value
 
@@ -55,9 +51,7 @@ class Teammate:
     team: str
     name: str
     role: str = ""  # system-prompt addendum
-    skills: list[str] = field(
-        default_factory=list
-    )  # advisory tags for coordinator auto-claim
+    skills: list[str] = field(default_factory=list)  # advisory tags for coordinator auto-claim
     mailbox: list[dict] = field(default_factory=list)
     transcript: list[dict] = field(default_factory=list)
     created_at: float = field(default_factory=time.time)
@@ -209,9 +203,7 @@ class TeamRegistry:
         payload = json.dumps(tm.to_dict(), indent=2)
         # Unique temp name + lock avoids the fixed-temp corruption race.
         with _write_lock:
-            fd, tmp_name = tempfile.mkstemp(
-                dir=str(d), prefix=f"{tm.id}.", suffix=".json.tmp"
-            )
+            fd, tmp_name = tempfile.mkstemp(dir=str(d), prefix=f"{tm.id}.", suffix=".json.tmp")
             try:
                 with os.fdopen(fd, "w", encoding="utf-8") as f:
                     f.write(payload)

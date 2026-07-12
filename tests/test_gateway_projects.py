@@ -95,9 +95,7 @@ def test_collama_requires_project_but_normal_new_chat_does_not(tmp_path, monkeyp
     try:
         status, payload = request(gw, "/api/chats/new", {"client": "collama"})
         assert status == 400 and "project" in payload["error"]
-        status, payload = request(
-            gw, "/api/chat", {"client": "collama", "prompt": "hello"}
-        )
+        status, payload = request(gw, "/api/chat", {"client": "collama", "prompt": "hello"})
         assert status == 400 and "project" in payload["error"]
         status, payload = request(gw, "/api/chats/new", {})
         assert status == 200 and payload["current"]["id"]
@@ -112,9 +110,7 @@ def test_collama_requires_project_but_normal_new_chat_does_not(tmp_path, monkeyp
         gw.stop()
 
 
-def test_project_persistence_immutability_legacy_assignment_and_bootstrap(
-    tmp_path, monkeypatch
-):
+def test_project_persistence_immutability_legacy_assignment_and_bootstrap(tmp_path, monkeypatch):
     gw = make_gateway(tmp_path, monkeypatch, 18996)
     folder = tmp_path / "root" / "one"
     folder.mkdir()
@@ -125,14 +121,9 @@ def test_project_persistence_immutability_legacy_assignment_and_bootstrap(
     gw._save_current()
     session_id = current["id"]
     assert gw.load_chat(session_id)["project"] == project
+    assert next(c for c in gw.bootstrap()["chats"] if c["id"] == session_id)["project"] == project
     assert (
-        next(c for c in gw.bootstrap()["chats"] if c["id"] == session_id)["project"]
-        == project
-    )
-    assert (
-        next(s for s in gw.list_sessions_compat()["sessions"] if s["id"] == session_id)[
-            "project"
-        ]
+        next(s for s in gw.list_sessions_compat()["sessions"] if s["id"] == session_id)["project"]
         == project
     )
     gw.rename_chat(session_id, "renamed")
@@ -155,13 +146,11 @@ def test_repository_and_folder_sessions_do_not_leak_workspace(tmp_path, monkeypa
     root = (tmp_path / "root").resolve()
     folder = root / "folder"
     folder.mkdir()
-    folder_id = gw.new_chat(
-        gw.validate_project({"kind": "gatewayFolder", "value": str(folder)})
-    )["id"]
+    folder_id = gw.new_chat(gw.validate_project({"kind": "gatewayFolder", "value": str(folder)}))[
+        "id"
+    ]
     assert gw.agent.state.workspace == folder
-    repo_id = gw.new_chat(
-        gw.validate_project({"kind": "repository", "value": "owner/repo"})
-    )["id"]
+    repo_id = gw.new_chat(gw.validate_project({"kind": "repository", "value": "owner/repo"}))["id"]
     assert gw.agent.state.workspace == root
     assert gw.agent.state.default_repository == "owner/repo"
     gw.load_chat(folder_id)
@@ -196,9 +185,9 @@ def test_missing_folder_project_load_does_not_switch_session(tmp_path, monkeypat
     gw = make_gateway(tmp_path, monkeypatch, 18999)
     folder = tmp_path / "root" / "temporary"
     folder.mkdir()
-    folder_id = gw.new_chat(
-        gw.validate_project({"kind": "gatewayFolder", "value": str(folder)})
-    )["id"]
+    folder_id = gw.new_chat(gw.validate_project({"kind": "gatewayFolder", "value": str(folder)}))[
+        "id"
+    ]
     current_id = gw.new_chat()["id"]
     folder.rmdir()
     result = gw.load_chat(folder_id)
@@ -218,16 +207,12 @@ def test_email_verification_rate_limit(tmp_path, monkeypatch):
     ]
 
 
-def test_gateway_model_switch_changes_provider_and_persists_full_spec(
-    tmp_path, monkeypatch
-):
+def test_gateway_model_switch_changes_provider_and_persists_full_spec(tmp_path, monkeypatch):
     import cagentic.gateway as gateway_module
 
     gw = make_gateway(tmp_path, monkeypatch, 19003)
     clients = {"openai": object(), "ollama": object()}
-    monkeypatch.setattr(
-        gateway_module, "_build_client", lambda _cfg, provider: clients[provider]
-    )
+    monkeypatch.setattr(gateway_module, "_build_client", lambda _cfg, provider: clients[provider])
     monkeypatch.setattr(gateway_module._config, "save", lambda _cfg: None)
 
     assert gw.set_model("openai:gpt-test") == {"model": "openai:gpt-test"}
@@ -263,9 +248,7 @@ def test_context_compact_is_hidden_persistent_and_idempotent(tmp_path, monkeypat
     monkeypatch.setattr(
         gw,
         "_summarize_compaction",
-        lambda _older, _model: (
-            "Requirements retained; changed files and errors retained."
-        ),
+        lambda _older, _model: "Requirements retained; changed files and errors retained.",
     )
 
     result, status = gw.compact_context(session_id, project, threshold=0.1)

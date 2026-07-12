@@ -7,6 +7,7 @@ service that speaks the /chat/completions protocol.
 Exposes the same interface as OllamaClient so the engine can use either
 without modification.
 """
+
 from __future__ import annotations
 
 import json
@@ -108,9 +109,7 @@ class OpenAIClient:
                     cid = tc.get("id") or _make_call_id()
                     name = fn.get("name", "")
                     args = fn.get("arguments", {})
-                    args_str = (
-                        json.dumps(args) if isinstance(args, dict) else str(args or "")
-                    )
+                    args_str = json.dumps(args) if isinstance(args, dict) else str(args or "")
                     new_tcs.append(
                         {
                             "id": cid,
@@ -165,9 +164,7 @@ class OpenAIClient:
                 and "tool_calls" not in m
             ):
                 merged[-1]["content"] = (
-                    str(merged[-1].get("content") or "")
-                    + "\n"
-                    + str(m.get("content") or "")
+                    str(merged[-1].get("content") or "") + "\n" + str(m.get("content") or "")
                 ).strip()
             else:
                 merged.append(m)

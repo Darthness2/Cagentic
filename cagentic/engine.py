@@ -21,8 +21,10 @@ from .permissions import CONCURRENT_SAFE, Resolver, auto_deny_resolver, can_use_
 from .services.compact import (
     BOUNDARY_MARKER,
     SUMMARY_MARKER,
-    approx_tokens as estimate_tokens,
     manage_context,
+)
+from .services.compact import (
+    approx_tokens as estimate_tokens,
 )
 from .services.transcript import record as record_transcript
 from .state import AppState
@@ -77,9 +79,7 @@ class Message:
 
 _TOOL_TAG_RX = re.compile(r"<tool>\s*(\{.*?\})\s*</tool>", re.DOTALL)
 _PLAN_RX = re.compile(r"<plan>(.*?)</plan>", re.DOTALL | re.IGNORECASE)
-_THINK_RX = re.compile(
-    r"<think(?:ing)?>(.*?)</think(?:ing)?>", re.DOTALL | re.IGNORECASE
-)
+_THINK_RX = re.compile(r"<think(?:ing)?>(.*?)</think(?:ing)?>", re.DOTALL | re.IGNORECASE)
 _FENCE_RX = re.compile(r"```(?:json|JSON)?\s*\n?(.*?)\n?\s*```", re.DOTALL)
 _DS_BAR = r"[｜|]"
 _DEEPSEEK_CALL_RX = re.compile(
@@ -94,9 +94,7 @@ _DEEPSEEK_OUTPUTS_BLOCK_RX = re.compile(
     rf"<{_DS_BAR}tool▁outputs?▁begin{_DS_BAR}>.*?<{_DS_BAR}tool▁outputs?▁end{_DS_BAR}>",
     re.DOTALL,
 )
-_DEEPSEEK_STRAY_TOKEN_RX = re.compile(
-    rf"<{_DS_BAR}tool▁outputs?▁(?:begin|end){_DS_BAR}>"
-)
+_DEEPSEEK_STRAY_TOKEN_RX = re.compile(rf"<{_DS_BAR}tool▁outputs?▁(?:begin|end){_DS_BAR}>")
 
 
 def _looks_like_call(obj):
@@ -191,9 +189,7 @@ def _extract_thinking(text: str) -> tuple[list[str], str]:
 
 
 def _strip_fakes(text: str) -> tuple[bool, str]:
-    had = bool(
-        _DEEPSEEK_OUTPUTS_BLOCK_RX.search(text) or _DEEPSEEK_STRAY_TOKEN_RX.search(text)
-    )
+    had = bool(_DEEPSEEK_OUTPUTS_BLOCK_RX.search(text) or _DEEPSEEK_STRAY_TOKEN_RX.search(text))
     out = _DEEPSEEK_OUTPUTS_BLOCK_RX.sub("", text)
     out = _DEEPSEEK_STRAY_TOKEN_RX.sub("", out)
     return had, out
@@ -247,9 +243,7 @@ def _summarize_args(name: str, args: dict) -> str:
     return ""
 
 
-def _poke_browser(
-    state, *, model: str | None = None, activity: str | None = None
-) -> None:
+def _poke_browser(state, *, model: str | None = None, activity: str | None = None) -> None:
     """Push the assistant's live status to the browser bridge (if one is up)
     so the Chrome extension popup can show what Cagentic is doing."""
     bridge = getattr(state, "browser", None)
@@ -504,9 +498,7 @@ def _resolve_mention(token: str, workspace: Path, home: Path):
     return None
 
 
-def process_user_input(
-    raw: str, workspace: Path | None = None, home: Path | None = None
-) -> dict:
+def process_user_input(raw: str, workspace: Path | None = None, home: Path | None = None) -> dict:
     if not workspace or "@" not in raw:
         return {"role": "user", "content": raw}
     attachments: list[str] = []
@@ -539,9 +531,7 @@ def process_user_input(
         selected = lines[lo:hi]
         numbered = "\n".join(f"{lo + i + 1:>5}  {ln}" for i, ln in enumerate(selected))
         range_hdr = f":{s}-{e}" if s else ""
-        attachments.append(
-            f"--- @{p}{range_hdr}  ({len(lines)} lines total) ---\n{numbered}"
-        )
+        attachments.append(f"--- @{p}{range_hdr}  ({len(lines)} lines total) ---\n{numbered}")
     if not attachments:
         return {"role": "user", "content": raw}
     body = raw + "\n\n" + "\n\n".join(attachments)
@@ -554,9 +544,7 @@ def normalize_messages_for_api(messages: list[dict]) -> list[dict]:
     out: list[dict] = []
     for m in messages:
         cleaned = {k: v for k, v in m.items() if k in keep_keys}
-        if cleaned.get("role") == "system" and BOUNDARY_MARKER in (
-            cleaned.get("content") or ""
-        ):
+        if cleaned.get("role") == "system" and BOUNDARY_MARKER in (cleaned.get("content") or ""):
             continue
         out.append(cleaned)
     return out
@@ -633,9 +621,7 @@ class StreamingToolExecutor:
         allowed, reason = can_use_tool(name, args, self.state, self.resolver)
         if not allowed:
             err = f"ERROR: permission denied ({reason})"
-            yield Message(
-                "tool_denied", {"id": tid, "name": name, "reason": reason}, task_id=tid
-            )
+            yield Message("tool_denied", {"id": tid, "name": name, "reason": reason}, task_id=tid)
             yield Message(
                 "tool_result",
                 {
@@ -733,9 +719,7 @@ class QueryEngine:
         # that belongs to a project.
         self.project_system_prompt: str = ""
         self.project_context: str = ""
-        self.messages: list[dict] = [
-            {"role": "system", "content": self._system_content()}
-        ]
+        self.messages: list[dict] = [{"role": "system", "content": self._system_content()}]
         self._recent_calls: list[tuple[str, str]] = []
         self._recent_results: list[tuple[str, str]] = []
         # Signatures already counted toward loop detection in the CURRENT
@@ -780,9 +764,7 @@ class QueryEngine:
             or SUMMARY_MARKER in first_content
             or BOUNDARY_MARKER in first_content
         ):
-            messages = [{"role": "system", "content": self._system_content()}] + list(
-                messages
-            )
+            messages = [{"role": "system", "content": self._system_content()}] + list(messages)
         self.messages = list(messages)
 
     def refresh_system_prompt(self) -> None:
@@ -807,9 +789,7 @@ class QueryEngine:
             self.state.update(**resets)
         _poke_browser(self.state, model=self.model, activity="thinking")
 
-        user_msg = process_user_input(
-            prompt, workspace=self.state.workspace, home=self.state.home
-        )
+        user_msg = process_user_input(prompt, workspace=self.state.workspace, home=self.state.home)
         yield Message("user", {"text": prompt})
 
         record_transcript(self.session_id or "", "user", prompt)
@@ -820,9 +800,7 @@ class QueryEngine:
         if will_compact:
             yield Message(
                 "info",
-                {
-                    "text": f"compacting context (~{_pre:,} → ≤{COMPACT_TOKENS:,} tokens)…"
-                },
+                {"text": f"compacting context (~{_pre:,} → ≤{COMPACT_TOKENS:,} tokens)…"},
             )
         summarize_fn = (
             self._summarize_with_model
@@ -859,9 +837,7 @@ class QueryEngine:
             est_tokens = estimate_tokens(self.messages)
             if est_tokens >= 4000:
                 tool_count = (
-                    len(all_tool_schemas(self.state.tool_groups))
-                    if self.state.tools_enabled
-                    else 0
+                    len(all_tool_schemas(self.state.tool_groups)) if self.state.tools_enabled else 0
                 )
                 yield Message(
                     "info",
@@ -910,9 +886,7 @@ class QueryEngine:
                         )
                         msg = self._chat_nonstream()
                         if msg is None:
-                            yield Message(
-                                "error", {"text": "non-streaming retry also failed"}
-                            )
+                            yield Message("error", {"text": "non-streaming retry also failed"})
                             return
                         usage = {}
                         final_msg = "RETRIED"
@@ -920,9 +894,7 @@ class QueryEngine:
                         spinner.stop()
                         watchdog.stop()
                     if final_msg is None:
-                        yield Message(
-                            "warn", {"text": "stream produced no chunks — try /retry"}
-                        )
+                        yield Message("warn", {"text": "stream produced no chunks — try /retry"})
                         return
                     if final_msg != "RETRIED":
                         if final_msg.get("truncated"):
@@ -948,9 +920,7 @@ class QueryEngine:
                 self.state.update(tools_enabled=False)
                 self.refresh_system_prompt()
                 if self.config is not None:
-                    set_value(
-                        self.config, f"models.{self.model}.tools_supported", False
-                    )
+                    set_value(self.config, f"models.{self.model}.tools_supported", False)
                 continue
             except OllamaError as e:
                 yield Message("error", {"text": str(e)})
@@ -1040,9 +1010,7 @@ class QueryEngine:
                 )
                 return
 
-        yield Message(
-            "error", {"text": f"hit tool-call limit ({MAX_TOOL_ITERATIONS}); stopping."}
-        )
+        yield Message("error", {"text": f"hit tool-call limit ({MAX_TOOL_ITERATIONS}); stopping."})
 
     def _chat_once(self, *, yield_deltas: bool):
         api_messages = normalize_messages_for_api(self.messages)
@@ -1238,9 +1206,7 @@ class QueryEngine:
 
         for ev in self.executor.execute(cleaned_calls):
             if ev.kind == "tool_call":
-                _poke_browser(
-                    self.state, activity=f"running {ev.data.get('name', 'a tool')}"
-                )
+                _poke_browser(self.state, activity=f"running {ev.data.get('name', 'a tool')}")
             yield ev
             if ev.kind == "tool_result":
                 d = ev.data
@@ -1272,16 +1238,11 @@ class QueryEngine:
                     # Hard abort takes precedence — the soft steer didn't work.
                     yield Message(
                         "warn",
-                        {
-                            "text": f"loop unbroken after {seen} identical results — ending turn"
-                        },
+                        {"text": f"loop unbroken after {seen} identical results — ending turn"},
                     )
                     self._abort_turn = True
                     return
-                if (
-                    seen >= LOOP_THRESHOLD
-                    and steer_key not in self._steered_result_keys
-                ):
+                if seen >= LOOP_THRESHOLD and steer_key not in self._steered_result_keys:
                     # Fire on >= (not ==): counts can jump past the exact value
                     # when exempt/CACHED/concurrent results land, which silently
                     # skipped the old `== LOOP_THRESHOLD` branch. Steer once per
@@ -1290,9 +1251,7 @@ class QueryEngine:
                     self._steered_result_keys.add(steer_key)
                     yield Message(
                         "warn",
-                        {
-                            "text": f"loop: {name} returned the same result {seen}× — steering hard"
-                        },
+                        {"text": f"loop: {name} returned the same result {seen}× — steering hard"},
                     )
                     self.messages.append(
                         {

@@ -1,5 +1,6 @@
 """Tests for the coding-agent tools absorbed from Collama, plus the
 gateway's Collama-compat surface."""
+
 from __future__ import annotations
 
 import json
@@ -40,11 +41,13 @@ from cagentic.tools import (
 @pytest.fixture()
 def ctx(tmp_path):
     state = AppState(workspace=tmp_path, home=tmp_path)
-    return ToolContext(root=tmp_path, yolo=True, state=state,
-                       tasks=TaskGraph(root=tmp_path / "tasks"))
+    return ToolContext(
+        root=tmp_path, yolo=True, state=state, tasks=TaskGraph(root=tmp_path / "tasks")
+    )
 
 
 # ---------------------------------------------------------------- registry --
+
 
 def test_every_grouped_tool_is_dispatchable():
     tools = _all_tools()
@@ -63,13 +66,23 @@ def test_every_grouped_tool_has_a_schema():
 def test_collama_coding_groups_are_default_enabled():
     assert {"coding", "worktree", "subagent"} <= DEFAULT_GROUPS
     default_names = {s["function"]["name"] for s in all_tool_schemas()}
-    for name in ("check_syntax", "multi_edit", "notebook_edit",
-                 "enter_worktree", "exit_worktree", "agent_call",
-                 "task_create", "task_update", "task_delete", "brief"):
+    for name in (
+        "check_syntax",
+        "multi_edit",
+        "notebook_edit",
+        "enter_worktree",
+        "exit_worktree",
+        "agent_call",
+        "task_create",
+        "task_update",
+        "task_delete",
+        "brief",
+    ):
         assert name in default_names
 
 
 # ------------------------------------------------------------ check_syntax --
+
 
 def test_check_syntax_passes_valid_python(ctx, tmp_path):
     (tmp_path / "good.py").write_text("x = 1\n")
@@ -84,19 +97,26 @@ def test_check_syntax_fails_broken_python(ctx, tmp_path):
 
 
 def test_check_syntax_inline_json(ctx):
-    assert t_check_syntax({"content": "{\"a\": 1}", "language": "json"}, ctx).startswith("PASS")
+    assert t_check_syntax({"content": '{"a": 1}', "language": "json"}, ctx).startswith("PASS")
     assert t_check_syntax({"content": "{oops}", "language": "json"}, ctx).startswith("FAIL")
 
 
 # -------------------------------------------------------------- multi_edit --
 
+
 def test_multi_edit_applies_in_order(ctx, tmp_path):
     p = tmp_path / "f.txt"
     p.write_text("one\ntwo\nthree\n")
-    out = t_multi_edit({"path": "f.txt", "edits": [
-        {"old_string": "one", "new_string": "1"},
-        {"old_string": "two", "new_string": "2"},
-    ]}, ctx)
+    out = t_multi_edit(
+        {
+            "path": "f.txt",
+            "edits": [
+                {"old_string": "one", "new_string": "1"},
+                {"old_string": "two", "new_string": "2"},
+            ],
+        },
+        ctx,
+    )
     assert out.startswith("OK: applied 2 edits")
     assert p.read_text() == "1\n2\nthree\n"
 
@@ -104,15 +124,22 @@ def test_multi_edit_applies_in_order(ctx, tmp_path):
 def test_multi_edit_is_atomic_on_failure(ctx, tmp_path):
     p = tmp_path / "f.txt"
     p.write_text("one\ntwo\n")
-    out = t_multi_edit({"path": "f.txt", "edits": [
-        {"old_string": "one", "new_string": "1"},
-        {"old_string": "MISSING", "new_string": "x"},
-    ]}, ctx)
+    out = t_multi_edit(
+        {
+            "path": "f.txt",
+            "edits": [
+                {"old_string": "one", "new_string": "1"},
+                {"old_string": "MISSING", "new_string": "x"},
+            ],
+        },
+        ctx,
+    )
     assert out.startswith("ERROR: edit #2")
     assert p.read_text() == "one\ntwo\n"  # nothing written
 
 
 # ----------------------------------------------------------- notebook_edit --
+
 
 def test_notebook_edit_roundtrip(ctx, tmp_path):
     out = t_notebook_edit({"path": "nb.ipynb", "op": "insert", "source": "print(1)"}, ctx)
@@ -124,6 +151,7 @@ def test_notebook_edit_roundtrip(ctx, tmp_path):
 
 
 # ---------------------------------------------------------------- worktree --
+
 
 def test_worktree_push_pop(ctx, tmp_path):
     out = t_enter_worktree({"path": "sub", "create": True}, ctx)
@@ -139,6 +167,7 @@ def test_exit_worktree_on_empty_stack(ctx):
 
 
 # -------------------------------------------------------------- task graph --
+
 
 def test_task_graph_crud_via_tools(ctx):
     out = t_task_create({"title": "port everything"}, ctx)
@@ -159,6 +188,7 @@ def test_brief_set_get_delete(ctx):
 
 # -------------------------------------------------------------------- teams --
 
+
 def test_team_registry_roundtrip(tmp_path):
     reg = TeamRegistry(root=tmp_path / "teams")
     reg.create_team("alpha")
@@ -175,14 +205,18 @@ def test_teams_tools_via_dispatch(ctx, tmp_path):
     assert dispatch("team_create", {"name": "beta"}, ctx).startswith("OK")
     assert dispatch("teammate_create", {"team": "beta", "name": "dev"}, ctx).startswith("OK")
     assert "beta/dev" in dispatch("teammate_list", {}, ctx)
-    assert dispatch("send_message", {"team": "beta", "to": "dev", "content": "build it"}, ctx).startswith("OK")
+    assert dispatch(
+        "send_message", {"team": "beta", "to": "dev", "content": "build it"}, ctx
+    ).startswith("OK")
     assert "build it" in dispatch("inbox", {"team": "beta", "name": "dev"}, ctx)
 
 
 # ------------------------------------------------------------------- effort --
 
+
 def test_effort_section_in_system_prompt(tmp_path):
     from cagentic.engine import fetch_system_prompt_parts
+
     state = AppState(workspace=tmp_path, home=tmp_path)
     state.effort = "high"
     assert "EFFORT LEVEL: HIGH" in fetch_system_prompt_parts(state)
@@ -192,26 +226,32 @@ def test_effort_section_in_system_prompt(tmp_path):
 
 # ---------------------------------------------------- gateway compat surface --
 
+
 def _make_gateway(tmp_path, port):
     from cagentic.agent import Agent
     from cagentic.gateway import Gateway
     from cagentic.ollama_client import OllamaClient
+
     agent = Agent(OllamaClient("http://localhost:11434"), "testmodel", tmp_path)
     return Gateway(agent, {"gateway": {"port": port}}, port=port)
 
 
 def test_gateway_collama_compat_endpoints(tmp_path, monkeypatch):
     import urllib.request
+
     from cagentic import config as _config
+
     # /api/effort persists to config — don't let the test touch the real file.
     monkeypatch.setattr(_config, "save", lambda cfg: None)
     gw = _make_gateway(tmp_path, 18991)
     assert gw.start(), gw.error
     try:
+
         def req(path, body=None):
             data = json.dumps(body).encode() if body is not None else None
             r = urllib.request.Request(
-                f"http://127.0.0.1:18991{path}", data=data,
+                f"http://127.0.0.1:18991{path}",
+                data=data,
                 headers={"X-Cagentic-Link": gw.token, "Content-Type": "application/json"},
             )
             with urllib.request.urlopen(r) as resp:

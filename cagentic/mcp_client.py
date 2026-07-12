@@ -33,6 +33,7 @@ The MCPManager starts servers on first use, keeps a single connection
 per server for the life of the Cagentic process, and shuts them down on
 exit.
 """
+
 from __future__ import annotations
 
 import json
@@ -49,7 +50,7 @@ from typing import Any
 logger = logging.getLogger(__name__)
 
 
-PROTOCOL_VERSION = "2024-11-05"   # mcp protocol revision string
+PROTOCOL_VERSION = "2024-11-05"  # mcp protocol revision string
 CLIENT_INFO = {"name": "cagentic", "version": "0.1.0"}
 
 
@@ -88,9 +89,7 @@ class MCPServer:
         if hasattr(os, "setsid"):
             popen_kwargs["start_new_session"] = True
         elif os.name == "nt":  # Windows: own process group for killing the tree
-            popen_kwargs["creationflags"] = getattr(
-                subprocess, "CREATE_NEW_PROCESS_GROUP", 0
-            )
+            popen_kwargs["creationflags"] = getattr(subprocess, "CREATE_NEW_PROCESS_GROUP", 0)
         # MCP servers are line-delimited JSON-RPC over stdio.
         self.proc = subprocess.Popen(
             self.command,
@@ -99,7 +98,7 @@ class MCPServer:
             stderr=subprocess.PIPE,
             env=env,
             text=True,
-            bufsize=1,                  # line-buffered
+            bufsize=1,  # line-buffered
             **popen_kwargs,
         )
         # Drain stdout and stderr on daemon threads. stderr MUST be drained
@@ -107,22 +106,30 @@ class MCPServer:
         self._stdout_q = queue.Queue()
         self._stderr_tail = []
         self._reader = threading.Thread(
-            target=self._read_stdout, args=(self.proc,), daemon=True,
+            target=self._read_stdout,
+            args=(self.proc,),
+            daemon=True,
             name=f"mcp-{self.name}-stdout",
         )
         self._reader.start()
         self._stderr_thread = threading.Thread(
-            target=self._drain_stderr, args=(self.proc,), daemon=True,
+            target=self._drain_stderr,
+            args=(self.proc,),
+            daemon=True,
             name=f"mcp-{self.name}-stderr",
         )
         self._stderr_thread.start()
         # Handshake: initialize → initialized notification.
         try:
-            self._send_request("initialize", {
-                "protocolVersion": PROTOCOL_VERSION,
-                "capabilities": {},
-                "clientInfo": CLIENT_INFO,
-            }, timeout=timeout)
+            self._send_request(
+                "initialize",
+                {
+                    "protocolVersion": PROTOCOL_VERSION,
+                    "capabilities": {},
+                    "clientInfo": CLIENT_INFO,
+                },
+                timeout=timeout,
+            )
             self._send_notification("notifications/initialized", {})
             self._initialized = True
         except Exception as e:
@@ -188,8 +195,9 @@ class MCPServer:
                 os.killpg(os.getpgid(proc.pid), signal.SIGTERM)
                 return
             except (ProcessLookupError, PermissionError, OSError):
-                logger.warning("mcp '%s' killpg(SIGTERM) failed, falling back",
-                               self.name, exc_info=True)
+                logger.warning(
+                    "mcp '%s' killpg(SIGTERM) failed, falling back", self.name, exc_info=True
+                )
         if os.name == "nt":
             # On Windows, proc.terminate()/proc.kill() call TerminateProcess
             # on the direct child only — the `node` grandchild that npx spawns
@@ -204,8 +212,9 @@ class MCPServer:
                 os.killpg(os.getpgid(proc.pid), signal.SIGKILL)
                 return
             except (ProcessLookupError, PermissionError, OSError):
-                logger.warning("mcp '%s' killpg(SIGKILL) failed, falling back",
-                               self.name, exc_info=True)
+                logger.warning(
+                    "mcp '%s' killpg(SIGKILL) failed, falling back", self.name, exc_info=True
+                )
         if os.name == "nt":
             self._win_kill_tree(proc.pid, force=True)
             return
@@ -235,18 +244,21 @@ class MCPServer:
         with self._lock:
             req_id = self._next_id
             self._next_id += 1
-            payload = json.dumps({
-                "jsonrpc": "2.0", "id": req_id, "method": method, "params": params,
-            })
+            payload = json.dumps(
+                {
+                    "jsonrpc": "2.0",
+                    "id": req_id,
+                    "method": method,
+                    "params": params,
+                }
+            )
             # Guard the write: a server that died after the poll() check above
             # raises BrokenPipeError on write — turn it into a clean MCPError.
             try:
                 self.proc.stdin.write(payload + "\n")  # type: ignore[union-attr]
-                self.proc.stdin.flush()                # type: ignore[union-attr]
+                self.proc.stdin.flush()  # type: ignore[union-attr]
             except (BrokenPipeError, OSError, ValueError) as e:
-                raise MCPError(
-                    f"server '{self.name}' write failed for '{method}': {e}"
-                ) from e
+                raise MCPError(f"server '{self.name}' write failed for '{method}': {e}") from e
             # Read until we find a matching response, but bound every read by
             # the remaining deadline via the reader-thread queue — a server
             # that stalls mid-line can't hang us (or hold the lock) forever.
@@ -282,10 +294,11 @@ class MCPServer:
         with self._lock:
             try:
                 self.proc.stdin.write(payload + "\n")  # type: ignore[union-attr]
-                self.proc.stdin.flush()                # type: ignore[union-attr]
+                self.proc.stdin.flush()  # type: ignore[union-attr]
             except (BrokenPipeError, OSError, ValueError):
-                logger.warning("mcp '%s' notification '%s' write failed",
-                               self.name, method, exc_info=True)
+                logger.warning(
+                    "mcp '%s' notification '%s' write failed", self.name, method, exc_info=True
+                )
 
     # ---- public surface ---------------------------------------------------
 
@@ -298,9 +311,17 @@ class MCPServer:
         return tools
 
     def call_tool(self, name: str, arguments: dict, *, timeout: float = 60.0) -> dict:
-        return self._send_request("tools/call", {
-            "name": name, "arguments": arguments,
-        }, timeout=timeout) or {}
+        return (
+            self._send_request(
+                "tools/call",
+                {
+                    "name": name,
+                    "arguments": arguments,
+                },
+                timeout=timeout,
+            )
+            or {}
+        )
 
     def list_resources(self) -> list[dict]:
         res = self._send_request("resources/list", {}) or {}
@@ -319,7 +340,7 @@ class MCPManager:
         self._load_from_config()
 
     def _load_from_config(self) -> None:
-        servers = ((self.config.get("mcp") or {}).get("servers") or {})
+        servers = (self.config.get("mcp") or {}).get("servers") or {}
         for name, spec in servers.items():
             if not isinstance(spec, dict):
                 continue
@@ -335,6 +356,7 @@ class MCPManager:
             # backslashes in paths aren't eaten as escapes.
             if isinstance(command, str):
                 import shlex
+
                 command = shlex.split(command, posix=os.name != "nt")
             else:
                 command = list(command)
@@ -360,9 +382,7 @@ class MCPManager:
     def get(self, name: str, *, start: bool = True) -> MCPServer:
         srv = self.servers.get(name)
         if srv is None:
-            raise MCPError(
-                f"no MCP server named '{name}' — configured: {self.names() or '(none)'}"
-            )
+            raise MCPError(f"no MCP server named '{name}' — configured: {self.names() or '(none)'}")
         if start:
             srv.start()
         return srv
@@ -403,7 +423,9 @@ def format_tool_result(result: dict) -> str:
         if t == "text":
             parts.append(item.get("text", ""))
         elif t == "image":
-            parts.append(f"[image: {item.get('mimeType', '?')}, {len(item.get('data', ''))} chars b64]")
+            parts.append(
+                f"[image: {item.get('mimeType', '?')}, {len(item.get('data', ''))} chars b64]"
+            )
         elif t == "resource":
             res = item.get("resource") or {}
             parts.append(f"[resource: {res.get('uri', '?')}  {res.get('mimeType', '')}]")

@@ -3,6 +3,7 @@
 Uses prompt_toolkit if available — gives a real popup as you type `/`.
 Falls back to readline tab-completion, then plain input().
 """
+
 from __future__ import annotations
 
 # (name, hint) pairs shown in the popup. Personal-assistant flavored.
@@ -38,6 +39,9 @@ SLASH_COMMANDS: list[tuple[str, str]] = [
     ("/new", "start a new conversation"),
     ("/resume", "list/resume saved conversations"),
     ("/sessions", "list saved conversations"),
+    ("/search", "search saved conversations"),
+    ("/context", "show context token usage"),
+    ("/compact", "summarize older context and retain recent turns"),
     ("/save", "force-save / set title of current conversation"),
     ("/rename", "rename the current conversation"),
     ("/delete", "delete a saved conversation"),
@@ -83,15 +87,17 @@ def _build_pt_session():
     # Slash-command popup styled in Cagentic's warm-dusk palette — dark
     # plum menu, soft mauve text, a copper-peach highlight on the selected
     # row.
-    style = Style.from_dict({
-        "completion-menu":                    "bg:#241c2e #cdbbd8",
-        "completion-menu.completion":         "bg:#241c2e #cdbbd8",
-        "completion-menu.completion.current": "bg:#e3a978 #2a1e10 bold",
-        "completion-menu.meta":               "bg:#241c2e #8f7f9e",
-        "completion-menu.meta.current":       "bg:#d39a6a #2a1e10",
-        "scrollbar.background":               "bg:#241c2e",
-        "scrollbar.button":                   "bg:#8a6f86",
-    })
+    style = Style.from_dict(
+        {
+            "completion-menu": "bg:#241c2e #cdbbd8",
+            "completion-menu.completion": "bg:#241c2e #cdbbd8",
+            "completion-menu.completion.current": "bg:#e3a978 #2a1e10 bold",
+            "completion-menu.meta": "bg:#241c2e #8f7f9e",
+            "completion-menu.meta.current": "bg:#d39a6a #2a1e10",
+            "scrollbar.background": "bg:#241c2e",
+            "scrollbar.button": "bg:#8a6f86",
+        }
+    )
 
     try:
         session = PromptSession(
@@ -149,14 +155,14 @@ class Prompt:
             return None
         reason = self._pt_error or "prompt_toolkit unavailable"
         if self._readline:
-            return (f"slash-command popup OFF — {reason}. "
-                    f"TAB still completes /commands.")
+            return f"slash-command popup OFF — {reason}. TAB still completes /commands."
         return f"slash-command popup OFF — {reason}."
 
     def ask(self, prompt: str) -> str:
         if self._pt is not None:
             try:
                 from prompt_toolkit.formatted_text import ANSI
+
                 return self._pt.prompt(ANSI(prompt))
             except Exception:
                 return self._pt.prompt(prompt)

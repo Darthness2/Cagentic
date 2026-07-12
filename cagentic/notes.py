@@ -6,6 +6,7 @@ Names are slugified to keep them filesystem-safe. The assistant uses
 note_write / note_get / note_list / note_search to remember things between
 sessions without you having to repeat yourself.
 """
+
 from __future__ import annotations
 
 import re

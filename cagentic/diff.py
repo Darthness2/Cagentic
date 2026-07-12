@@ -1,17 +1,18 @@
 """Colorized unified diffs for terminal display."""
+
 from __future__ import annotations
 
 import difflib
 
 from . import ui
 
-
 # Keep file-edit diffs short in the terminal — show a preview and cut off.
 DEFAULT_MAX_LINES = 12
 
 
-def render(old: str, new: str, path: str, context: int = 3,
-           max_lines: int = DEFAULT_MAX_LINES) -> str:
+def render(
+    old: str, new: str, path: str, context: int = 3, max_lines: int = DEFAULT_MAX_LINES
+) -> str:
     """Return a colored unified-diff string, truncated to `max_lines`.
 
     Empty if nothing changed. When the diff is longer than `max_lines`, the
@@ -23,11 +24,16 @@ def render(old: str, new: str, path: str, context: int = 3,
     if old == new:
         return ""
 
-    diff_lines = list(difflib.unified_diff(
-        old_lines, new_lines,
-        fromfile=f"a/{path}", tofile=f"b/{path}",
-        n=context, lineterm="",
-    ))
+    diff_lines = list(
+        difflib.unified_diff(
+            old_lines,
+            new_lines,
+            fromfile=f"a/{path}",
+            tofile=f"b/{path}",
+            n=context,
+            lineterm="",
+        )
+    )
 
     out = []
     shown = diff_lines[:max_lines]

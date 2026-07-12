@@ -4,6 +4,7 @@ Files live at ~/.config/cagentic/transcripts/<session_id>.jsonl. One JSON
 object per line, recorded as soon as a message is finalized so a crash
 mid-turn still leaves a usable history.
 """
+
 from __future__ import annotations
 
 import json

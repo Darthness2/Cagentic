@@ -16,6 +16,7 @@ import time
 from dataclasses import asdict, dataclass, field
 from pathlib import Path
 
+from . import storage
 from .config import config_dir
 
 
@@ -41,9 +42,7 @@ class Reminder:
         return asdict(self)
 
     def short(self) -> str:
-        mark = {"done": "✓", "pending": " ", "snoozed": "z", "cancelled": "✗"}.get(
-            self.status, "?"
-        )
+        mark = {"done": "✓", "pending": " ", "snoozed": "z", "cancelled": "✗"}.get(self.status, "?")
         when = ""
         if self.due_at:
             d = self.due_at - time.time()
@@ -52,9 +51,7 @@ class Reminder:
             elif d < 86400 * 2:
                 when = f"  (in {_fmt_dt(d)})"
             else:
-                when = (
-                    f"  (due {time.strftime('%a %b %d', time.localtime(self.due_at))})"
-                )
+                when = f"  (due {time.strftime('%a %b %d', time.localtime(self.due_at))})"
         tags = f"  [{','.join(self.tags)}]" if self.tags else ""
         return f"  [{mark}] {self.id}  {self.text}{tags}{when}"
 
@@ -72,12 +69,17 @@ def _fmt_dt(seconds: float) -> str:
 
 def _load_all() -> list[Reminder]:
     p = _path()
-    if not p.exists():
+    stored = storage.get("reminders", "all")
+    if isinstance(stored, list):
+        raw = stored
+    elif not p.exists():
         return []
-    try:
-        raw = json.loads(p.read_text(encoding="utf-8"))
-    except (json.JSONDecodeError, OSError, UnicodeDecodeError):
-        return []
+    else:
+        try:
+            raw = json.loads(p.read_text(encoding="utf-8"))
+            storage.put("reminders", "all", raw, time.time())
+        except (json.JSONDecodeError, OSError, UnicodeDecodeError):
+            return []
     out: list[Reminder] = []
     if isinstance(raw, list):
         for item in raw:
@@ -98,11 +100,10 @@ def _save_all(rems: list[Reminder]) -> None:
         os.chmod(p, stat.S_IRUSR | stat.S_IWUSR)
     except OSError:
         pass
+    storage.put("reminders", "all", [r.to_dict() for r in rems], time.time())
 
 
-def add(
-    text: str, *, due_at: float | None = None, tags: list[str] | None = None
-) -> Reminder:
+def add(text: str, *, due_at: float | None = None, tags: list[str] | None = None) -> Reminder:
     rems = _load_all()
     r = Reminder(id=_new_id(), text=text.strip(), due_at=due_at, tags=list(tags or []))
     rems.append(r)
@@ -143,9 +144,7 @@ def delete(rid: str) -> bool:
     return True
 
 
-def list_all(
-    *, status: str | None = None, include_done: bool = False
-) -> list[Reminder]:
+def list_all(*, status: str | None = None, include_done: bool = False) -> list[Reminder]:
     rems = _load_all()
     if status:
         rems = [r for r in rems if r.status == status]

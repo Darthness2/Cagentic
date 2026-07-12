@@ -255,11 +255,31 @@ Browser tools: `browser_status`, `browser_tabs`, `browser_read`, `browser_open`,
 
 It runs its own conversation (separate from the terminal session) but shares your notes, reminders, and connected services. The port is `gateway.port` in config (default `8700`). Like everything else, it's bound to localhost only.
 
+The frontend is shipped as package assets rather than embedded in Python. API chat requests may include a saved session `id`; those sessions run through isolated actors with separate engines, message buffers, workspace boundaries, repository defaults, and locks.
+
+## Setup, diagnostics, and saved context
+
+```bash
+cagentic --setup                  # guided model/name/workspace/gateway setup
+cagentic --doctor                # readable health report
+cagentic --doctor --json         # automation-friendly health report
+cagentic --completion bash       # also zsh or fish
+cagentic --sessions              # list conversations without starting a model
+cagentic --search "auth bug"      # search titles and message content
+cagentic --context SESSION_ID    # token usage
+cagentic --compact SESSION_ID    # compact older context, keep recent turns
+```
+
+Inside the REPL, `/search`, `/context`, and `/compact` provide the same core workflows. Unknown slash commands suggest the closest known command.
+
+Sessions, projects, tasks, and reminders are indexed transactionally in `~/.config/cagentic/state.sqlite3` using WAL mode. Existing JSON is imported automatically and retained as a non-destructive compatibility backup.
+
 ## File locations
 
 ```
 ~/.config/cagentic/
 ├── config.json          # persistent config (chmod 600)
+├── state.sqlite3        # indexed transactional state (WAL mode)
 ├── history              # REPL input history
 ├── notes/               # *.md knowledge-base notes
 ├── reminders.json       # persistent reminders

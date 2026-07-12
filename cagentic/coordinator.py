@@ -20,7 +20,7 @@ from typing import TYPE_CHECKING
 
 from .subagent import fork_subagent
 from .tasks import TaskGraph
-from .teams import TeamRegistry, Teammate
+from .teams import Teammate, TeamRegistry
 
 if TYPE_CHECKING:  # pragma: no cover
     from .engine import QueryEngine
@@ -53,11 +53,7 @@ def _claim_one_task(tasks: TaskGraph, tm: Teammate) -> str | None:
     if tm.skills:
         skills_lc = [s.lower() for s in tm.skills]
         pending.sort(
-            key=lambda t: (
-                -sum(
-                    int(s in (t.title + " " + t.description).lower()) for s in skills_lc
-                )
-            )
+            key=lambda t: -sum(int(s in (t.title + " " + t.description).lower()) for s in skills_lc)
         )
     pick = pending[0]
     tasks.update(pick.id, status="active", parent_id=tm.id)

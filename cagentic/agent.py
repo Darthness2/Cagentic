@@ -4,6 +4,7 @@ The real loop lives in `cagentic.engine.QueryEngine`. This shim renders the
 QueryEngine event stream to the terminal — which is what the REPL also does,
 just inlined here.
 """
+
 from __future__ import annotations
 
 import sys
@@ -42,6 +43,7 @@ class Agent:
             user_name=user_name,
         )
         from .permissions import terminal_resolver
+
         self.engine = QueryEngine(
             client=client,
             state=self.state,
@@ -57,12 +59,14 @@ class Agent:
         self.on_tools_disabled = on_tools_disabled
 
         if on_tools_disabled is not None:
+
             def _watch(state, key, val):
                 if key == "tools_enabled" and val is False:
                     try:
                         on_tools_disabled(self)
                     except Exception:
                         pass
+
             self.state.subscribe(_watch)
 
     @property
@@ -113,8 +117,7 @@ class Agent:
                     bar.on_delta(msg.data.get("text", ""))
                 elif msg.kind == "done":
                     post_ctx = sum(
-                        len(str(m.get("content") or "")) // 4
-                        for m in self.engine.messages
+                        len(str(m.get("content") or "")) // 4 for m in self.engine.messages
                     )
                     bar.on_done(post_ctx)
                 render_event(msg, rs)
@@ -140,6 +143,7 @@ class Agent:
 class _ToolRun:
     """A run of consecutive successful tool calls of the same name —
     rendered as one line that updates in place ('read_file × 5')."""
+
     name: str
     count: int = 1
 
@@ -161,11 +165,12 @@ def _short_path(p: str) -> str:
         return p
     try:
         from pathlib import Path
+
         home = str(Path.home())
         if p == home:
             return "~"
         if p.startswith(home + "/") or p.startswith(home + "\\"):
-            return "~" + p[len(home):]
+            return "~" + p[len(home) :]
     except Exception:
         pass
     return p
@@ -179,9 +184,9 @@ def _extract_meta(first_line: str, summary: str) -> str:
         return ""
     s = first_line
     if s.startswith("ERROR:"):
-        s = s[len("ERROR:"):].lstrip()
+        s = s[len("ERROR:") :].lstrip()
     if summary and s.startswith(summary):
-        return s[len(summary):].lstrip()[:80]
+        return s[len(summary) :].lstrip()[:80]
     # Path may appear mid-message ("not found: /Users/.../foo"); drop it.
     if summary and summary in s:
         s = s.replace(summary, "").strip(" :")
@@ -209,8 +214,7 @@ def _truncate_line(width: int, *segments) -> tuple[str, ...]:
     return tuple(out)
 
 
-def _print_tool_line(name: str, summary: str, meta: str,
-                     *, ok: bool, count: int) -> None:
+def _print_tool_line(name: str, summary: str, meta: str, *, ok: bool, count: int) -> None:
     """Render a tool call as a single line. Successful runs of the same
     name update in place ('× N'); failures paint the whole line red."""
     name_label = name + (f"  × {count}" if count > 1 else "")
@@ -220,7 +224,9 @@ def _print_tool_line(name: str, summary: str, meta: str,
         check = "  ✓ " if meta else ""
         name_seg, sum_seg, meta_seg = _truncate_line(
             term_w - len(marker) - len(check),
-            (name_label, 0), (summary, 2), (meta, 1),
+            (name_label, 0),
+            (summary, 2),
+            (meta, 1),
         )
         line = (
             ui.color(marker, ui.DUSK)
@@ -232,11 +238,15 @@ def _print_tool_line(name: str, summary: str, meta: str,
         marker = "  ✗ "
         name_seg, sum_seg, meta_seg = _truncate_line(
             term_w - len(marker) - 3,
-            (name_label, 0), (summary, 2), (meta, 1),
+            (name_label, 0),
+            (summary, 2),
+            (meta, 1),
         )
         bits = [name_seg]
-        if sum_seg: bits.append(sum_seg)
-        if meta_seg: bits.append(meta_seg)
+        if sum_seg:
+            bits.append(sum_seg)
+        if meta_seg:
+            bits.append(meta_seg)
         line = ui.color(marker + "  ".join(bits), ui.ERR)
     print(line)
 
@@ -319,15 +329,21 @@ def render_event(event: Message, rs: _RenderState) -> None:
         # Special case: write_file / edit_file keeps the diff-style line.
         if ok and name in ("write_file", "edit_file"):
             import re as _re_edit
+
             m = _re_edit.match(r"OK:\s+(\w+)\s+(.+?)\s+\+(\d+)\s+-(\d+)\s*$", result)
             if m:
                 op, path, adds, dels = m.group(1), m.group(2), m.group(3), m.group(4)
                 mark = ui.color("    ✓", ui.OK)
                 print(
-                    mark + " " + ui.color(op, ui.DUSK)
-                    + " " + ui.color(_short_path(path), ui.SURFACE)
-                    + "  " + ui.color(f"+{adds}", ui.OK)
-                    + " " + ui.color(f"-{dels}", ui.ERR)
+                    mark
+                    + " "
+                    + ui.color(op, ui.DUSK)
+                    + " "
+                    + ui.color(_short_path(path), ui.SURFACE)
+                    + "  "
+                    + ui.color(f"+{adds}", ui.OK)
+                    + " "
+                    + ui.color(f"-{dels}", ui.ERR)
                 )
                 rs.run = None
                 return
@@ -363,8 +379,10 @@ def render_event(event: Message, rs: _RenderState) -> None:
     elif k == "done":
         usage = d.get("usage", {})
         if any(usage.values()):
-            print(ui.color(
-                f"  ↳ tokens in/out {usage.get('input', 0)}/{usage.get('output', 0)}"
-                f"  · {usage.get('ms', 0)}ms",
-                ui.SOFT,
-            ))
+            print(
+                ui.color(
+                    f"  ↳ tokens in/out {usage.get('input', 0)}/{usage.get('output', 0)}"
+                    f"  · {usage.get('ms', 0)}ms",
+                    ui.SOFT,
+                )
+            )

@@ -5,9 +5,9 @@ from types import SimpleNamespace
 from cagentic import projects, reminders, sessions
 from cagentic.background import BackgroundExecutor
 from cagentic.browser import BrowserBridge
-from cagentic.emailer import send_verification
 from cagentic.coding_tools import t_enter_worktree
 from cagentic.coordinator import tick
+from cagentic.emailer import send_verification
 from cagentic.tasks import TaskGraph
 from cagentic.teams import TeamRegistry
 from cagentic.tools import ToolContext, t_set_workspace

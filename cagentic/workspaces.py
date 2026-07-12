@@ -70,9 +70,7 @@ class WorkspacePolicy:
         if raw == "":
             return {
                 "path": "",
-                "folders": [
-                    {"name": p.name or str(p), "path": str(p)} for p in self.roots
-                ],
+                "folders": [{"name": p.name or str(p), "path": str(p)} for p in self.roots],
             }
         path = self.validate(raw)
         folders: dict[str, dict] = {}
@@ -85,9 +83,7 @@ class WorkspacePolicy:
         for child in children:
             try:
                 canonical = child.resolve(strict=True)
-                if not child.is_dir() or not any(
-                    _within(canonical, r) for r in self.roots
-                ):
+                if not child.is_dir() or not any(_within(canonical, r) for r in self.roots):
                     continue
                 if not os.access(canonical, os.R_OK | os.X_OK):
                     continue

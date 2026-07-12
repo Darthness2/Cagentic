@@ -18,6 +18,7 @@ import uuid
 from pathlib import Path
 from typing import Any
 
+from . import storage
 from .config import config_dir
 
 logger = logging.getLogger(__name__)
@@ -34,9 +35,7 @@ def projects_dir() -> Path:
 
 
 def _path(project_id: str) -> Path:
-    if not isinstance(project_id, str) or not re.fullmatch(
-        r"[A-Za-z0-9_-]{1,64}", project_id
-    ):
+    if not isinstance(project_id, str) or not re.fullmatch(r"[A-Za-z0-9_-]{1,64}", project_id):
         raise ValueError("invalid project id")
     return projects_dir() / f"{project_id}.json"
 
@@ -69,9 +68,7 @@ def save(proj: dict) -> Path:
     # Unique temp name + lock so concurrent savers can't clobber each other's
     # temp file or race the replace.
     with _SAVE_LOCK:
-        fd, tmp_name = tempfile.mkstemp(
-            dir=str(d), prefix=f".{proj['id']}.", suffix=".tmp"
-        )
+        fd, tmp_name = tempfile.mkstemp(dir=str(d), prefix=f".{proj['id']}.", suffix=".tmp")
         try:
             # fchmod is POSIX-only; on Windows it raises AttributeError (not
             # OSError), which the handler below wouldn't catch — leaking the fd
@@ -88,10 +85,9 @@ def save(proj: dict) -> Path:
             try:
                 os.unlink(tmp_name)
             except OSError:
-                logger.warning(
-                    "could not clean up temp file %s", tmp_name, exc_info=True
-                )
+                logger.warning("could not clean up temp file %s", tmp_name, exc_info=True)
             raise
+    storage.put("projects", proj["id"], proj, proj["updated_at"])
     return p
 
 
@@ -100,6 +96,10 @@ def load(project_id: str) -> dict | None:
         p = _path(project_id)
     except ValueError:
         return None
+    storage.migrate_json_files("projects", projects_dir().glob("*.json"))
+    stored = storage.get("projects", project_id)
+    if isinstance(stored, dict):
+        return stored
     if not p.exists():
         return None
     try:
@@ -113,22 +113,22 @@ def delete(project_id: str) -> bool:
         p = _path(project_id)
     except ValueError:
         return False
+    deleted = storage.delete("projects", project_id)
     if p.exists():
         p.unlink()
         return True
-    return False
+    return deleted
 
 
 def list_all() -> list[dict]:
+    storage.migrate_json_files("projects", projects_dir().glob("*.json"))
     out = []
-    for p in projects_dir().glob("*.json"):
-        try:
-            data = json.loads(p.read_text(encoding="utf-8"))
-        except (json.JSONDecodeError, OSError):
+    for data in storage.list_values("projects"):
+        if not isinstance(data, dict):
             continue
         out.append(
             {
-                "id": data.get("id", p.stem),
+                "id": data.get("id", ""),
                 "name": data.get("name", "Untitled Project"),
                 "color": data.get("color", "#f0a87a"),
                 "system_prompt": data.get("system_prompt", ""),
@@ -171,9 +171,7 @@ def rename(project_id: str, name: str) -> dict | None:
     return proj
 
 
-def update_config(
-    project_id: str, system_prompt: str = "", context: str = ""
-) -> dict | None:
+def update_config(project_id: str, system_prompt: str = "", context: str = "") -> dict | None:
     proj = load(project_id)
     if proj is None:
         return None
