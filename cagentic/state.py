@@ -27,6 +27,7 @@ class AppState:
 
     # service auth
     github_token: str | None = None
+    default_repository: str | None = None
 
     # behavior switches
     yolo: bool = False                  # auto-approve all tool calls
@@ -120,5 +121,6 @@ class AppState:
             "root": self.workspace,
             "yolo": self.yolo,
             "github_token": self.github_token,
+            "default_repository": self.default_repository,
             "insecure_ssl": self.insecure_ssl,
         }

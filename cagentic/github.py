@@ -19,6 +19,13 @@ from .tools import ToolContext, _truncate
 logger = logging.getLogger(__name__)
 
 
+def _repo(args: dict, ctx: ToolContext) -> str:
+    repo = args.get("repo") or ctx.default_repository
+    if not repo:
+        raise ValueError("repo is required when the session has no repository project")
+    return str(repo)
+
+
 def _suppress_insecure_warnings() -> None:
     """Silence urllib3's InsecureRequestWarning — only called when a request
     actually opts out of TLS verification, so normal usage still warns."""
@@ -114,7 +121,7 @@ def t_gh_list_repos(args: dict, ctx: ToolContext) -> str:
 
 
 def t_gh_get_repo(args: dict, ctx: ToolContext) -> str:
-    repo = args["repo"]
+    repo = _repo(args, ctx)
     status, body = _request("GET", f"/repos/{repo}", ctx)
     if status == 200 and isinstance(body, dict):
         keep = ["full_name", "description", "default_branch", "private", "fork",
@@ -125,7 +132,7 @@ def t_gh_get_repo(args: dict, ctx: ToolContext) -> str:
 
 def t_gh_get_file(args: dict, ctx: ToolContext) -> str:
     import base64
-    repo = args["repo"]
+    repo = _repo(args, ctx)
     path = args["path"]
     ref = args.get("ref")
     params = {"ref": ref} if ref else None
@@ -143,7 +150,7 @@ def t_gh_get_file(args: dict, ctx: ToolContext) -> str:
 
 
 def t_gh_list_issues(args: dict, ctx: ToolContext) -> str:
-    repo = args["repo"]
+    repo = _repo(args, ctx)
     state = args.get("state", "open")
     per_page = min(int(args.get("limit", 30)), 100)
     status, body = _request("GET", f"/repos/{repo}/issues", ctx,
@@ -162,7 +169,7 @@ def t_gh_create_issue(args: dict, ctx: ToolContext) -> str:
     err = _need_token(ctx)
     if err:
         return err
-    repo = args["repo"]
+    repo = _repo(args, ctx)
     title = args["title"]
     body = args.get("body", "")
     labels = args.get("labels") or []
@@ -176,7 +183,7 @@ def t_gh_create_issue(args: dict, ctx: ToolContext) -> str:
 
 
 def t_gh_list_pulls(args: dict, ctx: ToolContext) -> str:
-    repo = args["repo"]
+    repo = _repo(args, ctx)
     state = args.get("state", "open")
     per_page = min(int(args.get("limit", 30)), 100)
     status, body = _request("GET", f"/repos/{repo}/pulls", ctx,
@@ -189,7 +196,7 @@ def t_gh_list_pulls(args: dict, ctx: ToolContext) -> str:
 
 
 def t_gh_get_pull(args: dict, ctx: ToolContext) -> str:
-    repo = args["repo"]
+    repo = _repo(args, ctx)
     number = int(args["number"])
     status, body = _request("GET", f"/repos/{repo}/pulls/{number}", ctx)
     if status == 200 and isinstance(body, dict):
@@ -212,6 +219,8 @@ def t_gh_search_code(args: dict, ctx: ToolContext) -> str:
     if err:
         return err
     q = args["query"]
+    if ctx.default_repository and "repo:" not in q:
+        q = f"{q} repo:{ctx.default_repository}"
     per_page = min(int(args.get("limit", 20)), 100)
     status, body = _request("GET", "/search/code", ctx,
                             params={"q": q, "per_page": per_page})
@@ -275,14 +284,14 @@ GITHUB_TOOL_SCHEMAS = [
         "description": "Get metadata for a repository (owner/name).",
         "parameters": {"type": "object", "properties": {
             "repo": {"type": "string", "description": "owner/name"},
-        }, "required": ["repo"]},
+        }},
     }},
     {"type": "function", "function": {
         "name": "gh_get_file",
         "description": "Read a file from a GitHub repo at an optional ref (branch/tag/sha).",
         "parameters": {"type": "object", "properties": {
             "repo": {"type": "string"}, "path": {"type": "string"}, "ref": {"type": "string"},
-        }, "required": ["repo", "path"]},
+        }, "required": ["path"]},
     }},
     {"type": "function", "function": {
         "name": "gh_list_issues",
@@ -291,7 +300,7 @@ GITHUB_TOOL_SCHEMAS = [
             "repo": {"type": "string"},
             "state": {"type": "string", "enum": ["open", "closed", "all"]},
             "limit": {"type": "integer"},
-        }, "required": ["repo"]},
+        }},
     }},
     {"type": "function", "function": {
         "name": "gh_create_issue",
@@ -300,7 +309,7 @@ GITHUB_TOOL_SCHEMAS = [
             "repo": {"type": "string"}, "title": {"type": "string"},
             "body": {"type": "string"},
             "labels": {"type": "array", "items": {"type": "string"}},
-        }, "required": ["repo", "title"]},
+        }, "required": ["title"]},
     }},
     {"type": "function", "function": {
         "name": "gh_list_pulls",
@@ -309,14 +318,14 @@ GITHUB_TOOL_SCHEMAS = [
             "repo": {"type": "string"},
             "state": {"type": "string", "enum": ["open", "closed", "all"]},
             "limit": {"type": "integer"},
-        }, "required": ["repo"]},
+        }},
     }},
     {"type": "function", "function": {
         "name": "gh_get_pull",
         "description": "Get details on a pull request.",
         "parameters": {"type": "object", "properties": {
             "repo": {"type": "string"}, "number": {"type": "integer"},
-        }, "required": ["repo", "number"]},
+        }, "required": ["number"]},
     }},
     {"type": "function", "function": {
         "name": "gh_search_code",

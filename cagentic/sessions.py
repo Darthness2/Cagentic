@@ -1,7 +1,7 @@
 """Saved conversation sessions on disk.
 
 Each session is JSON at ~/.config/cagentic/sessions/<id>.json with:
-    {id, title, model, created_at, updated_at, messages: [...]}
+    {id, title, model, project, created_at, updated_at, messages: [...]}
 """
 from __future__ import annotations
 
@@ -40,13 +40,15 @@ def new_id() -> str:
     return uuid.uuid4().hex[:12]
 
 
-def make(model: str, title: str | None = None, project_id: str | None = None) -> dict[str, Any]:
+def make(model: str, title: str | None = None, project_id: str | None = None,
+         project: dict | None = None) -> dict[str, Any]:
       now = int(time.time())
       return {
           "id": new_id(),
           "title": title or "untitled",
           "model": model,
           "project_id": project_id or "",
+          "project": project,
           "created_at": now,
           "updated_at": now,
           "messages": [],
@@ -103,7 +105,9 @@ def load(session_id: str) -> dict | None:
     if not p.exists():
         return None
     try:
-        return json.loads(p.read_text(encoding="utf-8"))
+        data = json.loads(p.read_text(encoding="utf-8"))
+        data.setdefault("project", None)
+        return data
     except (json.JSONDecodeError, OSError):
         return None
 
@@ -128,6 +132,7 @@ def list_all() -> list[dict]:
             "title": data.get("title", "untitled"),
             "model": data.get("model", "?"),
             "project_id": data.get("project_id", ""),
+            "project": data.get("project"),
             "updated_at": data.get("updated_at", 0),
             "turns": sum(1 for m in data.get("messages", []) if m.get("role") == "user"),
         })

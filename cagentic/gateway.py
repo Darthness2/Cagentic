@@ -23,6 +23,7 @@ from urllib.parse import urlparse, parse_qs
 from . import config as _config
 from . import sessions
 from . import projects
+from .workspaces import WorkspaceError, WorkspacePolicy
 from .providers import build_client as _build_client, parse_model as _parse_model, list_all_models as _all_models
 
 _log = logging.getLogger(__name__)
@@ -186,6 +187,8 @@ class Gateway:
         self._turn_lock = threading.Lock()
         self._active_emit = None
         self._active_source: str = "pc"  # "ios" or "pc" — who initiated this turn
+        self._default_workspace = agent.state.workspace.resolve()
+        self.workspace_policy = WorkspacePolicy.from_config(config, self._default_workspace)
 
         # Permission prompt bridge. Each prompt gets a unique id; the client
         # must echo that id back when answering, so a stale/duplicate answer
@@ -502,6 +505,7 @@ IMPORTANT: When you use show_widget, do NOT repeat the widget title or type in y
                 "updated_at": s["updated_at"],
                 "turns": s["turns"],
                 "project_id": s.get("project_id", ""),
+                "project": s.get("project"),
             })
         return out
 
@@ -537,30 +541,81 @@ IMPORTANT: When you use show_widget, do NOT repeat the widget title or type in y
         return out
 
     def current_chat(self) -> dict:
-        return {
+        current = {
             "id": self.session["id"],
             "title": self.session.get("title") or "New chat",
             "model": self.agent.model,
             "messages": self.render_messages(self.engine.messages),
         }
+        if self.session.get("project") is not None:
+            current["project"] = self.session["project"]
+        return current
 
-    def new_chat(self) -> dict:
+    def new_chat(self, project: dict | None = None) -> dict:
         locked = self._interrupt_turn()
         if not locked:
             return {"error": "Cagentic is still working on the previous message."}
         try:
-            return self._new_chat_unlocked()
+            return self._new_chat_unlocked(project)
         finally:
             self._turn_lock.release()
 
-    def _new_chat_unlocked(self) -> dict:
+    def _new_chat_unlocked(self, project: dict | None = None) -> dict:
         self._save_current()
-        self.session = sessions.make(self.agent.model)
+        self.session = sessions.make(self.agent.model, project=project)
         self.engine.project_system_prompt = ""
         self.engine.project_context = ""
         self.engine.reset()
         self.engine.session_id = self.session["id"]
+        self._activate_session_project()
+        if project is not None:
+            sessions.save(self.session)
         return self.current_chat()
+
+    def validate_project(self, project) -> dict:
+        if not isinstance(project, dict):
+            raise WorkspaceError("project must be an object with kind and value")
+        kind, value = project.get("kind"), project.get("value")
+        if kind == "gatewayFolder":
+            return {"kind": kind, "value": str(self.workspace_policy.validate(value))}
+        if kind == "repository":
+            value = str(value or "").strip()
+            if not re.fullmatch(r"[A-Za-z0-9_.-]+/[A-Za-z0-9_.-]+", value):
+                raise WorkspaceError("repository project value must be owner/repository")
+            return {"kind": kind, "value": value}
+        raise WorkspaceError("project kind must be repository or gatewayFolder")
+
+    def pin_collama_project(self, project) -> dict:
+        """Validate and assign once; callers must hold the turn/switch lock."""
+        requested = self.validate_project(project)
+        existing = self.session.get("project")
+        if existing is not None and existing != requested:
+            raise WorkspaceError("session project is immutable", 409)
+        if existing is None:
+            self.session["project"] = requested
+            sessions.save(self.session)
+        self._activate_session_project()
+        return requested
+
+    def _activate_session_project(self) -> None:
+        project = self.session.get("project")
+        workspace = self._default_workspace
+        repository = None
+        context_parts = []
+        pid = self.session.get("project_id")
+        if pid:
+            local_project = projects.load(pid)
+            if local_project and local_project.get("context"):
+                context_parts.append(local_project["context"])
+        if project and project.get("kind") == "gatewayFolder":
+            workspace = self.workspace_policy.validate(project.get("value"))
+            context_parts.append(f"Pinned gateway folder project: {workspace}. Use it as the working directory.")
+        elif project and project.get("kind") == "repository":
+            repository = project.get("value")
+            context_parts.append(f"Pinned GitHub repository project: {repository}. Use it as the default repository for GitHub operations.")
+        self.agent.state.update(workspace=workspace, default_repository=repository)
+        self.engine.project_context = "\n\n".join(context_parts)
+        self.engine.refresh_system_prompt()
 
     def load_chat(self, chat_id: str) -> dict:
         locked = self._interrupt_turn()
@@ -594,7 +649,7 @@ IMPORTANT: When you use show_widget, do NOT repeat the widget title or type in y
         else:
             self.engine.project_system_prompt = ""
             self.engine.project_context = ""
-        self.engine.refresh_system_prompt()
+        self._activate_session_project()
         return self.current_chat()
 
     def delete_chat(self, chat_id: str) -> dict:
@@ -833,17 +888,33 @@ IMPORTANT: When you use show_widget, do NOT repeat the widget title or type in y
 
     # -- Collama-compat surface (the iOS coding tab) -------------------------
 
-    def set_workspace(self, path: str) -> dict:
-        from pathlib import Path
-        p = Path(path).expanduser()
-        if not p.exists() or not p.is_dir():
-            return {"error": f"not a directory: {path}"}
-        self.agent.state.update(workspace=p.resolve())
+    def set_workspace(self, path: object) -> dict:
+        p = self.workspace_policy.validate(path)
+        self._default_workspace = p
+        self._activate_session_project()
         try:
             self.engine.refresh_system_prompt()
         except Exception:
             _log.warning("failed to refresh prompt after workspace switch", exc_info=True)
         return {"ok": True, "workspace": str(p.resolve())}
+
+    def browse_workspace(self, path: str) -> dict:
+        return self.workspace_policy.browse(path)
+
+    def begin_collama_turn(self, project) -> None:
+        """Preflight a Collama turn while retaining the turn lock for streaming."""
+        if not self._turn_lock.acquire(blocking=False):
+            raise WorkspaceError("Cagentic is still working on the previous message.", 409)
+        try:
+            if project is None and self.session.get("project") is None:
+                raise WorkspaceError("a project is required for Collama requests")
+            if project is not None:
+                self.pin_collama_project(project)
+            else:
+                self._activate_session_project()
+        except Exception:
+            self._turn_lock.release()
+            raise
 
     def set_effort(self, level: str) -> dict:
         from .engine import EFFORT_LEVELS
@@ -870,6 +941,7 @@ IMPORTANT: When you use show_widget, do NOT repeat the widget title or type in y
                 "title": c["title"],
                 "createdAt": int(c.get("updated_at") or 0),
                 "messages": int(c.get("turns") or 0),
+                **({"project": c["project"]} if c.get("project") is not None else {}),
             }
             for c in self.list_chats()
         ]}
@@ -884,6 +956,7 @@ IMPORTANT: When you use show_widget, do NOT repeat the widget title or type in y
         return types.SimpleNamespace(
             github_token=token,
             insecure_ssl=bool(getattr(state, "insecure_ssl", False)),
+            default_repository=getattr(state, "default_repository", None),
         )
 
     def github_user(self) -> dict:
@@ -919,6 +992,7 @@ IMPORTANT: When you use show_widget, do NOT repeat the widget title or type in y
         import base64
         from urllib.parse import quote
         from .github import _request
+        repo = repo or self.agent.state.default_repository or ""
         if not repo or not path:
             return {"error": "repo and path are required"}
         url_path = f"/repos/{repo}/contents/{quote(path)}"
@@ -936,7 +1010,7 @@ IMPORTANT: When you use show_widget, do NOT repeat the widget title or type in y
         import base64
         from urllib.parse import quote
         from .github import _request
-        repo = str(data.get("repo") or "")
+        repo = str(data.get("repo") or self.agent.state.default_repository or "")
         path = str(data.get("path") or "")
         if not repo or not path:
             return {"error": "repo and path are required"}
@@ -1008,8 +1082,8 @@ IMPORTANT: When you use show_widget, do NOT repeat the widget title or type in y
         finally:
             self._turn_lock.release()
 
-    def run_turn(self, message: str, emit, source: str = "pc") -> None:
-        if not self._turn_lock.acquire(blocking=False):
+    def run_turn(self, message: str, emit, source: str = "pc", prelocked: bool = False) -> None:
+        if not prelocked and not self._turn_lock.acquire(blocking=False):
             emit("error", {"text": "Cagentic is still working on the previous message."})
             return
         self._active_emit = emit
@@ -1432,6 +1506,12 @@ class _Handler(BaseHTTPRequestHandler):
         elif path == "/api/sessions":
             # Collama-compat: the iOS coding tab's session list.
             self._json(self._gw().list_sessions_compat())
+        elif path == "/api/workspace/browse":
+            qs = parse_qs(urlparse(self.path).query, keep_blank_values=True)
+            try:
+                self._json(self._gw().browse_workspace((qs.get("path") or [""])[0]))
+            except WorkspaceError as exc:
+                self._json({"error": str(exc)}, status=exc.status)
         elif path == "/api/github/user":
             self._json(self._gw().github_user())
         elif path == "/api/github/repos":
@@ -1465,7 +1545,15 @@ class _Handler(BaseHTTPRequestHandler):
             # "message" is the web UI's key; "prompt" is what the iOS coding
             # tab sends (Collama-compat). Accept either.
             message = str(b.get("message") or b.get("prompt") or "").strip()
-            self._stream_chat(message, source=source)
+            prelocked = False
+            if b.get("client") == "collama":
+                try:
+                    gw.begin_collama_turn(b.get("project"))
+                    prelocked = True
+                except WorkspaceError as exc:
+                    self._json({"error": str(exc)}, status=exc.status)
+                    return
+            self._stream_chat(message, source=source, prelocked=prelocked)
             return
         if path == "/api/chat/edit":
             b = self._body()
@@ -1496,8 +1584,17 @@ class _Handler(BaseHTTPRequestHandler):
         # Collama-compat session routes (the iOS coding tab) — same chats,
         # different paths and response shapes.
         if path == "/api/session/new":
-            gw.new_chat()
-            self._json({"ok": True, "id": gw.session["id"]})
+            b = self._body()
+            try:
+                project = gw.validate_project(b.get("project")) if b.get("client") == "collama" else None
+            except WorkspaceError as exc:
+                self._json({"error": str(exc)}, status=exc.status)
+                return
+            if b.get("client") == "collama" and project is None:
+                self._json({"error": "a project is required for Collama requests"}, status=400)
+                return
+            current = gw.new_chat(project)
+            self._json({"ok": True, "id": gw.session["id"], "session": current, "current": current})
             return
         if path == "/api/session/load":
             b = self._body()
@@ -1510,8 +1607,10 @@ class _Handler(BaseHTTPRequestHandler):
             return
         if path == "/api/workspace":
             b = self._body()
-            res = gw.set_workspace(str(b.get("path", "")))
-            self._json(res, status=200 if res.get("ok") else 400)
+            try:
+                self._json(gw.set_workspace(b.get("path")))
+            except WorkspaceError as exc:
+                self._json({"error": str(exc)}, status=exc.status)
             return
         if path == "/api/effort":
             b = self._body()
@@ -1522,7 +1621,16 @@ class _Handler(BaseHTTPRequestHandler):
             self._json(gw.github_file_put(self._body()))
             return
         if path == "/api/chats/new":
-            self._json({"current": gw.new_chat(), "chats": gw.list_chats()})
+            b = self._body()
+            try:
+                project = gw.validate_project(b.get("project")) if b.get("client") == "collama" else None
+            except WorkspaceError as exc:
+                self._json({"error": str(exc)}, status=exc.status)
+                return
+            if b.get("client") == "collama" and project is None:
+                self._json({"error": "a project is required for Collama requests"}, status=400)
+                return
+            self._json({"current": gw.new_chat(project), "chats": gw.list_chats()})
             return
         if path == "/api/chats/load":
             cur = gw.load_chat(str(self._body().get("id", "")))
@@ -1601,16 +1709,18 @@ class _Handler(BaseHTTPRequestHandler):
                 raise _ClientGone()
         return emit
 
-    def _stream_chat(self, message: str, source: str = "pc") -> None:
+    def _stream_chat(self, message: str, source: str = "pc", prelocked: bool = False) -> None:
         emit = self._begin_sse()
         if not message:
             try:
                 emit("error", {"text": "empty message"})
             except _ClientGone:
                 pass
+            if prelocked:
+                self._gw()._turn_lock.release()
             return
         try:
-            self._gw().run_turn(message, emit, source=source)
+            self._gw().run_turn(message, emit, source=source, prelocked=prelocked)
             emit("end", {})
         except _ClientGone:
             return

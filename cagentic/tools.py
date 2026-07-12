@@ -90,6 +90,7 @@ class ToolContext:
     root: Path
     yolo: bool = False
     github_token: str | None = None
+    default_repository: str | None = None
     insecure_ssl: bool = False
     # Plumbing populated by the QueryEngine.
     state: object | None = None
