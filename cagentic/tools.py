@@ -11,6 +11,7 @@ import os
 import re
 import shutil
 import subprocess
+import time
 from dataclasses import dataclass, field
 from functools import lru_cache
 from pathlib import Path
@@ -18,8 +19,13 @@ from typing import Any, Callable
 
 from . import diff as _diff
 from . import documents as _documents
+from . import integrations as _integrations
+from . import inbox as _inbox
 from . import notes as _notes
+from . import personal_os as _personal_os
+from . import proactive as _proactive
 from . import reminders as _reminders
+from . import routines as _routines
 from . import ui
 
 logger = logging.getLogger(__name__)
@@ -778,6 +784,352 @@ def t_reminder_update(args: dict, ctx: ToolContext) -> str:
         return "ERROR: nothing to update"
     r = _reminders.update(rid, **changes)
     return f"OK: {r.short().strip()}" if r else f"ERROR: no reminder {rid}"
+
+
+# ============================================================================
+# Personal OS — goals, calendar, and proactive planning context
+# ============================================================================
+
+
+def t_goal_create(args: dict, ctx: ToolContext) -> str:
+    if not args.get("title"):
+        return "ERROR: goal_create requires 'title'"
+    goal = _personal_os.create_goal(
+        args["title"],
+        description=args.get("description", ""),
+        target_at=args.get("target"),
+        category=args.get("category", "personal"),
+        progress=args.get("progress", 0),
+    )
+    return f"OK: {goal['id']} — {goal['title']} ({goal['progress']}%)"
+
+
+def t_goal_list(args: dict, ctx: ToolContext) -> str:
+    goals = _personal_os.list_goals(include_completed=bool(args.get("include_completed", True)))
+    if not goals:
+        return "(no goals)"
+    return "\n".join(
+        f"{g['id']}  [{g.get('status', 'active')}]  {g['title']}  {g.get('progress', 0)}%"
+        for g in goals[:80]
+    )
+
+
+def t_goal_update(args: dict, ctx: ToolContext) -> str:
+    goal_id = str(args.get("id", ""))
+    if not goal_id:
+        return "ERROR: goal_update requires 'id'"
+    changes = {
+        key: args[key]
+        for key in ("title", "description", "category", "progress", "status")
+        if key in args
+    }
+    if "target" in args:
+        changes["target_at"] = args["target"]
+    goal = _personal_os.update_goal(goal_id, **changes)
+    return (
+        f"OK: {goal['id']} — {goal['title']} ({goal.get('progress', 0)}%)"
+        if goal
+        else f"ERROR: no goal {goal_id}"
+    )
+
+
+def t_goal_delete(args: dict, ctx: ToolContext) -> str:
+    goal_id = str(args.get("id", ""))
+    if not goal_id:
+        return "ERROR: goal_delete requires 'id'"
+    return "OK: deleted" if _personal_os.delete_goal(goal_id) else f"ERROR: no goal {goal_id}"
+
+
+def t_calendar_event_add(args: dict, ctx: ToolContext) -> str:
+    if not args.get("title") or not args.get("start"):
+        return "ERROR: calendar_event_add requires 'title' and 'start'"
+    event = _personal_os.create_event(
+        args["title"],
+        start_at=args["start"],
+        end_at=args.get("end"),
+        description=args.get("description", ""),
+        location=args.get("location", ""),
+        all_day=bool(args.get("all_day", False)),
+        source=args.get("source", "cagentic"),
+        external_id=args.get("external_id", ""),
+    )
+    return f"OK: {event['id']} — {event['title']}"
+
+
+def t_calendar_event_list(args: dict, ctx: ToolContext) -> str:
+    start = args.get("start", time.time() - 86400)
+    end = args.get("end", time.time() + 30 * 86400)
+    events = _personal_os.list_events(start_at=start, end_at=end)
+    if not events:
+        return "(no calendar events)"
+    return "\n".join(
+        f"{e['id']}  {time.strftime('%Y-%m-%d %H:%M', time.localtime(e['start_at']))}  "
+        f"{e['title']}" + (f" @ {e['location']}" if e.get("location") else "")
+        for e in events[:100]
+    )
+
+
+def t_calendar_event_update(args: dict, ctx: ToolContext) -> str:
+    event_id = str(args.get("id", ""))
+    if not event_id:
+        return "ERROR: calendar_event_update requires 'id'"
+    changes = {
+        key: args[key]
+        for key in ("title", "description", "location", "all_day", "status")
+        if key in args
+    }
+    if "start" in args:
+        changes["start_at"] = args["start"]
+    if "end" in args:
+        changes["end_at"] = args["end"]
+    event = _personal_os.update_event(event_id, **changes)
+    return f"OK: {event['id']} — {event['title']}" if event else f"ERROR: no event {event_id}"
+
+
+def t_calendar_event_delete(args: dict, ctx: ToolContext) -> str:
+    event_id = str(args.get("id", ""))
+    if not event_id:
+        return "ERROR: calendar_event_delete requires 'id'"
+    return (
+        "OK: deleted"
+        if _personal_os.delete_event(event_id)
+        else f"ERROR: no calendar event {event_id}"
+    )
+
+
+def t_personal_briefing(args: dict, ctx: ToolContext) -> str:
+    data = _personal_os.briefing()
+    lines = [
+        f"{data['greeting']} — {data['date_label']}",
+        f"Today: {data['stats']['events_today']} events, "
+        f"{data['stats']['open_deadlines']} open deadlines, "
+        f"{data['stats']['active_goals']} active goals",
+    ]
+    lines.extend(f"- {item['title']}: {item['body']}" for item in data["insights"])
+    if data["agenda"]:
+        lines.append("Upcoming:")
+        lines.extend(
+            f"- {time.strftime('%a %H:%M', time.localtime(item['start_at']))} "
+            f"{item['title']}"
+            for item in data["agenda"][:12]
+        )
+    return "\n".join(lines)
+
+
+def t_calendar_connection_create(args: dict, ctx: ToolContext) -> str:
+    if not args.get("name") or not args.get("url"):
+        return "ERROR: calendar_connection_create requires 'name' and 'url'"
+    connection = _integrations.create_connection(
+        args["name"],
+        args.get("kind", "ical"),
+        args["url"],
+        username=args.get("username", ""),
+        password=args.get("password", ""),
+        direction=args.get("direction"),
+        auto_sync=bool(args.get("auto_sync", True)),
+        sync_interval=args.get("sync_interval", 900),
+    )
+    return f"OK: {connection['id']} — {connection['name']} ({connection['kind']})"
+
+
+def t_calendar_connection_list(args: dict, ctx: ToolContext) -> str:
+    connections = _integrations.list_connections()
+    if not connections:
+        return "(no calendar connections)"
+    return "\n".join(
+        f"{item['id']}  [{item['status']}]  {item['name']}  {item['kind']}  {item['detail']}"
+        for item in connections
+    )
+
+
+def t_calendar_connection_sync(args: dict, ctx: ToolContext) -> str:
+    connection_id = str(args.get("id", ""))
+    if not connection_id:
+        return "ERROR: calendar_connection_sync requires 'id'"
+    result = _integrations.sync_connection(connection_id)
+    if not result.get("ok"):
+        return f"ERROR: {result.get('error', 'sync failed')}"
+    return (
+        f"OK: imported {result['imported']}, updated {result['updated']}, "
+        f"removed {result['removed']}, pushed {result['pushed']}"
+    )
+
+
+def t_calendar_connection_delete(args: dict, ctx: ToolContext) -> str:
+    connection_id = str(args.get("id", ""))
+    if not connection_id:
+        return "ERROR: calendar_connection_delete requires 'id'"
+    deleted = _integrations.delete_connection(
+        connection_id,
+        remove_imported_events=bool(args.get("remove_imported_events", False)),
+    )
+    return "OK: deleted" if deleted else f"ERROR: no connection {connection_id}"
+
+
+def t_notification_list(args: dict, ctx: ToolContext) -> str:
+    notifications = _proactive.list_notifications(
+        include_dismissed=bool(args.get("include_dismissed", False))
+    )
+    if not notifications:
+        return "(no proactive notifications)"
+    return "\n".join(
+        f"{item['id']}  [{'new' if not item.get('read') else 'read'}]  "
+        f"{item['title']} — {item['body']}"
+        for item in notifications
+    )
+
+
+def t_notification_update(args: dict, ctx: ToolContext) -> str:
+    notification_id = str(args.get("id", ""))
+    action = str(args.get("action", "read"))
+    if action == "read_all":
+        return f"OK: marked {_proactive.mark_all_read()} notifications read"
+    if not notification_id:
+        return "ERROR: notification_update requires 'id'"
+    if action == "dismiss":
+        return "OK: dismissed" if _proactive.dismiss(notification_id) else "ERROR: not found"
+    item = _proactive.mark_read(notification_id, read=bool(args.get("read", True)))
+    return "OK: updated" if item else "ERROR: not found"
+
+
+def t_inbox_capture(args: dict, ctx: ToolContext) -> str:
+    if not args.get("title"):
+        return "ERROR: inbox_capture requires 'title'"
+    item = _inbox.create_item(
+        args["title"],
+        summary=args.get("summary", ""),
+        kind=args.get("kind", "capture"),
+        priority=args.get("priority", 0),
+        tags=args.get("tags") or [],
+    )
+    return f"OK: {item['id']} — {item['title']}"
+
+
+def t_inbox_list(args: dict, ctx: ToolContext) -> str:
+    items = _inbox.list_items(
+        status=args.get("status"),
+        include_archived=bool(args.get("include_archived", False)),
+        limit=args.get("limit", 100),
+    )
+    if not items:
+        return "(inbox is empty)"
+    return "\n".join(
+        f"{item['id']}  [{item.get('status', 'new')}/{item.get('kind', 'item')}]  "
+        f"{item['title']}" + (f" — {item['sender']}" if item.get("sender") else "")
+        for item in items
+    )
+
+
+def t_inbox_update(args: dict, ctx: ToolContext) -> str:
+    item_id = str(args.get("id", ""))
+    if not item_id:
+        return "ERROR: inbox_update requires 'id'"
+    changes = {
+        key: args[key]
+        for key in ("title", "summary", "status", "priority", "tags", "snoozed_until")
+        if key in args
+    }
+    item = _inbox.update_item(item_id, **changes)
+    return f"OK: {item['id']} — {item['title']}" if item else f"ERROR: no inbox item {item_id}"
+
+
+def t_inbox_delete(args: dict, ctx: ToolContext) -> str:
+    item_id = str(args.get("id", ""))
+    if not item_id:
+        return "ERROR: inbox_delete requires 'id'"
+    return "OK: deleted" if _inbox.delete_item(item_id) else f"ERROR: no inbox item {item_id}"
+
+
+def t_email_connection_create(args: dict, ctx: ToolContext) -> str:
+    if not args.get("name") or not args.get("host") or not args.get("username"):
+        return "ERROR: email_connection_create requires name, host, and username"
+    connection = _inbox.create_email_connection(
+        args["name"],
+        args["host"],
+        args["username"],
+        args.get("password", ""),
+        port=args.get("port", 993),
+        use_ssl=bool(args.get("use_ssl", True)),
+        folder=args.get("folder", "INBOX"),
+        auto_sync=bool(args.get("auto_sync", True)),
+        sync_interval=args.get("sync_interval", 900),
+    )
+    return f"OK: {connection['id']} — {connection['name']}"
+
+
+def t_email_connection_list(args: dict, ctx: ToolContext) -> str:
+    connections = _inbox.list_email_connections()
+    if not connections:
+        return "(no email connections)"
+    return "\n".join(
+        f"{item['id']}  [{item['status']}]  {item['name']}  {item['detail']}"
+        for item in connections
+    )
+
+
+def t_email_connection_sync(args: dict, ctx: ToolContext) -> str:
+    connection_id = str(args.get("id", ""))
+    if not connection_id:
+        return "ERROR: email_connection_sync requires 'id'"
+    result = _inbox.sync_email_connection(connection_id)
+    if not result.get("ok"):
+        return f"ERROR: {result.get('error', 'sync failed')}"
+    return f"OK: imported {result['imported']}, updated {result['updated']}"
+
+
+def t_email_connection_delete(args: dict, ctx: ToolContext) -> str:
+    connection_id = str(args.get("id", ""))
+    if not connection_id:
+        return "ERROR: email_connection_delete requires 'id'"
+    deleted = _inbox.delete_email_connection(
+        connection_id, remove_items=bool(args.get("remove_items", False))
+    )
+    return "OK: deleted" if deleted else f"ERROR: no email connection {connection_id}"
+
+
+def t_routine_create(args: dict, ctx: ToolContext) -> str:
+    if not args.get("name"):
+        return "ERROR: routine_create requires 'name'"
+    routine = _routines.create_routine(
+        args["name"],
+        kind=args.get("kind", "daily_plan"),
+        schedule_time=args.get("schedule_time", "08:00"),
+        days=args.get("days"),
+        prompt=args.get("prompt", ""),
+        enabled=bool(args.get("enabled", True)),
+    )
+    return f"OK: {routine['id']} — {routine['name']} at {routine['schedule_time']}"
+
+
+def t_routine_list(args: dict, ctx: ToolContext) -> str:
+    items = _routines.list_routines(include_disabled=bool(args.get("include_disabled", True)))
+    if not items:
+        return "(no proactive routines)"
+    return "\n".join(
+        f"{item['id']}  [{'on' if item.get('enabled') else 'off'}]  "
+        f"{item['schedule_time']}  {item['name']} ({item['kind']})"
+        for item in items
+    )
+
+
+def t_routine_update(args: dict, ctx: ToolContext) -> str:
+    routine_id = str(args.get("id", ""))
+    if not routine_id:
+        return "ERROR: routine_update requires 'id'"
+    changes = {
+        key: args[key]
+        for key in ("name", "kind", "schedule_time", "days", "prompt", "enabled")
+        if key in args
+    }
+    routine = _routines.update_routine(routine_id, **changes)
+    return f"OK: {routine['id']} — {routine['name']}" if routine else f"ERROR: no routine {routine_id}"
+
+
+def t_routine_delete(args: dict, ctx: ToolContext) -> str:
+    routine_id = str(args.get("id", ""))
+    if not routine_id:
+        return "ERROR: routine_delete requires 'id'"
+    return "OK: deleted" if _routines.delete_routine(routine_id) else f"ERROR: no routine {routine_id}"
 
 
 # ============================================================================
@@ -1913,6 +2265,34 @@ TOOLS: dict[str, ToolFn] = {
     "reminder_done": t_reminder_done,
     "reminder_delete": t_reminder_delete,
     "reminder_update": t_reminder_update,
+    # personal OS
+    "goal_create": t_goal_create,
+    "goal_list": t_goal_list,
+    "goal_update": t_goal_update,
+    "goal_delete": t_goal_delete,
+    "calendar_event_add": t_calendar_event_add,
+    "calendar_event_list": t_calendar_event_list,
+    "calendar_event_update": t_calendar_event_update,
+    "calendar_event_delete": t_calendar_event_delete,
+    "personal_briefing": t_personal_briefing,
+    "calendar_connection_create": t_calendar_connection_create,
+    "calendar_connection_list": t_calendar_connection_list,
+    "calendar_connection_sync": t_calendar_connection_sync,
+    "calendar_connection_delete": t_calendar_connection_delete,
+    "notification_list": t_notification_list,
+    "notification_update": t_notification_update,
+    "inbox_capture": t_inbox_capture,
+    "inbox_list": t_inbox_list,
+    "inbox_update": t_inbox_update,
+    "inbox_delete": t_inbox_delete,
+    "email_connection_create": t_email_connection_create,
+    "email_connection_list": t_email_connection_list,
+    "email_connection_sync": t_email_connection_sync,
+    "email_connection_delete": t_email_connection_delete,
+    "routine_create": t_routine_create,
+    "routine_list": t_routine_list,
+    "routine_update": t_routine_update,
+    "routine_delete": t_routine_delete,
     # mcp
     "mcp_list_servers": t_mcp_list_servers,
     "mcp_list_tools": t_mcp_list_tools,
@@ -2241,6 +2621,410 @@ TOOL_SCHEMAS: list[dict[str, Any]] = [
                     "when": {"type": "string"},
                     "tags": {"type": "array", "items": {"type": "string"}},
                 },
+                "required": ["id"],
+            },
+        },
+    },
+    # ---------- personal OS ----------
+    {
+        "type": "function",
+        "function": {
+            "name": "goal_create",
+            "description": "Create a persistent personal goal with optional target date and progress.",
+            "parameters": {
+                "type": "object",
+                "properties": {
+                    "title": {"type": "string"},
+                    "description": {"type": "string"},
+                    "target": {"type": "string"},
+                    "category": {"type": "string"},
+                    "progress": {"type": "integer", "minimum": 0, "maximum": 100},
+                },
+                "required": ["title"],
+            },
+        },
+    },
+    {
+        "type": "function",
+        "function": {
+            "name": "goal_list",
+            "description": "List the user's persistent goals and progress.",
+            "parameters": {
+                "type": "object",
+                "properties": {"include_completed": {"type": "boolean"}},
+            },
+        },
+    },
+    {
+        "type": "function",
+        "function": {
+            "name": "goal_update",
+            "description": "Update a goal's title, target, progress, category, or status.",
+            "parameters": {
+                "type": "object",
+                "properties": {
+                    "id": {"type": "string"},
+                    "title": {"type": "string"},
+                    "description": {"type": "string"},
+                    "target": {"type": "string"},
+                    "category": {"type": "string"},
+                    "progress": {"type": "integer", "minimum": 0, "maximum": 100},
+                    "status": {
+                        "type": "string",
+                        "enum": ["active", "paused", "completed", "cancelled"],
+                    },
+                },
+                "required": ["id"],
+            },
+        },
+    },
+    {
+        "type": "function",
+        "function": {
+            "name": "goal_delete",
+            "description": "Delete a personal goal by id.",
+            "parameters": {
+                "type": "object",
+                "properties": {"id": {"type": "string"}},
+                "required": ["id"],
+            },
+        },
+    },
+    {
+        "type": "function",
+        "function": {
+            "name": "calendar_event_add",
+            "description": "Add an event to the local personal calendar. start/end accept ISO date-times or natural reminder dates.",
+            "parameters": {
+                "type": "object",
+                "properties": {
+                    "title": {"type": "string"},
+                    "start": {"type": "string"},
+                    "end": {"type": "string"},
+                    "description": {"type": "string"},
+                    "location": {"type": "string"},
+                    "all_day": {"type": "boolean"},
+                    "source": {"type": "string"},
+                    "external_id": {"type": "string"},
+                },
+                "required": ["title", "start"],
+            },
+        },
+    },
+    {
+        "type": "function",
+        "function": {
+            "name": "calendar_event_list",
+            "description": "List calendar events in an optional start/end window.",
+            "parameters": {
+                "type": "object",
+                "properties": {"start": {"type": "string"}, "end": {"type": "string"}},
+            },
+        },
+    },
+    {
+        "type": "function",
+        "function": {
+            "name": "calendar_event_update",
+            "description": "Update a calendar event.",
+            "parameters": {
+                "type": "object",
+                "properties": {
+                    "id": {"type": "string"},
+                    "title": {"type": "string"},
+                    "start": {"type": "string"},
+                    "end": {"type": "string"},
+                    "description": {"type": "string"},
+                    "location": {"type": "string"},
+                    "all_day": {"type": "boolean"},
+                    "status": {"type": "string"},
+                },
+                "required": ["id"],
+            },
+        },
+    },
+    {
+        "type": "function",
+        "function": {
+            "name": "calendar_event_delete",
+            "description": "Delete a calendar event by id.",
+            "parameters": {
+                "type": "object",
+                "properties": {"id": {"type": "string"}},
+                "required": ["id"],
+            },
+        },
+    },
+    {
+        "type": "function",
+        "function": {
+            "name": "personal_briefing",
+            "description": "Read today's proactive briefing across calendar events, deadlines, and goals.",
+            "parameters": {"type": "object", "properties": {}},
+        },
+    },
+    {
+        "type": "function",
+        "function": {
+            "name": "calendar_connection_create",
+            "description": "Connect an iCalendar feed or CalDAV calendar. Credentials remain local. Ask the user for approval before creating it.",
+            "parameters": {
+                "type": "object",
+                "properties": {
+                    "name": {"type": "string"},
+                    "kind": {"type": "string", "enum": ["ical", "caldav"]},
+                    "url": {"type": "string"},
+                    "username": {"type": "string"},
+                    "password": {"type": "string"},
+                    "direction": {"type": "string", "enum": ["pull", "push", "both"]},
+                    "auto_sync": {"type": "boolean"},
+                    "sync_interval": {"type": "integer"},
+                },
+                "required": ["name", "url"],
+            },
+        },
+    },
+    {
+        "type": "function",
+        "function": {
+            "name": "calendar_connection_list",
+            "description": "List calendar connections and their last sync state without exposing credentials.",
+            "parameters": {"type": "object", "properties": {}},
+        },
+    },
+    {
+        "type": "function",
+        "function": {
+            "name": "calendar_connection_sync",
+            "description": "Synchronize one calendar connection now.",
+            "parameters": {
+                "type": "object",
+                "properties": {"id": {"type": "string"}},
+                "required": ["id"],
+            },
+        },
+    },
+    {
+        "type": "function",
+        "function": {
+            "name": "calendar_connection_delete",
+            "description": "Delete a calendar connection, optionally removing its imported events.",
+            "parameters": {
+                "type": "object",
+                "properties": {
+                    "id": {"type": "string"},
+                    "remove_imported_events": {"type": "boolean"},
+                },
+                "required": ["id"],
+            },
+        },
+    },
+    {
+        "type": "function",
+        "function": {
+            "name": "notification_list",
+            "description": "Read proactive personal-OS notifications.",
+            "parameters": {
+                "type": "object",
+                "properties": {"include_dismissed": {"type": "boolean"}},
+            },
+        },
+    },
+    {
+        "type": "function",
+        "function": {
+            "name": "notification_update",
+            "description": "Mark a proactive notification read, unread, dismissed, or mark all read.",
+            "parameters": {
+                "type": "object",
+                "properties": {
+                    "id": {"type": "string"},
+                    "action": {"type": "string", "enum": ["read", "dismiss", "read_all"]},
+                    "read": {"type": "boolean"},
+                },
+            },
+        },
+    },
+    {
+        "type": "function",
+        "function": {
+            "name": "inbox_capture",
+            "description": "Capture a thought, task, message, or document reference in the local unified inbox.",
+            "parameters": {
+                "type": "object",
+                "properties": {
+                    "title": {"type": "string"},
+                    "summary": {"type": "string"},
+                    "kind": {"type": "string", "enum": ["capture", "task", "message", "document"]},
+                    "priority": {"type": "integer", "minimum": 0, "maximum": 3},
+                    "tags": {"type": "array", "items": {"type": "string"}},
+                },
+                "required": ["title"],
+            },
+        },
+    },
+    {
+        "type": "function",
+        "function": {
+            "name": "inbox_list",
+            "description": "List active items in the local unified inbox.",
+            "parameters": {
+                "type": "object",
+                "properties": {
+                    "status": {"type": "string", "enum": ["new", "read", "done", "archived"]},
+                    "include_archived": {"type": "boolean"},
+                    "limit": {"type": "integer"},
+                },
+            },
+        },
+    },
+    {
+        "type": "function",
+        "function": {
+            "name": "inbox_update",
+            "description": "Update an inbox item's content, priority, status, tags, or snooze time.",
+            "parameters": {
+                "type": "object",
+                "properties": {
+                    "id": {"type": "string"},
+                    "title": {"type": "string"},
+                    "summary": {"type": "string"},
+                    "status": {"type": "string", "enum": ["new", "read", "done", "archived"]},
+                    "priority": {"type": "integer", "minimum": 0, "maximum": 3},
+                    "tags": {"type": "array", "items": {"type": "string"}},
+                    "snoozed_until": {"type": "number"},
+                },
+                "required": ["id"],
+            },
+        },
+    },
+    {
+        "type": "function",
+        "function": {
+            "name": "inbox_delete",
+            "description": "Permanently delete a unified inbox item.",
+            "parameters": {
+                "type": "object",
+                "properties": {"id": {"type": "string"}},
+                "required": ["id"],
+            },
+        },
+    },
+    {
+        "type": "function",
+        "function": {
+            "name": "email_connection_create",
+            "description": "Connect an email inbox over IMAP. Credentials remain local and sync fetches headers only.",
+            "parameters": {
+                "type": "object",
+                "properties": {
+                    "name": {"type": "string"},
+                    "host": {"type": "string"},
+                    "port": {"type": "integer"},
+                    "username": {"type": "string"},
+                    "password": {"type": "string"},
+                    "use_ssl": {"type": "boolean"},
+                    "folder": {"type": "string"},
+                    "auto_sync": {"type": "boolean"},
+                    "sync_interval": {"type": "integer"},
+                },
+                "required": ["name", "host", "username"],
+            },
+        },
+    },
+    {
+        "type": "function",
+        "function": {
+            "name": "email_connection_list",
+            "description": "List email connections and sync state without exposing credentials.",
+            "parameters": {"type": "object", "properties": {}},
+        },
+    },
+    {
+        "type": "function",
+        "function": {
+            "name": "email_connection_sync",
+            "description": "Synchronize unread email headers from one IMAP connection now.",
+            "parameters": {
+                "type": "object",
+                "properties": {"id": {"type": "string"}},
+                "required": ["id"],
+            },
+        },
+    },
+    {
+        "type": "function",
+        "function": {
+            "name": "email_connection_delete",
+            "description": "Delete an email connection, optionally removing its imported inbox items.",
+            "parameters": {
+                "type": "object",
+                "properties": {
+                    "id": {"type": "string"},
+                    "remove_items": {"type": "boolean"},
+                },
+                "required": ["id"],
+            },
+        },
+    },
+    {
+        "type": "function",
+        "function": {
+            "name": "routine_create",
+            "description": "Create a scheduled proactive personal-OS routine.",
+            "parameters": {
+                "type": "object",
+                "properties": {
+                    "name": {"type": "string"},
+                    "kind": {"type": "string", "enum": ["daily_plan", "inbox_digest", "weekly_review", "custom"]},
+                    "schedule_time": {"type": "string", "description": "Local 24-hour HH:MM"},
+                    "days": {"type": "array", "items": {"type": "integer", "minimum": 0, "maximum": 6}},
+                    "prompt": {"type": "string"},
+                    "enabled": {"type": "boolean"},
+                },
+                "required": ["name"],
+            },
+        },
+    },
+    {
+        "type": "function",
+        "function": {
+            "name": "routine_list",
+            "description": "List configured proactive routines and schedules.",
+            "parameters": {
+                "type": "object",
+                "properties": {"include_disabled": {"type": "boolean"}},
+            },
+        },
+    },
+    {
+        "type": "function",
+        "function": {
+            "name": "routine_update",
+            "description": "Update a proactive routine's schedule, prompt, type, or enabled state.",
+            "parameters": {
+                "type": "object",
+                "properties": {
+                    "id": {"type": "string"},
+                    "name": {"type": "string"},
+                    "kind": {"type": "string", "enum": ["daily_plan", "inbox_digest", "weekly_review", "custom"]},
+                    "schedule_time": {"type": "string"},
+                    "days": {"type": "array", "items": {"type": "integer", "minimum": 0, "maximum": 6}},
+                    "prompt": {"type": "string"},
+                    "enabled": {"type": "boolean"},
+                },
+                "required": ["id"],
+            },
+        },
+    },
+    {
+        "type": "function",
+        "function": {
+            "name": "routine_delete",
+            "description": "Delete a proactive routine.",
+            "parameters": {
+                "type": "object",
+                "properties": {"id": {"type": "string"}},
                 "required": ["id"],
             },
         },
@@ -2788,6 +3572,35 @@ TOOL_GROUPS: dict[str, list[str]] = {
         "reminder_delete",
         "reminder_update",
     ],
+    "life": [
+        "goal_create",
+        "goal_list",
+        "goal_update",
+        "goal_delete",
+        "calendar_event_add",
+        "calendar_event_list",
+        "calendar_event_update",
+        "calendar_event_delete",
+        "personal_briefing",
+        "calendar_connection_create",
+        "calendar_connection_list",
+        "calendar_connection_sync",
+        "calendar_connection_delete",
+        "notification_list",
+        "notification_update",
+        "inbox_capture",
+        "inbox_list",
+        "inbox_update",
+        "inbox_delete",
+        "email_connection_create",
+        "email_connection_list",
+        "email_connection_sync",
+        "email_connection_delete",
+        "routine_create",
+        "routine_list",
+        "routine_update",
+        "routine_delete",
+    ],
     "mcp": [
         "mcp_list_servers",
         "mcp_list_tools",
@@ -2866,6 +3679,7 @@ DEFAULT_GROUPS: set[str] = {
     "web",
     "notes",
     "reminders",
+    "life",
     "mcp",
     "browser",
     "shell",

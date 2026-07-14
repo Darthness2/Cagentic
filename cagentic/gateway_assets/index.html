@@ -3,6 +3,7 @@
 <head>
 <meta charset="utf-8" />
 <meta name="viewport" content="width=device-width, initial-scale=1" />
+<meta name="cagentic-token" content="{{CAGENTIC_TOKEN}}" />
 <title>Cagentic</title>
 <link rel="stylesheet" href="/app.css" />
 </head>
@@ -14,10 +15,11 @@
   <header class="hud-header">
     <div class="hdr-left">
         <span class="jl">C</span><span class="jd">&middot;</span><span class="jl">A</span><span class="jd">&middot;</span><span class="jl">G</span><span class="jd">&middot;</span><span class="jl">E</span><span class="jd">&middot;</span><span class="jl">N</span><span class="jd">&middot;</span><span class="jl">T</span><span class="jd">&middot;</span><span class="jl">I</span><span class="jd">&middot;</span><span class="jl">C</span>
-      <span class="j-sub">COGNITIVE AGENT NETWORK FOR INTELLIGENT COMPUTING</span>
+      <span class="j-sub">LOCAL AGENTIC OPERATING SYSTEM</span>
     </div>
     <div class="hdr-right">
-      <span class="badge b-on">&#9679; Connected</span>
+      <span class="badge b-on">&#9679; Core online</span>
+      <button class="os-notification-btn" id="notificationBtn" title="Proactive notifications">♢<span id="notificationCount" class="hidden">0</span></button>
       <div class="model-switch" id="modelSwitch" title="Switch model">
         <span class="ms-dot">&#9679;</span>
         <span class="ms-name" id="msName">---</span>
@@ -32,6 +34,7 @@
   <div class="nav-bar">
     <button class="nav-btn" id="logsBtn">[ Chats ]</button>
     <button class="nav-btn" id="newMissionBtn">[ + New Chat ]</button>
+    <button class="nav-btn os-quick-add" id="quickAddBtn">[ + Capture ]</button>
     <div class="nav-divider"></div>
     <span class="nav-meta">SESSION <span id="jSession">--------</span></span>
     <div class="nav-spacer"></div>
@@ -42,16 +45,165 @@
   </div>
 
   <div class="main-area">
-    <div class="center-stack" id="centerStack">
-      <div class="orb-zone" id="orbZone">
-        <canvas id="orbCanvas"></canvas>
-        <div class="orb-rings">
-          <div class="ring r1"></div><div class="ring r2"></div>
-          <div class="ring r3"></div><div class="ring r4"></div>
-        </div>
-        <div class="orb-label" id="orbLabel">New Chat</div>
+    <aside class="os-sidebar">
+      <div class="os-sidebar-label">SYSTEM ROUTES</div>
+      <button class="os-nav-item active" data-view="today"><span class="os-nav-icon">◉</span><span>Core</span></button>
+      <button class="os-nav-item" data-view="inbox"><span class="os-nav-icon">◇</span><span>Inbox</span><span id="inboxNavCount" class="os-nav-count hidden">0</span></button>
+      <button class="os-nav-item" data-view="planner"><span class="os-nav-icon">▦</span><span>Planner</span></button>
+      <button class="os-nav-item" data-view="goals"><span class="os-nav-icon">◎</span><span>Goals</span></button>
+      <button class="os-nav-item" data-view="routines"><span class="os-nav-icon">↻</span><span>Routines</span></button>
+      <button class="os-nav-item" data-view="skills"><span class="os-nav-icon">⌘</span><span>Skills</span></button>
+      <button class="os-nav-item" data-view="connections"><span class="os-nav-icon">⌁</span><span>Connections</span></button>
+      <div class="os-sidebar-rule"></div>
+      <button class="os-nav-item" data-view="assistant"><span class="os-nav-icon">✦</span><span>Assistant</span><span class="os-live-dot"></span></button>
+      <div class="os-sidebar-spacer"></div>
+      <div class="os-agent-card">
+        <div class="os-agent-orb">C</div>
+        <div><strong>Cagentic</strong><span id="osAgentStatus">Monitoring your day</span></div>
       </div>
-      <div id="log" class="chat-log"></div>
+    </aside>
+
+    <div class="os-workspace">
+      <section class="os-view" id="todayView">
+        <div class="vault-shell">
+          <div class="vault-statusline">
+            <span>SYS.VITALS <b>LIVE</b></span>
+            <span id="vaultCoreState">CORE · IDLE &nbsp; LINK · ONLINE &nbsp; RUNNER · ALIVE</span>
+            <span>COMMAND.DECK <b id="vaultQueueState">0 QUEUED</b></span>
+          </div>
+          <div class="vault-layout">
+            <aside class="vault-column vault-left">
+              <section class="vault-module">
+                <header><span>System vitals</span><em>live.telemetry</em></header>
+                <div id="osStats" class="vault-vitals"></div>
+              </section>
+              <section class="vault-module vault-directives">
+                <header><span>Directives</span><em>priority.queue</em></header>
+                <div id="insightList"></div>
+              </section>
+              <section class="vault-module vault-documents">
+                <header><span>Goals / documents</span><em>memory.index</em></header>
+                <div id="goalStrip"></div>
+              </section>
+            </aside>
+
+            <main class="vault-core">
+              <div class="vault-core-label"><span>COGNITIVE CORE</span><b><i></i> SYNCHRONIZED</b></div>
+              <canvas id="coreCanvas" aria-label="Animated Cagentic cognitive network"></canvas>
+              <div class="vault-core-rings"><i></i><i></i><i></i></div>
+              <div class="vault-primary">
+                <span>PRIMARY DIRECTIVE · READY</span>
+                <h1><span id="osGreeting">Good morning</span><span id="osUserName"></span></h1>
+                <p id="osDate">Loading your command deck…</p>
+                <div class="vault-primary-actions"><button data-ai-prompt="Plan my day using my deadlines, calendar, inbox, and goals.">Run daily brief</button><button data-open-capture="inbox">Capture intent</button></div>
+              </div>
+              <div class="vault-integration-band"><span>ACTIVE LINKS</span><div id="integrationStrip"></div></div>
+            </main>
+
+            <aside class="vault-column vault-right">
+              <section class="vault-module vault-command-deck">
+                <header><span>Command deck</span><em>on.demand</em></header>
+                <div class="vault-command-grid">
+                  <button data-ai-prompt="Give me a concise metrics pull across my personal OS.">Metrics pull</button>
+                  <button data-ai-prompt="Create my morning report from the current OS context.">AM report</button>
+                  <button data-ai-prompt="Triage my unified inbox and identify the next actions.">Inbox brief</button>
+                  <button data-ai-prompt="Review my goals and tell me where momentum is slipping.">Goal scan</button>
+                  <button data-ai-prompt="Create a realistic plan for today around my calendar and deadlines.">Plan today</button>
+                  <button data-ai-prompt="Run a weekly review across goals, calendar, deadlines, and inbox.">WK review</button>
+                </div>
+                <small>Intents write to chat · the conductor executes with approval</small>
+              </section>
+              <section class="vault-module vault-schedule">
+                <header><span>Schedule</span><em>next.7.days</em></header>
+                <div id="todayTimeline"></div>
+              </section>
+              <section class="vault-module vault-deadlines">
+                <header><span>Deadline wire</span><em>attention</em></header>
+                <div id="deadlineList"></div>
+              </section>
+              <section class="vault-module vault-ai-wire">
+                <header><span>AI wire</span><em>proactive.intel</em></header>
+                <div id="vaultWire"></div>
+              </section>
+            </aside>
+          </div>
+        </div>
+      </section>
+
+      <section class="os-view hidden" id="inboxView">
+        <div class="os-scroll">
+          <div class="os-page-head compact"><div><div class="os-eyebrow">UNIFIED INBOX</div><h1>Everything that needs a decision</h1><p>Captures and unread email headers, kept local and ready to triage.</p></div><div class="os-head-actions"><button class="os-secondary-btn os-inline-btn" id="addEmailBtn">+ Connect email</button><button class="os-primary-btn" data-open-capture="inbox">+ Capture item</button></div></div>
+          <div class="os-inbox-layout">
+            <section class="os-card"><div class="os-card-head"><div><span class="os-kicker">INCOMING</span><h2>Active items</h2></div><button class="os-text-btn" data-ai-prompt="Triage my unified inbox. Tell me what is urgent, what can wait, and the three best next actions.">Triage with AI →</button></div><div id="inboxWorkspace" class="os-inbox-list"></div></section>
+            <section class="os-card os-inbox-side"><span class="os-kicker">PRIVACY BY DEFAULT</span><h2>Signal, without the sprawl</h2><p>Email sync imports unread sender, subject, date, and message ID only. Message bodies and attachments stay with your provider.</p><button class="os-secondary-btn" id="inboxConnectEmailBtn">Connect an inbox</button></section>
+          </div>
+        </div>
+      </section>
+
+      <section class="os-view hidden" id="plannerView">
+        <div class="os-scroll">
+          <div class="os-page-head compact"><div><div class="os-eyebrow">PLANNER</div><h1>Your schedule</h1><p>Events and deadlines in one timeline.</p></div><div class="os-head-actions"><button class="os-secondary-btn os-inline-btn" id="exportCalendarBtn">Export .ics</button><button class="os-primary-btn" data-open-capture="event">+ New event</button></div></div>
+          <div class="os-planner-layout">
+            <section class="os-card"><div class="os-card-head"><div><span class="os-kicker">AGENDA</span><h2>Coming up</h2></div></div><div id="plannerTimeline" class="os-planner-timeline"></div></section>
+            <section class="os-card os-planner-side"><div class="os-card-head"><div><span class="os-kicker">AI PLANNING</span><h2>Make space for what matters</h2></div></div><p>Cagentic can reorganize your week around deadlines, energy, and active goals.</p><button class="os-secondary-btn" data-ai-prompt="Review my calendar, deadlines, and goals, then propose a realistic plan for my next seven days.">Plan my week with AI</button></section>
+          </div>
+        </div>
+      </section>
+
+      <section class="os-view hidden" id="goalsView">
+        <div class="os-scroll">
+          <div class="os-page-head compact"><div><div class="os-eyebrow">GOALS</div><h1>Build the life you mean to</h1><p>Keep direction visible and turn ambition into the next action.</p></div><button class="os-primary-btn" data-open-capture="goal">+ New goal</button></div>
+          <div id="goalsWorkspace" class="os-goals-workspace"></div>
+        </div>
+      </section>
+
+      <section class="os-view hidden" id="routinesView">
+        <div class="os-scroll">
+          <div class="os-page-head compact"><div><div class="os-eyebrow">PROACTIVE ROUTINES</div><h1>Put useful thinking on a schedule</h1><p>Daily plans, inbox digests, weekly reviews, and custom prompts run in the background.</p></div><button class="os-primary-btn" id="addRoutineBtn">+ New routine</button></div>
+          <div id="routinesWorkspace" class="os-routines-grid"></div>
+        </div>
+      </section>
+
+      <section class="os-view hidden" id="skillsView">
+        <div class="os-scroll skills-scroll">
+          <div class="architecture-head">
+            <div><div class="os-eyebrow">AGENTIC OS ARCHITECTURE</div><h1>One conductor. Specialized branches.</h1><p>Every tile is backed by real Cagentic tools and can hand an intent to the assistant.</p></div>
+            <div id="architectureStatus" class="architecture-status"></div>
+          </div>
+          <div id="architectureModes" class="architecture-modes"></div>
+          <div class="architecture-spine">
+            <div class="architecture-user">YOU / CLIENT</div>
+            <i></i>
+            <div class="architecture-conductor"><span>C</span><div><strong>CAGENTIC</strong><em id="architectureModel">the conductor</em></div></div>
+          </div>
+          <div id="architectureBranches" class="architecture-branches"></div>
+          <section id="automationLayer" class="architecture-layer automation-layer"></section>
+          <section class="architecture-layer integration-layer"><header><span>TOOLS, INTEGRATIONS &amp; SOFTWARE ASSETS</span><em>shared foundation</em></header><div id="architectureIntegrations"></div></section>
+          <div id="architectureDetail" class="architecture-detail hidden"></div>
+        </div>
+      </section>
+
+      <section class="os-view hidden" id="connectionsView">
+        <div class="os-scroll">
+          <div class="os-page-head compact"><div><div class="os-eyebrow">CONNECTIONS</div><h1>Your tools, one intelligence</h1><p>Live calendar and inbox sync, MCP services, browser context, developer tools, and AI providers.</p></div><div class="os-head-actions"><button class="os-secondary-btn os-inline-btn" id="connectionSettingsBtn">MCP settings</button><button class="os-secondary-btn os-inline-btn" id="connectionsEmailBtn">+ Email</button><button class="os-primary-btn" id="addConnectionBtn">+ Calendar</button></div></div>
+          <div id="connectionsGrid" class="os-connections-grid"></div>
+          <section class="os-card os-connection-help"><span class="os-kicker">HOW IT WORKS</span><h2>Bring your world into Cagentic</h2><p>Add Google Calendar, Notion, Slack, Drive, or another service as an MCP server. Cagentic discovers its tools and can coordinate work across it with your approval.</p><button class="os-secondary-btn" data-ai-prompt="Show me which MCP integrations are configured and help me connect the services that would be most useful.">Ask Cagentic to connect a service</button></section>
+        </div>
+      </section>
+
+      <section class="os-view os-assistant-view hidden" id="assistantView">
+        <div class="center-stack" id="centerStack">
+          <div class="orb-zone compact" id="orbZone">
+            <canvas id="orbCanvas"></canvas>
+            <div class="orb-rings">
+              <div class="ring r1"></div><div class="ring r2"></div>
+              <div class="ring r3"></div><div class="ring r4"></div>
+            </div>
+            <div class="orb-label" id="orbLabel">New Chat</div>
+          </div>
+          <div id="log" class="chat-log"></div>
+        </div>
+      </section>
     </div>
   </div>
 
@@ -75,6 +227,107 @@
       <span id="busyLabel" class="busy-label hidden">&#9679; Thinking&#8230;</span>
       <span id="tokenStats" class="token-stats hidden"></span>
     </div>
+  </div>
+</div>
+
+<!-- Proactive notification center -->
+<aside id="notificationPanel" class="os-notification-panel">
+  <div class="os-notification-head"><div><span class="os-kicker">PROACTIVE</span><h2>Notification center</h2></div><div><button id="markNotificationsRead" class="os-text-btn">Mark all read</button><button id="closeNotifications" class="icon-btn">&#10005;</button></div></div>
+  <div id="notificationList" class="os-notification-list"></div>
+</aside>
+
+<!-- Quick capture modal -->
+<div id="captureModal" class="modal hidden">
+  <div class="modal-card md os-capture-card">
+    <div class="modal-head">
+      <span class="modal-title">Capture to your OS</span>
+      <button id="captureClose" class="icon-btn">&#10005;</button>
+    </div>
+    <div class="modal-body">
+      <div class="os-capture-tabs">
+        <button data-capture-type="inbox">Inbox</button>
+        <button data-capture-type="event" class="active">Event</button>
+        <button data-capture-type="deadline">Deadline</button>
+        <button data-capture-type="goal">Goal</button>
+      </div>
+      <div class="field"><span class="field-label">TITLE</span><input id="captureTitle" type="text" placeholder="What matters?" /></div>
+      <div class="capture-fields" data-fields="event">
+        <div class="field"><span class="field-label">START</span><input id="captureStart" type="datetime-local" /></div>
+        <div class="field"><span class="field-label">END</span><input id="captureEnd" type="datetime-local" /></div>
+        <div class="field"><span class="field-label">LOCATION</span><input id="captureLocation" type="text" placeholder="Optional" /></div>
+      </div>
+      <div class="capture-fields hidden" data-fields="deadline">
+        <div class="field"><span class="field-label">DUE</span><input id="captureDue" type="datetime-local" /></div>
+      </div>
+      <div class="capture-fields hidden" data-fields="goal">
+        <div class="field"><span class="field-label">TARGET DATE</span><input id="captureTarget" type="date" /></div>
+        <div class="field"><span class="field-label">CATEGORY</span><input id="captureCategory" type="text" value="personal" /></div>
+      </div>
+      <div class="field"><span class="field-label">NOTES</span><textarea id="captureNotes" rows="3" placeholder="Context Cagentic should remember"></textarea></div>
+      <div id="captureError" class="os-form-error hidden"></div>
+    </div>
+    <div class="modal-foot">
+      <button id="captureCancel" class="btn-ghost">Cancel</button>
+      <button id="captureSave" class="btn-primary">Save</button>
+    </div>
+  </div>
+</div>
+
+<!-- Calendar connection modal -->
+<div id="connectionModal" class="modal hidden">
+  <div class="modal-card md os-connection-modal">
+    <div class="modal-head">
+      <div><span class="os-kicker">CALENDAR SYNC</span><div class="modal-title">Connect a calendar</div></div>
+      <button id="connectionModalClose" class="icon-btn">&#10005;</button>
+    </div>
+    <div class="modal-body">
+      <div class="field"><span class="field-label">NAME</span><input id="connectionName" type="text" placeholder="Work calendar" /></div>
+      <div class="field"><span class="field-label">CONNECTION TYPE</span><select id="connectionKind"><option value="ical">iCalendar feed (read-only)</option><option value="caldav">CalDAV (two-way)</option></select></div>
+      <div class="field"><span class="field-label">CALENDAR URL</span><input id="connectionUrl" type="url" placeholder="https://…/calendar.ics" /></div>
+      <div id="connectionAuthFields" class="capture-fields hidden">
+        <div class="field"><span class="field-label">USERNAME</span><input id="connectionUsername" type="text" autocomplete="username" /></div>
+        <div class="field"><span class="field-label">APP PASSWORD</span><input id="connectionPassword" type="password" autocomplete="current-password" /></div>
+        <div class="field"><span class="field-label">DIRECTION</span><select id="connectionDirection"><option value="both">Two-way</option><option value="pull">Import only</option><option value="push">Publish only</option></select></div>
+      </div>
+      <div class="field row"><span class="field-label">Sync automatically every 15 minutes</span><label class="toggle"><input id="connectionAutoSync" type="checkbox" checked /><span></span></label></div>
+      <div class="field-hint">Credentials are stored only in Cagentic's local database and are never returned to the browser after saving.</div>
+      <div id="connectionError" class="os-form-error hidden"></div>
+    </div>
+    <div class="modal-foot"><button id="connectionCancel" class="btn-ghost">Cancel</button><button id="connectionSave" class="btn-primary">Connect &amp; sync</button></div>
+  </div>
+</div>
+
+<!-- Email connection modal -->
+<div id="emailModal" class="modal hidden">
+  <div class="modal-card md os-connection-modal">
+    <div class="modal-head"><div><span class="os-kicker">UNIFIED INBOX</span><div class="modal-title">Connect email over IMAP</div></div><button id="emailModalClose" class="icon-btn">&#10005;</button></div>
+    <div class="modal-body">
+      <div class="field"><span class="field-label">NAME</span><input id="emailName" type="text" placeholder="Work email" /></div>
+      <div class="field"><span class="field-label">IMAP HOST</span><input id="emailHost" type="text" placeholder="imap.example.com" /></div>
+      <div class="field"><span class="field-label">PORT</span><input id="emailPort" type="number" min="1" max="65535" value="993" /></div>
+      <div class="field"><span class="field-label">USERNAME</span><input id="emailUsername" type="text" autocomplete="username" /></div>
+      <div class="field"><span class="field-label">APP PASSWORD</span><input id="emailPassword" type="password" autocomplete="current-password" /></div>
+      <div class="field row"><span class="field-label">Use encrypted IMAP (SSL)</span><label class="toggle"><input id="emailSsl" type="checkbox" checked /><span></span></label></div>
+      <div class="field-hint">Use a provider app password. Cagentic stores it locally and only imports unread message headers—not bodies or attachments.</div>
+      <div id="emailError" class="os-form-error hidden"></div>
+    </div>
+    <div class="modal-foot"><button id="emailCancel" class="btn-ghost">Cancel</button><button id="emailSave" class="btn-primary">Connect &amp; sync</button></div>
+  </div>
+</div>
+
+<!-- Proactive routine modal -->
+<div id="routineModal" class="modal hidden">
+  <div class="modal-card md os-routine-modal">
+    <div class="modal-head"><div><span class="os-kicker">AUTOMATION</span><div class="modal-title">New proactive routine</div></div><button id="routineModalClose" class="icon-btn">&#10005;</button></div>
+    <div class="modal-body">
+      <div class="field"><span class="field-label">NAME</span><input id="routineName" type="text" placeholder="Morning orientation" /></div>
+      <div class="field"><span class="field-label">ROUTINE TYPE</span><select id="routineKind"><option value="daily_plan">Daily plan</option><option value="inbox_digest">Inbox digest</option><option value="weekly_review">Weekly review</option><option value="custom">Custom prompt</option></select></div>
+      <div class="field"><span class="field-label">LOCAL TIME</span><input id="routineTime" type="time" value="08:00" /></div>
+      <div class="field"><span class="field-label">RUN ON</span><div class="os-day-picker" id="routineDays"><label><input type="checkbox" value="0" checked />M</label><label><input type="checkbox" value="1" checked />T</label><label><input type="checkbox" value="2" checked />W</label><label><input type="checkbox" value="3" checked />T</label><label><input type="checkbox" value="4" checked />F</label><label><input type="checkbox" value="5" />S</label><label><input type="checkbox" value="6" />S</label></div></div>
+      <div class="field"><span class="field-label">INSTRUCTIONS</span><textarea id="routinePrompt" rows="4" placeholder="Optional—Cagentic uses a thoughtful default for the selected type."></textarea></div>
+      <div id="routineError" class="os-form-error hidden"></div>
+    </div>
+    <div class="modal-foot"><button id="routineCancel" class="btn-ghost">Cancel</button><button id="routineSave" class="btn-primary">Create routine</button></div>
   </div>
 </div>
 
@@ -132,6 +385,16 @@
         <label class="toggle"><input id="setGwAuto" type="checkbox" /><span></span></label>
       </div>
       <div class="field-hint">Port takes effect next launch. Auto-start can be toggled anytime.</div>
+      <hr class="settings-divider" />
+      <div class="section-label">PROACTIVE ASSISTANT</div>
+      <div class="field row">
+        <span class="field-label">Monitor schedule and deadlines</span>
+        <label class="toggle"><input id="setProactive" type="checkbox" /><span></span></label>
+      </div>
+      <div class="field row">
+        <span class="field-label">Desktop notifications</span>
+        <label class="toggle"><input id="setDesktopNotifications" type="checkbox" /><span></span></label>
+      </div>
       <hr class="settings-divider" />
       <div class="section-label">SYSTEM PROMPT</div>
       <div class="field">
@@ -247,4 +510,3 @@
 <script src="/app.js"></script>
 </body>
 </html>
-

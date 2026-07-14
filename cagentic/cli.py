@@ -668,6 +668,8 @@ def repl(agent: Agent, cfg: dict, gateway_holder: dict | None = None) -> int:
                 gw = Gateway(agent, cfg, port=port)
                 if gw.start():
                     gateway_holder["server"] = gw
+                    if gw.start_notice:
+                        ui.warn(gw.start_notice)
                     ui.info(f"gateway is live — open {gw.url()} in your browser.")
                     ui.info(
                         "it's the full assistant on the web; tool approvals pop "
@@ -1396,6 +1398,8 @@ def main(argv: list[str] | None = None) -> int:
             ui.error(f"gateway couldn't start: {gw.error}")
             return 1
         gateway_holder["server"] = gw
+        if gw.start_notice:
+            ui.warn(gw.start_notice)
         ui.info(f"gateway running at {gw.url()} — press Ctrl-C to stop.")
         try:
             import threading

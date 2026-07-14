@@ -12,6 +12,7 @@ page. Bound to localhost only.
 
 from __future__ import annotations
 
+import errno
 import json
 import logging
 import re
@@ -22,7 +23,17 @@ from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from urllib.parse import parse_qs, urlparse
 
 from . import config as _config
-from . import projects, sessions
+from . import (
+    capabilities,
+    inbox,
+    integrations,
+    personal_os,
+    proactive,
+    projects,
+    reminders,
+    routines,
+    sessions,
+)
 from .providers import (
     build_client as _build_client,
 )
@@ -43,6 +54,11 @@ _log = logging.getLogger(__name__)
 
 # Hostnames we treat as the loopback interface for Host/Origin checks.
 _LOCAL_HOSTS = frozenset({"localhost", "127.0.0.1", "::1", ""})
+
+
+class _GatewayHTTPServer(ThreadingHTTPServer):
+    # Makes a quick stop/start reliable when the old listener is in TIME_WAIT.
+    allow_reuse_address = True
 
 
 class _ClientGone(Exception):
@@ -171,6 +187,9 @@ class Gateway:
         self.agent = agent
         self.config = config
         self.port = port
+        self.requested_port = port
+        self.port_fallback = False
+        self.start_notice: str | None = None
         self._server: ThreadingHTTPServer | None = None
         self._thread: threading.Thread | None = None
         self.error: str | None = None
@@ -216,6 +235,11 @@ class Gateway:
         self._active_source: str = "pc"  # "ios" or "pc" — who initiated this turn
         self._default_workspace = agent.state.workspace.resolve()
         self.workspace_policy = WorkspacePolicy.from_config(config, self._default_workspace)
+        self.proactive_monitor = proactive.ProactiveMonitor(
+            config,
+            browser_connected=self._browser_connected,
+            on_routine=self._run_proactive_routine,
+        )
 
         # Permission prompt bridge. Each prompt gets a unique id; the client
         # must echo that id back when answering, so a stale/duplicate answer
@@ -270,19 +294,45 @@ class Gateway:
         # (shell, files, browser, MCP). LAN binding is an explicit opt-in
         # (config gateway.lan=true) and keeps the token requirement.
         bind = "0.0.0.0" if self.lan else "127.0.0.1"
-        try:
-            server = ThreadingHTTPServer((bind, self.port), _Handler)
-        except OSError as e:
-            self.error = f"could not bind {bind}:{self.port} ({e})"
+        gw_cfg = self.config.get("gateway") or {}
+        auto_port = bool(gw_cfg.get("auto_port", True))
+        ports = [self.requested_port]
+        if auto_port:
+            ports.extend(range(self.requested_port + 1, min(65535, self.requested_port + 20) + 1))
+        server = None
+        last_error: OSError | None = None
+        for candidate in ports:
+            try:
+                server = _GatewayHTTPServer((bind, candidate), _Handler)
+                self.port = int(server.server_address[1])
+                break
+            except OSError as e:
+                last_error = e
+                if e.errno not in (errno.EADDRINUSE, 48, 98, 10048):
+                    break
+        if server is None:
+            detail = last_error or "no available port"
+            self.error = f"could not bind {bind}:{self.requested_port} ({detail})"
             return False
+        self.error = None
+        self.port_fallback = self.port != self.requested_port
+        if self.port_fallback:
+            self.start_notice = (
+                f"port {self.requested_port} was already in use; "
+                f"started on {self.port} instead"
+            )
+        else:
+            self.start_notice = None
         server.gateway = self  # type: ignore[attr-defined]
         server.daemon_threads = True
         self._server = server
         self._thread = threading.Thread(target=server.serve_forever, daemon=True)
         self._thread.start()
+        self.proactive_monitor.start()
         return True
 
     def stop(self) -> None:
+        self.proactive_monitor.stop()
         if self._server is not None:
             try:
                 self._server.shutdown()
@@ -297,6 +347,13 @@ class Gateway:
 
     def url(self) -> str:
         return f"http://localhost:{self.port}"
+
+    def _browser_connected(self) -> bool:
+        browser = getattr(self.agent.state, "browser", None)
+        try:
+            return bool(browser and browser.is_connected())
+        except Exception:
+            return False
 
     # -- permission bridge --------------------------------------------------
 
@@ -481,6 +538,9 @@ IMPORTANT: When you use show_widget, do NOT repeat the widget title or type in y
         if self._user_system_prompt:
             parts.append(self._user_system_prompt)
         parts.append(_HUD_INSTRUCTIONS)
+        parts.append(personal_os.system_context())
+        parts.append(inbox.system_context())
+        parts.append(routines.system_context())
         self.engine.system_suffix = "\n\n".join(parts)
         self.engine.refresh_system_prompt()
 
@@ -877,6 +937,378 @@ IMPORTANT: When you use show_widget, do NOT repeat the widget title or type in y
             self.engine.refresh_system_prompt()
         return {"project": proj, "projects": self.list_projects()}
 
+    # -- personal OS --------------------------------------------------------
+
+    def personal_os_snapshot(self) -> dict:
+        data = personal_os.briefing(
+            self.config, browser_connected=self._browser_connected()
+        )
+        managed = integrations.list_connections() + inbox.list_email_connections()
+        if managed:
+            data["integrations"] = managed + list(data.get("integrations") or [])
+            data["stats"]["connected_services"] = len(
+                [item for item in data["integrations"] if item.get("connected")]
+            )
+        data["notifications"] = proactive.list_notifications()
+        data["unread_notifications"] = proactive.unread_count()
+        data["inbox"] = inbox.list_items()
+        data["unread_inbox"] = inbox.unread_count()
+        data["routines"] = routines.list_routines()
+        data["stats"]["unread_inbox"] = data["unread_inbox"]
+        data["stats"]["active_routines"] = len(
+            [item for item in data["routines"] if item.get("enabled")]
+        )
+        from .tools import DEFAULT_GROUPS, TOOL_GROUPS, _all_tools
+
+        groups = self.agent.state.tool_groups
+        active_groups = DEFAULT_GROUPS if groups is None else set(groups)
+        active_tools = {
+            name
+            for group in active_groups
+            for name in TOOL_GROUPS.get(group, ())
+        }
+        data["architecture"] = capabilities.build_architecture(
+            available_tools=_all_tools().keys(),
+            active_tools=active_tools,
+            routines=data["routines"],
+            integrations=data.get("integrations") or [],
+            installed_skills=[
+                path.stem
+                for path in (_config.config_dir() / "skills").glob("*")
+                if path.is_file()
+            ],
+            model=self._model_spec,
+        )
+        data["proactive_running"] = self.proactive_monitor.running
+        return data
+
+    def _run_proactive_routine(self, routine: dict) -> str:
+        """Run isolated proactive inference without touching chat history."""
+        if not self._turn_lock.acquire(blocking=False):
+            return routines.fallback_output(routine)
+        try:
+            result = self.agent.client.chat(
+                model=self.agent.model,
+                messages=[
+                    {
+                        "role": "system",
+                        "content": (
+                            "You are Cagentic's proactive personal-OS planner. "
+                            "Use only the supplied local context, be concise, and propose concrete actions."
+                        ),
+                    },
+                    {"role": "user", "content": routines.build_prompt(routine)},
+                ],
+                tools=None,
+                options={"temperature": 0.2},
+            )
+            return _clean(str(result.get("content") or "")) or routines.fallback_output(routine)
+        except Exception:
+            _log.warning("proactive routine model call failed; using fallback", exc_info=True)
+            return routines.fallback_output(routine)
+        finally:
+            self._turn_lock.release()
+
+    def create_integration(self, data: dict) -> dict:
+        connection = integrations.create_connection(
+            str(data.get("name", "")),
+            str(data.get("kind", "ical")),
+            str(data.get("url", "")),
+            username=str(data.get("username", "")),
+            password=str(data.get("password", "")),
+            direction=str(data["direction"]) if data.get("direction") else None,
+            auto_sync=bool(data.get("auto_sync", True)),
+            sync_interval=data.get("sync_interval", 900),
+            verify_ssl=bool(data.get("verify_ssl", True)),
+        )
+        return {"ok": True, "connection": connection, "os": self.personal_os_snapshot()}
+
+    def update_integration(self, data: dict) -> dict:
+        connection_id = str(data.get("id", ""))
+        changes = {
+            key: data[key]
+            for key in (
+                "name",
+                "url",
+                "username",
+                "password",
+                "direction",
+                "auto_sync",
+                "sync_interval",
+                "verify_ssl",
+            )
+            if key in data
+        }
+        connection = integrations.update_connection(connection_id, **changes)
+        return {
+            "ok": connection is not None,
+            "connection": connection,
+            "error": None if connection else "connection not found",
+            "os": self.personal_os_snapshot(),
+        }
+
+    def delete_integration(self, data: dict) -> dict:
+        deleted = integrations.delete_connection(
+            str(data.get("id", "")),
+            remove_imported_events=bool(data.get("remove_imported_events", False)),
+        )
+        return {
+            "ok": deleted,
+            "error": None if deleted else "connection not found",
+            "os": self.personal_os_snapshot(),
+        }
+
+    def sync_integration(self, connection_id: str) -> dict:
+        result = integrations.sync_connection(connection_id)
+        result["os"] = self.personal_os_snapshot()
+        return result
+
+    def notification_action(self, data: dict) -> dict:
+        action = str(data.get("action") or "read")
+        notification_id = str(data.get("id", ""))
+        if action == "read_all":
+            proactive.mark_all_read()
+            ok = True
+        elif action == "dismiss":
+            ok = proactive.dismiss(notification_id)
+        else:
+            ok = proactive.mark_read(notification_id, read=bool(data.get("read", True))) is not None
+        return {
+            "ok": ok,
+            "notifications": proactive.list_notifications(),
+            "unread_notifications": proactive.unread_count(),
+        }
+
+    def create_inbox_item(self, data: dict) -> dict:
+        item = inbox.create_item(
+            str(data.get("title", "")),
+            summary=str(data.get("summary", "")),
+            kind=str(data.get("kind", "capture")),
+            priority=data.get("priority", 0),
+            tags=[str(tag) for tag in (data.get("tags") or [])],
+        )
+        return {"ok": True, "item": item, "os": self.personal_os_snapshot()}
+
+    def update_inbox_item(self, data: dict) -> dict:
+        item_id = str(data.get("id", ""))
+        changes = {
+            key: data[key]
+            for key in ("title", "summary", "status", "priority", "tags", "snoozed_until")
+            if key in data
+        }
+        item = inbox.update_item(item_id, **changes)
+        return {
+            "ok": item is not None,
+            "item": item,
+            "error": None if item else "inbox item not found",
+            "os": self.personal_os_snapshot(),
+        }
+
+    def delete_inbox_item(self, item_id: str) -> dict:
+        deleted = inbox.delete_item(item_id)
+        return {
+            "ok": deleted,
+            "error": None if deleted else "inbox item not found",
+            "os": self.personal_os_snapshot(),
+        }
+
+    def create_email_connection(self, data: dict) -> dict:
+        connection = inbox.create_email_connection(
+            str(data.get("name", "")),
+            str(data.get("host", "")),
+            str(data.get("username", "")),
+            str(data.get("password", "")),
+            port=data.get("port", 993),
+            use_ssl=bool(data.get("use_ssl", True)),
+            folder=str(data.get("folder", "INBOX")),
+            auto_sync=bool(data.get("auto_sync", True)),
+            sync_interval=data.get("sync_interval", 900),
+            max_messages=data.get("max_messages", 50),
+        )
+        return {"ok": True, "connection": connection, "os": self.personal_os_snapshot()}
+
+    def sync_email_connection(self, connection_id: str) -> dict:
+        result = inbox.sync_email_connection(connection_id)
+        result["os"] = self.personal_os_snapshot()
+        return result
+
+    def delete_email_connection(self, data: dict) -> dict:
+        deleted = inbox.delete_email_connection(
+            str(data.get("id", "")), remove_items=bool(data.get("remove_items", False))
+        )
+        return {
+            "ok": deleted,
+            "error": None if deleted else "email connection not found",
+            "os": self.personal_os_snapshot(),
+        }
+
+    def create_routine(self, data: dict) -> dict:
+        routine = routines.create_routine(
+            str(data.get("name", "")),
+            kind=str(data.get("kind", "daily_plan")),
+            schedule_time=str(data.get("schedule_time", "08:00")),
+            days=data.get("days"),
+            prompt=str(data.get("prompt", "")),
+            enabled=bool(data.get("enabled", True)),
+        )
+        return {"ok": True, "routine": routine, "os": self.personal_os_snapshot()}
+
+    def update_routine(self, data: dict) -> dict:
+        routine_id = str(data.get("id", ""))
+        changes = {
+            key: data[key]
+            for key in ("name", "kind", "schedule_time", "days", "prompt", "enabled")
+            if key in data
+        }
+        routine = routines.update_routine(routine_id, **changes)
+        return {
+            "ok": routine is not None,
+            "routine": routine,
+            "error": None if routine else "routine not found",
+            "os": self.personal_os_snapshot(),
+        }
+
+    def delete_routine(self, routine_id: str) -> dict:
+        deleted = routines.delete_routine(routine_id)
+        return {
+            "ok": deleted,
+            "error": None if deleted else "routine not found",
+            "os": self.personal_os_snapshot(),
+        }
+
+    def run_routine(self, routine_id: str) -> dict:
+        routine = routines.get_routine(routine_id)
+        if routine is None:
+            return {"ok": False, "error": "routine not found", "os": self.personal_os_snapshot()}
+        output = self._run_proactive_routine(routine)
+        updated = routines.mark_run(routine_id, output=output)
+        proactive.create_notification(
+            str(routine.get("name") or "Proactive routine"),
+            output,
+            severity="info",
+            action_prompt="Help me act on this proactive briefing.",
+            fingerprint=f"routine:{routine_id}:{updated.get('last_run_key') if updated else time.time()}",
+            expires_at=time.time() + 7 * 86400,
+        )
+        return {"ok": True, "routine": updated, "output": output, "os": self.personal_os_snapshot()}
+
+    def create_goal(self, data: dict) -> dict:
+        goal = personal_os.create_goal(
+            str(data.get("title", "")),
+            description=str(data.get("description", "")),
+            target_at=data.get("target_at"),
+            category=str(data.get("category", "personal")),
+            progress=data.get("progress", 0),
+        )
+        return {"ok": True, "goal": goal, "os": self.personal_os_snapshot()}
+
+    def update_goal(self, data: dict) -> dict:
+        goal_id = str(data.get("id", ""))
+        changes = {
+            key: data[key]
+            for key in ("title", "description", "target_at", "category", "progress", "status")
+            if key in data
+        }
+        goal = personal_os.update_goal(goal_id, **changes)
+        return {
+            "ok": goal is not None,
+            "goal": goal,
+            "error": None if goal else "goal not found",
+            "os": self.personal_os_snapshot(),
+        }
+
+    def delete_goal(self, goal_id: str) -> dict:
+        deleted = personal_os.delete_goal(goal_id)
+        return {
+            "ok": deleted,
+            "error": None if deleted else "goal not found",
+            "os": self.personal_os_snapshot(),
+        }
+
+    def create_calendar_event(self, data: dict) -> dict:
+        event = personal_os.create_event(
+            str(data.get("title", "")),
+            start_at=data.get("start_at"),
+            end_at=data.get("end_at"),
+            description=str(data.get("description", "")),
+            location=str(data.get("location", "")),
+            all_day=bool(data.get("all_day", False)),
+            source=str(data.get("source", "cagentic")),
+            external_id=str(data.get("external_id", "")),
+            color=str(data.get("color", "#f0a87a")),
+        )
+        return {"ok": True, "event": event, "os": self.personal_os_snapshot()}
+
+    def update_calendar_event(self, data: dict) -> dict:
+        event_id = str(data.get("id", ""))
+        changes = {
+            key: data[key]
+            for key in (
+                "title",
+                "start_at",
+                "end_at",
+                "description",
+                "location",
+                "all_day",
+                "status",
+                "source",
+                "external_id",
+                "color",
+            )
+            if key in data
+        }
+        event = personal_os.update_event(event_id, **changes)
+        return {
+            "ok": event is not None,
+            "event": event,
+            "error": None if event else "event not found",
+            "os": self.personal_os_snapshot(),
+        }
+
+    def delete_calendar_event(self, event_id: str) -> dict:
+        deleted = personal_os.delete_event(event_id)
+        return {
+            "ok": deleted,
+            "error": None if deleted else "event not found",
+            "os": self.personal_os_snapshot(),
+        }
+
+    def create_deadline(self, data: dict) -> dict:
+        text = str(data.get("title") or data.get("text") or "").strip()
+        if not text:
+            raise ValueError("deadline title is required")
+        due_at = personal_os.parse_timestamp(data.get("due_at") or data.get("when"))
+        tags = [str(tag) for tag in (data.get("tags") or [])]
+        if "deadline" not in tags:
+            tags.append("deadline")
+        reminder = reminders.add(text, due_at=due_at, tags=tags)
+        return {"ok": True, "deadline": reminder.to_dict(), "os": self.personal_os_snapshot()}
+
+    def update_deadline(self, data: dict) -> dict:
+        reminder_id = str(data.get("id", ""))
+        changes = {}
+        if "title" in data or "text" in data:
+            changes["text"] = str(data.get("title") or data.get("text") or "").strip()
+        if "due_at" in data or "when" in data:
+            changes["due_at"] = personal_os.parse_timestamp(data.get("due_at") or data.get("when"))
+        if "status" in data:
+            changes["status"] = str(data["status"])
+        deadline = reminders.update(reminder_id, **changes)
+        return {
+            "ok": deadline is not None,
+            "deadline": deadline.to_dict() if deadline else None,
+            "error": None if deadline else "deadline not found",
+            "os": self.personal_os_snapshot(),
+        }
+
+    def delete_deadline(self, reminder_id: str) -> dict:
+        deleted = reminders.delete(reminder_id)
+        return {
+            "ok": deleted,
+            "error": None if deleted else "deadline not found",
+            "os": self.personal_os_snapshot(),
+        }
+
     # -- settings -----------------------------------------------------------
 
     def get_settings(self) -> dict:
@@ -890,6 +1322,7 @@ IMPORTANT: When you use show_widget, do NOT repeat the widget title or type in y
         # Current model shown with provider prefix if cloud.
         current = self._model_spec
         gw_cfg = self.config.get("gateway") or {}
+        proactive_cfg = self.config.get("proactive") or {}
         return {
             "model": current,
             "models": models,
@@ -899,6 +1332,10 @@ IMPORTANT: When you use show_widget, do NOT repeat the widget title or type in y
             "yolo": self.agent.state.yolo,
             "gateway_port": int(gw_cfg.get("port", 8700)),
             "gateway_auto_start": bool(gw_cfg.get("auto_start", True)),
+            "proactive_enabled": bool(proactive_cfg.get("enabled", True)),
+            "desktop_notifications": bool(
+                proactive_cfg.get("desktop_notifications", True)
+            ),
             "system_prompt": self._user_system_prompt or "",
         }
 
@@ -943,6 +1380,18 @@ IMPORTANT: When you use show_widget, do NOT repeat the widget title or type in y
                 _log.warning("ignoring invalid gateway_port %r", data.get("gateway_port"))
         if "gateway_auto_start" in data:
             _config.set_value(cfg, "gateway.auto_start", bool(data["gateway_auto_start"]))
+        if "proactive_enabled" in data:
+            enabled = bool(data["proactive_enabled"])
+            _config.set_value(cfg, "proactive.enabled", enabled)
+            self.proactive_monitor.enabled = enabled
+            if enabled and self.running:
+                self.proactive_monitor.start()
+            elif not enabled:
+                self.proactive_monitor.stop()
+        if "desktop_notifications" in data:
+            enabled = bool(data["desktop_notifications"])
+            _config.set_value(cfg, "proactive.desktop_notifications", enabled)
+            self.proactive_monitor.desktop_notifications = enabled
         if "system_prompt" in data:
             self._user_system_prompt = str(data["system_prompt"]).strip()
             self._rebuild_suffix()
@@ -1006,6 +1455,7 @@ IMPORTANT: When you use show_widget, do NOT repeat the widget title or type in y
             "effort": getattr(self.agent.state, "effort", "medium"),
             "yolo": self.agent.state.yolo,
             "models": settings.get("models") or [],
+            "os": self.personal_os_snapshot(),
         }
 
     # -- Collama-compat surface (the iOS coding tab) -------------------------
@@ -1354,7 +1804,9 @@ IMPORTANT: When you use show_widget, do NOT repeat the widget title or type in y
         self._active_source = source
         self.engine.model = self.agent.model
         try:
-            # Inject device context into system prompt
+            # Refresh the user's live goals/calendar context before every turn,
+            # then add the device-specific capabilities for this request.
+            self._rebuild_suffix()
             self._inject_device_context(source)
             for ev in self.engine.submit_message(message):
                 emit(ev.kind, ev.data)
@@ -1940,6 +2392,37 @@ class _Handler(BaseHTTPRequestHandler):
                 return
         if path == "/api/bootstrap":
             self._json(self._gw().bootstrap())
+        elif path == "/api/os":
+            self._json(self._gw().personal_os_snapshot())
+        elif path == "/api/os/integrations":
+            self._json(
+                {
+                    "connections": integrations.list_connections()
+                    + inbox.list_email_connections()
+                }
+            )
+        elif path == "/api/os/inbox":
+            self._json(
+                {
+                    "items": inbox.list_items(),
+                    "unread_inbox": inbox.unread_count(),
+                    "email_connections": inbox.list_email_connections(),
+                }
+            )
+        elif path == "/api/os/routines":
+            self._json({"routines": routines.list_routines()})
+        elif path == "/api/os/notifications":
+            self._json(
+                {
+                    "notifications": proactive.list_notifications(),
+                    "unread_notifications": proactive.unread_count(),
+                }
+            )
+        elif path == "/api/os/calendar/export.ics":
+            self._send(
+                integrations.export_calendar().encode("utf-8"),
+                "text/calendar; charset=utf-8",
+            )
         elif path == "/api/settings":
             self._json(self._gw().get_settings())
         elif path == "/api/projects":
@@ -1978,6 +2461,66 @@ class _Handler(BaseHTTPRequestHandler):
             self._deny()
             return
         gw = self._gw()
+        if path.startswith("/api/os/"):
+            body = self._body()
+            try:
+                if path == "/api/os/goals/create":
+                    result = gw.create_goal(body)
+                elif path == "/api/os/goals/update":
+                    result = gw.update_goal(body)
+                elif path == "/api/os/goals/delete":
+                    result = gw.delete_goal(str(body.get("id", "")))
+                elif path == "/api/os/events/create":
+                    result = gw.create_calendar_event(body)
+                elif path == "/api/os/events/update":
+                    result = gw.update_calendar_event(body)
+                elif path == "/api/os/events/delete":
+                    result = gw.delete_calendar_event(str(body.get("id", "")))
+                elif path == "/api/os/deadlines/create":
+                    result = gw.create_deadline(body)
+                elif path == "/api/os/deadlines/update":
+                    result = gw.update_deadline(body)
+                elif path == "/api/os/deadlines/delete":
+                    result = gw.delete_deadline(str(body.get("id", "")))
+                elif path == "/api/os/integrations/create":
+                    result = gw.create_integration(body)
+                elif path == "/api/os/integrations/update":
+                    result = gw.update_integration(body)
+                elif path == "/api/os/integrations/delete":
+                    result = gw.delete_integration(body)
+                elif path == "/api/os/integrations/sync":
+                    result = gw.sync_integration(str(body.get("id", "")))
+                elif path == "/api/os/notifications/action":
+                    result = gw.notification_action(body)
+                elif path == "/api/os/inbox/create":
+                    result = gw.create_inbox_item(body)
+                elif path == "/api/os/inbox/update":
+                    result = gw.update_inbox_item(body)
+                elif path == "/api/os/inbox/delete":
+                    result = gw.delete_inbox_item(str(body.get("id", "")))
+                elif path == "/api/os/email/create":
+                    result = gw.create_email_connection(body)
+                elif path == "/api/os/email/sync":
+                    result = gw.sync_email_connection(str(body.get("id", "")))
+                elif path == "/api/os/email/delete":
+                    result = gw.delete_email_connection(body)
+                elif path == "/api/os/routines/create":
+                    result = gw.create_routine(body)
+                elif path == "/api/os/routines/update":
+                    result = gw.update_routine(body)
+                elif path == "/api/os/routines/delete":
+                    result = gw.delete_routine(str(body.get("id", "")))
+                elif path == "/api/os/routines/run":
+                    result = gw.run_routine(str(body.get("id", "")))
+                else:
+                    self._send(b"not found", "text/plain", status=404)
+                    return
+            except (TypeError, ValueError) as exc:
+                self._json({"ok": False, "error": str(exc)}, status=400)
+                return
+            status = 200 if result.get("ok", False) or path.endswith("/sync") else 404
+            self._json(result, status=status)
+            return
         if path == "/api/abort":
             gw.abort_generation()
             self._json({"ok": True})

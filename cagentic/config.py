@@ -59,7 +59,16 @@ _DEFAULTS: dict[str, Any] = {
     "github": {"token": None},
     "mcp": {"servers": {}},  # {name: {"command": [...], "env": {...}, "enabled": bool}}
     "browser": {"enabled": True, "port": 8765},  # companion Chrome extension bridge
-    "gateway": {"port": 8700, "workspace_roots": None},  # /gateway web UI
+    "gateway": {
+        "port": 8700,
+        "auto_port": True,  # try the next 20 ports when the preferred one is occupied
+        "workspace_roots": None,
+    },  # /gateway web UI
+    "proactive": {
+        "enabled": True,
+        "interval": 60,
+        "desktop_notifications": True,
+    },
 }
 
 

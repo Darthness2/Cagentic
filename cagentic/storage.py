@@ -3,7 +3,9 @@
 from __future__ import annotations
 
 import json
+import os
 import sqlite3
+import stat
 import threading
 from pathlib import Path
 from typing import Iterable
@@ -21,9 +23,19 @@ def database_path() -> Path:
 
 
 def _connect() -> sqlite3.Connection:
-    db = sqlite3.connect(database_path(), timeout=10)
+    path = database_path()
+    db = sqlite3.connect(path, timeout=10)
     db.execute("PRAGMA journal_mode=WAL")
     db.execute("PRAGMA synchronous=NORMAL")
+    # The database can hold calendar app passwords and other connector
+    # credentials. Keep the main file and SQLite sidecars user-private.
+    if hasattr(os, "chmod"):
+        for candidate in (path, Path(str(path) + "-wal"), Path(str(path) + "-shm")):
+            try:
+                if candidate.exists():
+                    os.chmod(candidate, stat.S_IRUSR | stat.S_IWUSR)
+            except OSError:
+                pass
     db.execute(
         """CREATE TABLE IF NOT EXISTS objects (
             namespace TEXT NOT NULL,
