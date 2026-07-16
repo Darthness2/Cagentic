@@ -62,26 +62,26 @@ setInterval(updateClock, 1000); updateClock();
     t += sp;
     for(let r=120;r>=12;r-=18) {
       const g=ctx.createRadialGradient(cx,cy,r*0.4,cx,cy,r);
-      g.addColorStop(0,`rgba(70,220,95,${0.022+(120-r)*0.0006})`); g.addColorStop(1,'rgba(0,0,0,0)');
+      g.addColorStop(0,`rgba(199,155,216,${0.022+(120-r)*0.0006})`); g.addColorStop(1,'rgba(0,0,0,0)');
       ctx.beginPath(); ctx.arc(cx,cy,r,0,Math.PI*2); ctx.fillStyle=g; ctx.fill();
     }
     const mg=ctx.createRadialGradient(cx,cy,0,cx,cy,65);
-    mg.addColorStop(0,'rgba(220,255,226,0.88)'); mg.addColorStop(0.22,'rgba(124,255,140,0.58)');
-    mg.addColorStop(0.6,'rgba(45,170,68,0.22)'); mg.addColorStop(1,'rgba(0,0,0,0)');
+    mg.addColorStop(0,'rgba(244,236,248,0.88)'); mg.addColorStop(0.22,'rgba(199,155,216,0.58)');
+    mg.addColorStop(0.6,'rgba(154,111,176,0.22)'); mg.addColorStop(1,'rgba(0,0,0,0)');
     ctx.beginPath(); ctx.arc(cx,cy,65,0,Math.PI*2); ctx.fillStyle=mg; ctx.fill();
     const ic=ctx.createRadialGradient(cx,cy,0,cx,cy,20);
-    ic.addColorStop(0,'rgba(255,255,255,1)'); ic.addColorStop(0.5,'rgba(190,255,200,0.75)'); ic.addColorStop(1,'rgba(124,255,140,0)');
+    ic.addColorStop(0,'rgba(255,255,255,1)'); ic.addColorStop(0.5,'rgba(230,215,238,0.75)'); ic.addColorStop(1,'rgba(199,155,216,0)');
     ctx.beginPath(); ctx.arc(cx,cy,20,0,Math.PI*2); ctx.fillStyle=ic; ctx.fill();
     particles.forEach(p=>{
       p.x+=p.vx; p.y+=p.vy; p.life-=p.decay; if(p.life<=0) resetPart(p);
       const a=Math.max(0,p.life)*p.alpha, br=0.5+p.z*0.5;
       ctx.beginPath(); ctx.arc(p.x,p.y,p.size,0,Math.PI*2);
-      ctx.fillStyle=`rgba(${Math.round(70+br*90)},${Math.round(185+br*70)},${Math.round(90+br*75)},${a})`; ctx.fill();
+      ctx.fillStyle=`rgba(${Math.round(120+br*79)},${Math.round(85+br*70)},${Math.round(140+br*76)},${a})`; ctx.fill();
     });
     ORBS.forEach(o=>{
       const a=t*o.s+o.ph, ox=cx+o.r*Math.cos(a), oy=cy+o.r*0.38*Math.sin(a);
       ctx.beginPath(); ctx.arc(ox,oy,o.sz,0,Math.PI*2);
-      ctx.fillStyle='rgba(124,255,140,0.9)'; ctx.shadowColor='#7cff8c'; ctx.shadowBlur=12; ctx.fill(); ctx.shadowBlur=0;
+      ctx.fillStyle='rgba(199,155,216,0.9)'; ctx.shadowColor='#c79bd8'; ctx.shadowBlur=12; ctx.fill(); ctx.shadowBlur=0;
     });
     requestAnimationFrame(draw);
   }
@@ -114,16 +114,16 @@ setInterval(updateClock, 1000); updateClock();
   function draw(){
     ctx.clearRect(0,0,width,height);time+=reduced?0:1;
     const cx=width/2,cy=height*.45,rad=Math.min(width*.35,height*.42);
-    const glow=ctx.createRadialGradient(cx,cy,0,cx,cy,rad*1.22);glow.addColorStop(0,'rgba(151,255,164,.24)');glow.addColorStop(.38,'rgba(76,255,104,.09)');glow.addColorStop(1,'rgba(0,0,0,0)');ctx.fillStyle=glow;ctx.fillRect(0,0,width,height);
+    const glow=ctx.createRadialGradient(cx,cy,0,cx,cy,rad*1.22);glow.addColorStop(0,'rgba(199,155,216,.24)');glow.addColorStop(.38,'rgba(199,155,216,.09)');glow.addColorStop(1,'rgba(0,0,0,0)');ctx.fillStyle=glow;ctx.fillRect(0,0,width,height);
     const points=nodes.map(project);
     ctx.lineWidth=.55;
     for(let i=0;i<points.length;i++){
       const a=points[i];for(let j=i+1;j<Math.min(points.length,i+15);j++){
         const b=points[j],dx=a.x-b.x,dy=a.y-b.y,dist=Math.hypot(dx,dy);
-        if(dist<Math.min(54,width*.075)){ctx.strokeStyle=`rgba(103,255,126,${Math.max(0,.12-dist/520)*(a.alpha+b.alpha)})`;ctx.beginPath();ctx.moveTo(a.x,a.y);ctx.lineTo(b.x,b.y);ctx.stroke();}
+        if(dist<Math.min(54,width*.075)){ctx.strokeStyle=`rgba(199,155,216,${Math.max(0,.12-dist/520)*(a.alpha+b.alpha)})`;ctx.beginPath();ctx.moveTo(a.x,a.y);ctx.lineTo(b.x,b.y);ctx.stroke();}
       }
     }
-    points.sort((a,b)=>a.z-b.z).forEach(p=>{ctx.beginPath();ctx.arc(p.x,p.y,p.size,0,Math.PI*2);ctx.fillStyle=`rgba(137,255,153,${p.alpha})`;ctx.shadowColor='#70ff82';ctx.shadowBlur=p.size>1.5?7:2;ctx.fill();});ctx.shadowBlur=0;
+    points.sort((a,b)=>a.z-b.z).forEach(p=>{ctx.beginPath();ctx.arc(p.x,p.y,p.size,0,Math.PI*2);ctx.fillStyle=`rgba(199,155,216,${p.alpha})`;ctx.shadowColor='#c79bd8';ctx.shadowBlur=p.size>1.5?7:2;ctx.fill();});ctx.shadowBlur=0;
     if(!reduced)requestAnimationFrame(draw);
   }
   if('ResizeObserver' in window){const observer=new ResizeObserver(()=>{resize();if(reduced)draw();});observer.observe(canvas);}else{window.addEventListener('resize',()=>{resize();if(reduced)draw();});}
@@ -618,7 +618,7 @@ function buildPanelInner(p){
         '<div class="mlabel">'+esc(p.label||((p.lat??'?')+', '+(p.lon??'?')))+'</div></div>';
       break;
     case 'bar':{ const vals=(p.values||[]).map(Number); const labs=p.labels||vals.map((_,i)=>String(i+1));
-      const maxV=Math.max(...vals,1); const col=p.color||'#7cff8c';
+      const maxV=Math.max(...vals,1); const col=p.color||'#c79bd8';
       const W2=320,H2=160,padL=36,padR=10,padT=14,padB=22;
       const plotW=W2-padL-padR, plotH=H2-padT-padB;
       const bw=Math.max(10,Math.min(36,Math.floor(plotW/Math.max(vals.length,1)*0.6)));
@@ -642,11 +642,11 @@ function buildPanelInner(p){
         bars+=`<text x="${x+bw/2}" y="${y-4}" text-anchor="middle" font-size="8" font-weight="600" fill="${esc(col)}">${esc(String(v))}</text>`;
       });
       inner=`<svg viewBox="0 0 ${W2} ${H2}" style="width:100%;height:auto">${bars}</svg>`; break; }
-    case 'line':{ const ds=(p.datasets||[{values:p.values||[],label:'',color:'#7cff8c'}]);
+    case 'line':{ const ds=(p.datasets||[{values:p.values||[],label:'',color:'#c79bd8'}]);
       const labs=p.labels||[];  const maxAll=Math.max(...ds.flatMap(d=>d.values||[]).map(Number),1);
       const W2=320,H2=160,padL=36,padR=10,padT=14,padB=22;
       const plotW=W2-padL-padR, plotH=H2-padT-padB;
-      let lines=''; const colors=['#7cff8c','#8ecf95','#e3a978','#c97fd4','#e5928f'];
+      let lines=''; const colors=['#c79bd8','#8ecf95','#e3a978','#c97fd4','#e5928f'];
       // grid
       for(let g=0;g<=4;g++){
         const gy=padT+plotH*(1-g/4); const gv=(maxAll*g/4);
@@ -672,7 +672,7 @@ function buildPanelInner(p){
       inner=`<svg viewBox="0 0 ${W2} ${H2}" style="width:100%;height:auto">${lines}</svg>`; break; }
     case 'pie':{ const vals=(p.values||[]).map(Number); const labs=p.labels||vals.map((_,i)=>String(i+1));
       const total=vals.reduce((a,b)=>a+b,0)||1;
-      const colors=['#7cff8c','#8ecf95','#e3a978','#c97fd4','#e5928f','#b0a6ba','#7ec8e3','#d4a76a'];
+      const colors=['#c79bd8','#8ecf95','#e3a978','#c97fd4','#e5928f','#b0a6ba','#7ec8e3','#d4a76a'];
       const cx=100,cy=80,r=62,ri=32; let angle=-Math.PI/2; let slices=''; let legend='';
       // shadow ring
       slices+=`<circle cx="${cx+1}" cy="${cy+2}" r="${r+2}" fill="none" stroke="#0a0810" stroke-width="4" opacity="0.4"/>`;
@@ -690,7 +690,7 @@ function buildPanelInner(p){
         if(sweep>0.25){
           const lr=(r+ri)/2, lx=cx+lr*Math.cos(mid)+ex, ly=cy+lr*Math.sin(mid)+ey;
           const pct=Math.round(v/total*100);
-          slices+=`<text x="${lx}" y="${ly+3}" text-anchor="middle" font-size="9" font-weight="600" fill="#fff">${pct}%</text>`;
+          slices+=`<text x="${lx}" y="${ly+3}" text-anchor="middle" font-size="9" font-weight="600" fill="#f0eaf2">${pct}%</text>`;
         }
         const pct=Math.round(v/total*100);
         legend+=`<rect x="190" y="${8+i*18}" width="10" height="10" rx="2" fill="${col}"/>`;
@@ -838,7 +838,7 @@ function _areaChartSVG(vals, opts){
   const o=opts||{};
   const W=o.w||480, H=o.h||160;
   const padL=o.padL||36, padR=o.padR||52, padT=o.padT||10, padB=o.padB||18;
-  const stroke=o.color||'#7cff8c';
+  const stroke=o.color||'#c79bd8';
   const min=Math.min(...vs), max=Math.max(...vs);
   const span=Math.max(max-min, 1e-9);
   const plotW=W-padL-padR, plotH=H-padT-padB;
@@ -856,7 +856,7 @@ function _areaChartSVG(vals, opts){
   for(let g=0; g<=4; g++){
     const y=padT+(g/4)*plotH;
     const val=max-(g/4)*span;
-    grid.push('<line x1="'+padL+'" y1="'+y+'" x2="'+(W-padR)+'" y2="'+y+'" stroke="rgba(124,255,140,.08)" stroke-width="1" stroke-dasharray="'+(g===0||g===4?'0':'2 3')+'"/>');
+    grid.push('<line x1="'+padL+'" y1="'+y+'" x2="'+(W-padR)+'" y2="'+y+'" stroke="rgba(199,155,216,.08)" stroke-width="1" stroke-dasharray="'+(g===0||g===4?'0':'2 3')+'"/>');
     if(o.showAxis!==false){
       grid.push('<text x="'+(padL-6)+'" y="'+(y+3)+'" font-size="9" fill="#7d7388" text-anchor="end" font-family="inherit">'+_fmtNum(val, val<10?2:0)+'</text>');
     }
@@ -899,7 +899,7 @@ function _candleChartSVG(ohlc, opts){
   for(let g=0; g<=4; g++){
     const y=padT+(g/4)*plotH;
     const val=max-(g/4)*span;
-    grid.push('<line x1="'+padL+'" y1="'+y+'" x2="'+(W-padR)+'" y2="'+y+'" stroke="rgba(124,255,140,.08)" stroke-width="1" stroke-dasharray="'+(g===0||g===4?'0':'2 3')+'"/>');
+    grid.push('<line x1="'+padL+'" y1="'+y+'" x2="'+(W-padR)+'" y2="'+y+'" stroke="rgba(199,155,216,.08)" stroke-width="1" stroke-dasharray="'+(g===0||g===4?'0':'2 3')+'"/>');
     grid.push('<text x="'+(padL-6)+'" y="'+(y+3)+'" font-size="9" fill="#7d7388" text-anchor="end" font-family="inherit">'+_fmtNum(val, val<10?2:0)+'</text>');
   }
   const candles=vs.map((c,i)=>{
@@ -955,15 +955,15 @@ function _hourlyTempSVG(hourly, opts){
   }).join('');
   // spot dots every 6
   const dots=hs.map((h,i)=> i%6===0 || i===hs.length-1
-    ? '<circle cx="'+xFor(i)+'" cy="'+yFor(h.t)+'" r="2.4" fill="#16111c" stroke="#7cff8c" stroke-width="1.4"/>'
+    ? '<circle cx="'+xFor(i)+'" cy="'+yFor(h.t)+'" r="2.4" fill="#16111c" stroke="#c79bd8" stroke-width="1.4"/>'
     : '').join('');
   return '<svg viewBox="0 0 '+W+' '+H+'" class="ww-hourly-svg" preserveAspectRatio="none">'+
     '<defs><linearGradient id="'+gid+'" x1="0" y1="0" x2="0" y2="1">'+
-    '<stop offset="0%" stop-color="#7cff8c" stop-opacity=".35"/>'+
-    '<stop offset="100%" stop-color="#7cff8c" stop-opacity="0"/></linearGradient></defs>'+
-    '<rect x="'+bx0+'" y="'+padT+'" width="'+(bx1-bx0)+'" height="'+plotH+'" fill="rgba(124,255,140,.10)"/>'+
+    '<stop offset="0%" stop-color="#c79bd8" stop-opacity=".35"/>'+
+    '<stop offset="100%" stop-color="#c79bd8" stop-opacity="0"/></linearGradient></defs>'+
+    '<rect x="'+bx0+'" y="'+padT+'" width="'+(bx1-bx0)+'" height="'+plotH+'" fill="rgba(199,155,216,.10)"/>'+
     '<path d="'+area+'" fill="url(#'+gid+')"/>'+
-    '<path d="'+path+'" fill="none" stroke="#7cff8c" stroke-width="1.6" stroke-linecap="round" stroke-linejoin="round"/>'+
+    '<path d="'+path+'" fill="none" stroke="#c79bd8" stroke-width="1.6" stroke-linecap="round" stroke-linejoin="round"/>'+
     dots+labels+
   '</svg>';
 }
@@ -992,14 +992,14 @@ function _sunArcSVG(sunrise, sunset, now){
   const sunY = ay - Math.sin(sunFrac*Math.PI)*40;
   const sunOnArc = nowMin>=sr && nowMin<=ss;
   const sun = sunOnArc
-    ? '<circle cx="'+sunX+'" cy="'+sunY+'" r="4.2" fill="#7cff8c" stroke="#16111c" stroke-width="1.4"/>'
+    ? '<circle cx="'+sunX+'" cy="'+sunY+'" r="4.2" fill="#c79bd8" stroke="#16111c" stroke-width="1.4"/>'
     : '<circle cx="'+sunOnArc?sunX:(nowMin<sr?sx0:sx1)+'" cy="'+(sunOnArc?sunY:ay-3)+'" r="3" fill="#5a4e69"/>';
   return '<svg viewBox="0 0 '+W+' '+H+'" class="ww-sun-svg" preserveAspectRatio="xMidYMid meet">'+
     '<defs><linearGradient id="'+gid+'" x1="0" y1="0" x2="1" y2="0">'+
     '<stop offset="0%" stop-color="#e5928f" stop-opacity=".55"/>'+
-    '<stop offset="50%" stop-color="#7cff8c" stop-opacity=".85"/>'+
+    '<stop offset="50%" stop-color="#c79bd8" stop-opacity=".85"/>'+
     '<stop offset="100%" stop-color="#e6c073" stop-opacity=".55"/></linearGradient></defs>'+
-    '<line x1="'+ax0+'" y1="'+ay+'" x2="'+ax1+'" y2="'+ay+'" stroke="rgba(124,255,140,.18)" stroke-dasharray="2 3"/>'+
+    '<line x1="'+ax0+'" y1="'+ay+'" x2="'+ax1+'" y2="'+ay+'" stroke="rgba(199,155,216,.18)" stroke-dasharray="2 3"/>'+
     '<path d="'+arc+'" fill="none" stroke="url(#'+gid+')" stroke-width="1.6" stroke-linecap="round"/>'+
     sun+
     '<text x="'+sx0+'" y="'+(H-1)+'" font-size="9" fill="#b0a6ba" text-anchor="middle" font-family="inherit">'+esc(sunrise)+'</text>'+
@@ -1115,7 +1115,7 @@ function buildStocksCard(p){
   const tf = (p.chart&&p.chart.timeframe) || '1D';
   const chart = p.ohlc
     ? _candleChartSVG(p.ohlc, {w:480,h:160,padL:36,padR:12})
-    : (p.chart&&p.chart.values ? _areaChartSVG(p.chart.values, {w:480,h:160,color:'#7cff8c',padL:36,padR:52}) : '');
+    : (p.chart&&p.chart.values ? _areaChartSVG(p.chart.values, {w:480,h:160,color:'#c79bd8',padL:36,padR:52}) : '');
 
   // watchlist — strip the first item if it duplicates the hero
   const rest = items.length>1 ? items.slice(1) : [];
@@ -1161,7 +1161,7 @@ function buildCryptoCard(p){
   const tf = (p.chart&&p.chart.timeframe) || '24H';
   const chart = p.ohlc
     ? _candleChartSVG(p.ohlc, {w:480,h:160,padL:36,padR:12})
-    : (p.chart&&p.chart.values ? _areaChartSVG(p.chart.values, {w:480,h:160,color:'#7cff8c',padL:36,padR:52}) : '');
+    : (p.chart&&p.chart.values ? _areaChartSVG(p.chart.values, {w:480,h:160,color:'#c79bd8',padL:36,padR:52}) : '');
   const rest = items.length>1 ? items.slice(1) : [];
   const ex = p.exchange || (sym.endsWith('-USD')?'GLOBAL':(sym.length<=4?'CEX':'DEX'));
 
@@ -1389,7 +1389,7 @@ function buildCalendarCard(p){
   // all-day pills
   const allDayHtml = allDay.length
     ? '<div class="cx-allday">'+allDay.map(e=>{
-        const color=e.color||'#7cff8c';
+        const color=e.color||'#c79bd8';
         return '<div class="cx-allday-pill" style="--cx-color:'+esc(color)+'">'+esc(e.title||'')+'</div>';
       }).join('')+'</div>'
     : '';
@@ -1404,7 +1404,7 @@ function buildCalendarCard(p){
     if(en===null||en<=s) en=s+30;
     const top=((s-hourStart*60)/spanMins)*100;
     const height=Math.max(4, ((en-s)/spanMins)*100);
-    const color=e.color||'#7cff8c';
+    const color=e.color||'#c79bd8';
     return '<div class="cx-ev" style="top:'+top.toFixed(2)+'%;height:'+height.toFixed(2)+'%;--cx-color:'+esc(color)+'">'+
       '<div class="cx-ev-bar"></div>'+
       '<div class="cx-ev-body">'+
