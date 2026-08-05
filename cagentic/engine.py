@@ -2,6 +2,7 @@
 
 Event-stream architecture with a personal-assistant system prompt.
 """
+
 from __future__ import annotations
 
 import json
@@ -19,8 +20,11 @@ from .ollama_client import OllamaClient, OllamaError, ToolsUnsupportedError
 from .permissions import CONCURRENT_SAFE, Resolver, auto_deny_resolver, can_use_tool
 from .services.compact import (
     BOUNDARY_MARKER,
-    approx_tokens as estimate_tokens,
+    SUMMARY_MARKER,
     manage_context,
+)
+from .services.compact import (
+    approx_tokens as estimate_tokens,
 )
 from .services.transcript import record as record_transcript
 from .state import AppState
@@ -48,9 +52,21 @@ COMPACT_KEEP_RECENT = 24
 
 
 EventKind = Literal[
-    "system", "user", "thinking", "plan", "narration", "delta", "assistant",
-    "tool_call", "tool_denied", "tool_result",
-    "info", "warn", "error", "compact", "done",
+    "system",
+    "user",
+    "thinking",
+    "plan",
+    "narration",
+    "delta",
+    "assistant",
+    "tool_call",
+    "tool_denied",
+    "tool_result",
+    "info",
+    "warn",
+    "error",
+    "compact",
+    "done",
 ]
 
 
@@ -78,9 +94,7 @@ _DEEPSEEK_OUTPUTS_BLOCK_RX = re.compile(
     rf"<{_DS_BAR}tool▁outputs?▁begin{_DS_BAR}>.*?<{_DS_BAR}tool▁outputs?▁end{_DS_BAR}>",
     re.DOTALL,
 )
-_DEEPSEEK_STRAY_TOKEN_RX = re.compile(
-    rf"<{_DS_BAR}tool▁outputs?▁(?:begin|end){_DS_BAR}>"
-)
+_DEEPSEEK_STRAY_TOKEN_RX = re.compile(rf"<{_DS_BAR}tool▁outputs?▁(?:begin|end){_DS_BAR}>")
 
 
 def _looks_like_call(obj):
@@ -159,15 +173,17 @@ def _extract_plan(text: str) -> tuple[list[str], str]:
         s = re.sub(r"^(?:[-*•]|\d+[.)])\s*", "", s)
         if s:
             steps.append(s)
-    cleaned = (text[:m.start()] + text[m.end():]).strip()
+    cleaned = (text[: m.start()] + text[m.end() :]).strip()
     return steps, cleaned
 
 
 def _extract_thinking(text: str) -> tuple[list[str], str]:
     blocks: list[str] = []
+
     def _consume(m):
         blocks.append(m.group(1).strip())
         return ""
+
     cleaned = _THINK_RX.sub(_consume, text).strip()
     return blocks, cleaned
 
@@ -211,9 +227,12 @@ def _summarize_args(name: str, args: dict) -> str:
         code = str(args.get("code", ""))
         return code if len(code) < 60 else code[:57] + "…"
     if name == "browser_scroll":
-        return str(args.get("selector") or
-                   (f"y={args['y']}" if args.get("y") is not None else "")
-                   or args.get("to") or "bottom")
+        return str(
+            args.get("selector")
+            or (f"y={args['y']}" if args.get("y") is not None else "")
+            or args.get("to")
+            or "bottom"
+        )
     if name == "browser_click_at":
         return f"({args.get('x')}, {args.get('y')})"
     if name == "browser_links":
@@ -255,6 +274,52 @@ def _load_memory(workspace: Path, home: Path) -> str:
             break
         cur = cur.parent
     return "\n\n".join(chunks)
+
+
+# ---------------------------------------------------------------- effort ----
+
+# The effort dial steers how much work the model puts into a turn. Local
+# models have no native "reasoning effort" knob, so we steer it through the
+# system prompt — the one lever that reliably changes a model's thoroughness.
+# Persisted per-gateway via /api/effort; default "medium".
+EFFORT_LEVELS = ("low", "medium", "high")
+
+_EFFORT_GUIDANCE = {
+    "low": (
+        "Optimize for SPEED and minimalism. Do the smallest amount of work "
+        "that satisfies the request:\n"
+        "- Make the most direct change; don't refactor or polish beyond what "
+        "was asked.\n"
+        "- Investigate only as much as you must — a couple of reads, not a "
+        "survey.\n"
+        "- Skip extra verification / test runs unless the user asked for them.\n"
+        "- Keep your final answer to one or two sentences."
+    ),
+    "medium": (
+        "Balance speed and rigor (the default):\n"
+        "- Investigate enough to be confident, then act.\n"
+        "- Verify the change when it's cheap to do so — re-run the failing "
+        "command, or read back the region you edited.\n"
+        "- Keep answers concise but complete."
+    ),
+    "high": (
+        "Optimize for CORRECTNESS and thoroughness. Spend the extra effort:\n"
+        "- Explore the relevant context broadly before acting — understand "
+        "callers, edge cases, and related files, not just the first match.\n"
+        "- Consider failure modes and edge cases; handle errors explicitly.\n"
+        "- After acting, VERIFY: run the relevant command or test and confirm "
+        "it passes, and re-read the changed region to be sure it's correct.\n"
+        "- Prefer a complete, robust fix over a quick patch — but still act, "
+        "then confirm; don't narrate endlessly."
+    ),
+}
+
+
+def _effort_section(effort: str | None) -> str:
+    level = (effort or "medium").lower()
+    if level not in EFFORT_LEVELS:
+        level = "medium"
+    return f"\n\n=== EFFORT LEVEL: {level.upper()} ===\n{_EFFORT_GUIDANCE[level]}\n"
 
 
 def fetch_system_prompt_parts(state: AppState) -> str:
@@ -301,6 +366,21 @@ Tools you have:
 - **Reminders** (reminder_add, reminder_list, reminder_done, reminder_delete,
   reminder_update): persistent to-dos. Always use reminder_add when the user
   says "remind me to X" — never let it live only in chat history.
+- **Personal OS** (goal_create, goal_list, goal_update, goal_delete,
+  calendar_event_add, calendar_event_list, calendar_event_update,
+  calendar_event_delete, personal_briefing, calendar_connection_create,
+  calendar_connection_list, calendar_connection_sync, inbox_capture, inbox_list,
+  inbox_update, email_connection_create, email_connection_list,
+  email_connection_sync, routine_create, routine_list, routine_update): maintain the user's goals and
+  schedule as durable structured data. Use these whenever the user sets a
+  goal, reports progress, plans an event, or asks what deserves attention.
+  Check personal_briefing when planning the day and proactively mention real
+  conflicts or urgent deadlines without manufacturing urgency. Calendar
+  connections support iCalendar feeds and CalDAV; never expose stored
+  credentials, and get approval before adding or syncing a connection. The
+  unified inbox stores quick captures and email headers locally; IMAP sync does
+  not download message bodies. Proactive routines run on user-defined local
+  schedules and surface durable notifications.
 - **Web** (web_search, web_fetch): for anything current. Search first, fetch
   the most promising result. Pass text_only=true to web_fetch when reading
   articles to strip noise.
@@ -336,9 +416,21 @@ Tools you have:
   read_file also pulls the text out of PDF and Word (.docx) documents — so
   you can read résumés, contracts, letters, and reports directly. Just call
   read_file on the .pdf / .docx path; don't ask the user to convert it.
-- **Shell** (run_bash): for opening apps, running scripts, etc. Each call
-  asks the user to approve.
+- **Shell** (run_bash, powershell): for opening apps, running scripts, etc.
+  Each call asks the user to approve.
 - **Background** (bash_async, task_status, task_wait): for slow commands.
+- **Coding** (multi_edit, check_syntax, notebook_edit, enter_worktree /
+  exit_worktree): for real programming work. Batch several edits to one
+  file atomically with multi_edit; after editing code, run check_syntax on
+  the changed files to confirm they still parse (it never executes them);
+  edit Jupyter notebooks cell-by-cell with notebook_edit; use the worktree
+  stack when a sub-task lives in its own directory.
+- **Sub-agents** (agent_call, agent_call_async): fork a focused helper on a
+  fresh conversation for a self-contained subtask (big searches, summaries)
+  so the main context stays clean. Use the async variant for long research.
+- **Persistent tasks** (task_create, task_update, task_get, task_list,
+  task_delete, brief): a cross-session task graph for multi-step projects —
+  create tasks with dependencies, mark them done as you go.
 
 Working principles:
 - ACT, don't narrate. If the user says "remind me to call mom at 5", call
@@ -370,6 +462,10 @@ Call a tool by emitting ONE call and STOPPING. Any of these works:
 After the call, STOP. The harness emits tool outputs; you must NOT.
 """
 
+    # How hard the model should work this turn (changeable live via the
+    # gateway's /api/effort or the /effort command).
+    base += _effort_section(getattr(state, "effort", "medium"))
+
     # Personal-context memory: CAGENTIC.md / AGENTS.md in workspace + parents,
     # plus any persistent profile / preferences notes the user has stashed.
     memory = _load_memory(workspace, home)
@@ -380,6 +476,7 @@ After the call, STOP. The harness emits tool outputs; you must NOT.
     # picture of who it's talking to ("Sam, vegetarian, lives in Seattle…").
     try:
         from . import notes as _notes
+
         for profile_name in ("profile", "about-me", "me"):
             n = _notes.get(profile_name)
             if n:
@@ -406,6 +503,7 @@ def _resolve_mention(token: str, workspace: Path, home: Path):
             line_start = int(m.group(1))
             line_end = int(m.group(2)) if m.group(2) else line_start
     import os as _os
+
     expanded = _os.path.expanduser(_os.path.expandvars(path_part))
     p = Path(expanded)
     if not p.is_absolute():
@@ -432,6 +530,7 @@ def process_user_input(raw: str, workspace: Path | None = None, home: Path | Non
         # any plain file — so "summarize @report.pdf" works in one shot.
         try:
             from . import documents as _documents
+
             if _documents.is_document(p):
                 text = _documents.extract_text(p)
             else:
@@ -475,6 +574,7 @@ class StreamingToolExecutor:
         engine: object | None = None,
         background: object | None = None,
         tasks: object | None = None,
+        teams: object | None = None,
     ) -> None:
         self.state = state
         self.resolver = resolver
@@ -482,6 +582,7 @@ class StreamingToolExecutor:
         self.engine = engine
         self.background = background
         self.tasks = tasks
+        self.teams = teams
 
     def execute(self, calls):
         if not calls:
@@ -520,19 +621,34 @@ class StreamingToolExecutor:
         name, args, role = call
         tid = new_id(TaskKind.BASH if name == "run_bash" else TaskKind.TOOL)
         summary = _summarize_args(name, args)
-        yield Message("tool_call", {
-            "id": tid, "name": name, "args": args, "role": role,
-            "summary": summary,
-        }, task_id=tid)
+        yield Message(
+            "tool_call",
+            {
+                "id": tid,
+                "name": name,
+                "args": args,
+                "role": role,
+                "summary": summary,
+            },
+            task_id=tid,
+        )
 
         allowed, reason = can_use_tool(name, args, self.state, self.resolver)
         if not allowed:
             err = f"ERROR: permission denied ({reason})"
             yield Message("tool_denied", {"id": tid, "name": name, "reason": reason}, task_id=tid)
-            yield Message("tool_result", {
-                "id": tid, "name": name, "result": err,
-                "ok": False, "first_line": err, "role": role,
-            }, task_id=tid)
+            yield Message(
+                "tool_result",
+                {
+                    "id": tid,
+                    "name": name,
+                    "result": err,
+                    "ok": False,
+                    "first_line": err,
+                    "role": role,
+                },
+                task_id=tid,
+            )
             return
 
         ctx = ToolContext(
@@ -541,6 +657,7 @@ class StreamingToolExecutor:
             engine=self.engine,
             background=self.background,
             tasks=self.tasks,
+            teams=self.teams,
             read_cache=getattr(self.engine, "_read_cache", None),
         )
 
@@ -556,12 +673,20 @@ class StreamingToolExecutor:
         # Tools (browser_screenshot) stash inline images here; pass them
         # through so _execute_and_record can attach them to the message.
         images = list(getattr(ctx, "pending_images", None) or [])
-        yield Message("tool_result", {
-            "id": tid, "name": name, "result": result,
-            "ok": ok, "first_line": first_line, "role": role,
-            "ctx_root": str(ctx.root),
-            "images": images,
-        }, task_id=tid)
+        yield Message(
+            "tool_result",
+            {
+                "id": tid,
+                "name": name,
+                "result": result,
+                "ok": ok,
+                "first_line": first_line,
+                "role": role,
+                "ctx_root": str(ctx.root),
+                "images": images,
+            },
+            task_id=tid,
+        )
 
     def _run_one_collect(self, call):
         return list(self._run_one(call))
@@ -591,10 +716,16 @@ class QueryEngine:
         self.permission_resolver: Resolver = permission_resolver or auto_deny_resolver
         self.task_graph = TaskGraph()
         self.background = BackgroundExecutor(tasks=self.task_graph)
+        from .teams import TeamRegistry
+
+        self.teams = TeamRegistry()
         self.executor = StreamingToolExecutor(
-            state, self.permission_resolver,
-            engine=self, background=self.background,
+            state,
+            self.permission_resolver,
+            engine=self,
+            background=self.background,
             tasks=self.task_graph,
+            teams=self.teams,
         )
         # Optional extra instructions appended to the system prompt (e.g. the
         # gateway teaches the model to drive its HUD). Empty for the REPL.
@@ -641,7 +772,13 @@ class QueryEngine:
         self._usage = {"input": 0, "output": 0, "ms": 0}
 
     def load_messages(self, messages: list[dict]) -> None:
-        if not messages or messages[0].get("role") != "system":
+        first_content = str(messages[0].get("content") or "") if messages else ""
+        if (
+            not messages
+            or messages[0].get("role") != "system"
+            or SUMMARY_MARKER in first_content
+            or BOUNDARY_MARKER in first_content
+        ):
             messages = [{"role": "system", "content": self._system_content()}] + list(messages)
         self.messages = list(messages)
 
@@ -676,9 +813,10 @@ class QueryEngine:
         _pre = estimate_tokens(self.messages)
         will_compact = _pre > COMPACT_TOKENS
         if will_compact:
-            yield Message("info", {
-                "text": f"compacting context (~{_pre:,} → ≤{COMPACT_TOKENS:,} tokens)…"
-            })
+            yield Message(
+                "info",
+                {"text": f"compacting context (~{_pre:,} → ≤{COMPACT_TOKENS:,} tokens)…"},
+            )
         summarize_fn = (
             self._summarize_with_model
             if (self.config and self.config.get("ollama", {}).get("llm_summarize"))
@@ -691,9 +829,14 @@ class QueryEngine:
             summarize_with_model=summarize_fn,
         ):
             if r.triggered:
-                yield Message("compact", {
-                    "strategy": r.strategy, "before": r.before, "after": r.after,
-                })
+                yield Message(
+                    "compact",
+                    {
+                        "strategy": r.strategy,
+                        "before": r.before,
+                        "after": r.after,
+                    },
+                )
 
         for _ in range(MAX_TOOL_ITERATIONS):
             for note in self.background.drain_notifications():
@@ -702,16 +845,24 @@ class QueryEngine:
                     f"finished ({note['status']}): {note['label']}\n{note['result']}"
                 )
                 self.messages.append({"role": "user", "content": inject})
-                yield Message("warn", {"text": f"background {note['id']} {note['status']} — injected"})
+                yield Message(
+                    "warn",
+                    {"text": f"background {note['id']} {note['status']} — injected"},
+                )
             est_tokens = estimate_tokens(self.messages)
             if est_tokens >= 4000:
-                tool_count = len(all_tool_schemas(self.state.tool_groups)) if self.state.tools_enabled else 0
-                yield Message("info", {
-                    "text": (
-                        f"sending ~{est_tokens:,} tokens to {self.model}"
-                        + (f" · {tool_count} tools" if tool_count else "")
-                    ),
-                })
+                tool_count = (
+                    len(all_tool_schemas(self.state.tool_groups)) if self.state.tools_enabled else 0
+                )
+                yield Message(
+                    "info",
+                    {
+                        "text": (
+                            f"sending ~{est_tokens:,} tokens to {self.model}"
+                            + (f" · {tool_count} tools" if tool_count else "")
+                        ),
+                    },
+                )
             try:
                 msg, usage = self._chat_once(yield_deltas=self.stream)
                 if isinstance(msg, _StreamGen):
@@ -742,9 +893,12 @@ class QueryEngine:
                     except OllamaError as e:
                         spinner.stop()
                         watchdog.stop()
-                        yield Message("warn", {
-                            "text": f"streaming connection broke ({e}); retrying without streaming."
-                        })
+                        yield Message(
+                            "warn",
+                            {
+                                "text": f"streaming connection broke ({e}); retrying without streaming."
+                            },
+                        )
                         msg = self._chat_nonstream()
                         if msg is None:
                             yield Message("error", {"text": "non-streaming retry also failed"})
@@ -755,15 +909,16 @@ class QueryEngine:
                         spinner.stop()
                         watchdog.stop()
                     if final_msg is None:
-                        yield Message("warn", {
-                            "text": "stream produced no chunks — try /retry"
-                        })
+                        yield Message("warn", {"text": "stream produced no chunks — try /retry"})
                         return
                     if final_msg != "RETRIED":
                         if final_msg.get("truncated"):
-                            yield Message("warn", {
-                                "text": "response was truncated (stream closed early); using what arrived"
-                            })
+                            yield Message(
+                                "warn",
+                                {
+                                    "text": "response was truncated (stream closed early); using what arrived"
+                                },
+                            )
                         msg = final_msg["message"]
                         usage = {
                             "input": final_msg.get("prompt_eval_count", 0),
@@ -771,7 +926,12 @@ class QueryEngine:
                             "ms": final_msg.get("total_duration_ns", 0) // 1_000_000,
                         }
             except ToolsUnsupportedError:
-                yield Message("warn", {"text": f"model '{self.model}' lacks native tool support — switching to text-protocol fallback."})
+                yield Message(
+                    "warn",
+                    {
+                        "text": f"model '{self.model}' lacks native tool support — switching to text-protocol fallback."
+                    },
+                )
                 self.state.update(tools_enabled=False)
                 self.refresh_system_prompt()
                 if self.config is not None:
@@ -792,18 +952,25 @@ class QueryEngine:
             self.messages.append(msg)
 
             record_transcript(
-                self.session_id or "", "assistant", cleaned,
+                self.session_id or "",
+                "assistant",
+                cleaned,
                 tool_calls=msg.get("tool_calls") or [],
             )
 
             if had_fakes:
-                yield Message("warn", {"text": "model fabricated tool outputs — asking it to retry."})
-                self.messages.append({
-                    "role": "system",
-                    "content": (
-                        "STOP. Tool outputs are mine to emit. Send a single tool call and STOP."
-                    ),
-                })
+                yield Message(
+                    "warn",
+                    {"text": "model fabricated tool outputs — asking it to retry."},
+                )
+                self.messages.append(
+                    {
+                        "role": "system",
+                        "content": (
+                            "STOP. Tool outputs are mine to emit. Send a single tool call and STOP."
+                        ),
+                    }
+                )
                 continue
 
             thinks, content = _extract_thinking(cleaned)
@@ -823,11 +990,14 @@ class QueryEngine:
                 if narration:
                     yield Message("assistant", {"text": narration})
                 _poke_browser(self.state, activity="idle")
-                yield Message("done", {
-                    "text": narration,
-                    "usage": dict(self._usage),
-                    "session_id": self.session_id,
-                })
+                yield Message(
+                    "done",
+                    {
+                        "text": narration,
+                        "usage": dict(self._usage),
+                        "session_id": self.session_id,
+                    },
+                )
                 return
 
             if narration and not self.stream:
@@ -840,22 +1010,30 @@ class QueryEngine:
             if self._abort_turn:
                 salvaged = self._last_assistant_narration()
                 if salvaged:
-                    yield Message("assistant", {"text": (
-                        salvaged + "\n\n_(I got stuck. Try /retry.)_"
-                    )})
+                    yield Message(
+                        "assistant",
+                        {"text": (salvaged + "\n\n_(I got stuck. Try /retry.)_")},
+                    )
                 _poke_browser(self.state, activity="idle")
-                yield Message("done", {
-                    "text": "Stopped: stuck in a loop. Try /retry or /new for a fresh context.",
-                    "usage": dict(self._usage),
-                    "session_id": self.session_id,
-                })
+                yield Message(
+                    "done",
+                    {
+                        "text": "Stopped: stuck in a loop. Try /retry or /new for a fresh context.",
+                        "usage": dict(self._usage),
+                        "session_id": self.session_id,
+                    },
+                )
                 return
 
         yield Message("error", {"text": f"hit tool-call limit ({MAX_TOOL_ITERATIONS}); stopping."})
 
     def _chat_once(self, *, yield_deltas: bool):
         api_messages = normalize_messages_for_api(self.messages)
-        tools = all_tool_schemas(self.state.tool_groups, compact=self.compact_schemas) if self.state.tools_enabled else None
+        tools = (
+            all_tool_schemas(self.state.tool_groups, compact=self.compact_schemas)
+            if self.state.tools_enabled
+            else None
+        )
 
         if yield_deltas and hasattr(self.client, "chat_stream_assembled"):
             gen = self.client.chat_stream_assembled(
@@ -877,7 +1055,11 @@ class QueryEngine:
 
     def _chat_nonstream(self) -> dict | None:
         api_messages = normalize_messages_for_api(self.messages)
-        tools = all_tool_schemas(self.state.tool_groups, compact=self.compact_schemas) if self.state.tools_enabled else None
+        tools = (
+            all_tool_schemas(self.state.tool_groups, compact=self.compact_schemas)
+            if self.state.tools_enabled
+            else None
+        )
         try:
             with ui.Spinner("retrying (no stream)"):
                 return self.client.chat(
@@ -898,11 +1080,16 @@ class QueryEngine:
                 content = (m.get("content") or "")[:1500]
                 short.append({"role": m.get("role"), "content": content})
             req = [
-                {"role": "system", "content": "Summarize the following conversation as a tight bullet list. <=200 words."},
+                {
+                    "role": "system",
+                    "content": "Summarize the following conversation as a tight bullet list. <=200 words.",
+                },
                 {"role": "user", "content": json.dumps(short)},
             ]
             res = self.client.chat(
-                model=self.model, messages=req, tools=None,
+                model=self.model,
+                messages=req,
+                tools=None,
                 options={"temperature": 0.0},
             )
             return (res.get("content") or "").strip() or None
@@ -955,13 +1142,15 @@ class QueryEngine:
         self._recent_calls = self._recent_calls[-12:]
         if run >= LOOP_THRESHOLD:
             self._recent_calls = []
-            self.messages.append({
-                "role": "user",
-                "content": (
-                    f"You called {name} with the same arguments across {run} turns. "
-                    f"Stop repeating. Try a different approach or ask a clarifying question."
-                ),
-            })
+            self.messages.append(
+                {
+                    "role": "user",
+                    "content": (
+                        f"You called {name} with the same arguments across {run} turns. "
+                        f"Stop repeating. Try a different approach or ask a clarifying question."
+                    ),
+                }
+            )
             return True
         return False
 
@@ -984,9 +1173,13 @@ class QueryEngine:
     # SHOULD call these multiple times in a turn.
     _LOOP_EXEMPT = {
         "sleep",
-        "browser_tabs", "browser_status",
-        "task_status", "task_list", "task_wait",
-        "reminder_list", "note_list",
+        "browser_tabs",
+        "browser_status",
+        "task_status",
+        "task_list",
+        "task_wait",
+        "reminder_list",
+        "note_list",
     }
 
     def _result_loop_count(self, name: str, result: str) -> int:
@@ -1087,9 +1280,10 @@ class QueryEngine:
                 steer_key = (name, (result or "")[:240])
                 if seen >= LOOP_THRESHOLD * 2:
                     # Hard abort takes precedence — the soft steer didn't work.
-                    yield Message("warn", {
-                        "text": f"loop unbroken after {seen} identical results — ending turn"
-                    })
+                    yield Message(
+                        "warn",
+                        {"text": f"loop unbroken after {seen} identical results — ending turn"},
+                    )
                     self._abort_turn = True
                     # Abandoning the executor leaves the remaining calls of this
                     # batch unanswered; give each one a result so the message
@@ -1107,21 +1301,25 @@ class QueryEngine:
                     # repeated key per turn so we don't re-inject on every
                     # subsequent identical result.
                     self._steered_result_keys.add(steer_key)
-                    yield Message("warn", {
-                        "text": f"loop: {name} returned the same result {seen}× — steering hard"
-                    })
-                    self.messages.append({
-                        "role": "system",
-                        "content": (
-                            f"STOP. You have called {name} and received the SAME result {seen} "
-                            f"times. Do NOT call {name} again. Either act on what you have, "
-                            f"or give the user a short final answer."
-                        ),
-                    })
+                    yield Message(
+                        "warn",
+                        {"text": f"loop: {name} returned the same result {seen}× — steering hard"},
+                    )
+                    self.messages.append(
+                        {
+                            "role": "system",
+                            "content": (
+                                f"STOP. You have called {name} and received the SAME result {seen} "
+                                f"times. Do NOT call {name} again. Either act on what you have, "
+                                f"or give the user a short final answer."
+                            ),
+                        }
+                    )
 
 
 class _StreamGen:
     def __init__(self, gen):
         self.gen = gen
+
     def iter(self):
         return self.gen

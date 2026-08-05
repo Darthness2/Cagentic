@@ -3,11 +3,13 @@
 Each project is JSON at ~/.config/cagentic/projects/<id>.json with:
     {id, name, color, created_at, updated_at, chats: [session_id, ...]}
 """
+
 from __future__ import annotations
 
 import json
 import logging
 import os
+import re
 import stat
 import tempfile
 import threading
@@ -16,6 +18,7 @@ import uuid
 from pathlib import Path
 from typing import Any
 
+from . import storage
 from .config import config_dir
 
 logger = logging.getLogger(__name__)
@@ -32,6 +35,8 @@ def projects_dir() -> Path:
 
 
 def _path(project_id: str) -> Path:
+    if not isinstance(project_id, str) or not re.fullmatch(r"[A-Za-z0-9_-]{1,64}", project_id):
+        raise ValueError("invalid project id")
     return projects_dir() / f"{project_id}.json"
 
 
@@ -82,11 +87,19 @@ def save(proj: dict) -> Path:
             except OSError:
                 logger.warning("could not clean up temp file %s", tmp_name, exc_info=True)
             raise
+    storage.put("projects", proj["id"], proj, proj["updated_at"])
     return p
 
 
 def load(project_id: str) -> dict | None:
-    p = _path(project_id)
+    try:
+        p = _path(project_id)
+    except ValueError:
+        return None
+    storage.migrate_json_files("projects", projects_dir().glob("*.json"))
+    stored = storage.get("projects", project_id)
+    if isinstance(stored, dict):
+        return stored
     if not p.exists():
         return None
     try:
@@ -96,30 +109,35 @@ def load(project_id: str) -> dict | None:
 
 
 def delete(project_id: str) -> bool:
-    p = _path(project_id)
+    try:
+        p = _path(project_id)
+    except ValueError:
+        return False
+    deleted = storage.delete("projects", project_id)
     if p.exists():
         p.unlink()
         return True
-    return False
+    return deleted
 
 
 def list_all() -> list[dict]:
+    storage.migrate_json_files("projects", projects_dir().glob("*.json"))
     out = []
-    for p in projects_dir().glob("*.json"):
-        try:
-            data = json.loads(p.read_text(encoding="utf-8"))
-        except (json.JSONDecodeError, OSError):
+    for data in storage.list_values("projects"):
+        if not isinstance(data, dict):
             continue
-        out.append({
-            "id": data.get("id", p.stem),
-            "name": data.get("name", "Untitled Project"),
-            "color": data.get("color", "#f0a87a"),
-            "system_prompt": data.get("system_prompt", ""),
-            "context": data.get("context", ""),
-            "updated_at": data.get("updated_at", 0),
-            "chat_count": len(data.get("chats", [])),
-            "chats": data.get("chats", []),
-        })
+        out.append(
+            {
+                "id": data.get("id", ""),
+                "name": data.get("name", "Untitled Project"),
+                "color": data.get("color", "#f0a87a"),
+                "system_prompt": data.get("system_prompt", ""),
+                "context": data.get("context", ""),
+                "updated_at": data.get("updated_at", 0),
+                "chat_count": len(data.get("chats", [])),
+                "chats": data.get("chats", []),
+            }
+        )
     out.sort(key=lambda p: p["updated_at"], reverse=True)
     return out
 

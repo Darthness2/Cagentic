@@ -6,6 +6,7 @@ its own plan, tools, loop — and returns a single string answer to the
 parent. The parent's main conversation stays focused; the sub-agent
 acts as a black-box research/specialist call.
 """
+
 from __future__ import annotations
 
 import logging
@@ -40,6 +41,8 @@ def fork_subagent(
         workspace=parent.state.workspace,
         home=parent.state.home,
         github_token=parent.state.github_token,
+        default_repository=parent.state.default_repository,
+        workspace_boundary=parent.state.workspace_boundary,
         yolo=parent.state.yolo,
         insecure_ssl=parent.state.insecure_ssl,
         tools_enabled=parent.state.tools_enabled,

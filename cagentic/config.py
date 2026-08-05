@@ -3,6 +3,7 @@
 Stored at $XDG_CONFIG_HOME/cagentic/config.json (default ~/.config/cagentic/config.json).
 File is chmod 600 since it can hold API tokens (GitHub PAT, MCP secrets, etc.).
 """
+
 from __future__ import annotations
 
 import copy
@@ -34,10 +35,10 @@ def config_path() -> Path:
 _DEFAULTS: dict[str, Any] = {
     "model": None,
     "host": "http://localhost:11434",
-    "temperature": 0.4,          # personal-assistant chat reads better with a little warmth
+    "temperature": 0.4,  # personal-assistant chat reads better with a little warmth
     "yolo": False,
-    "user_name": None,           # how the assistant addresses you
-    "tool_groups": None,         # None = cagentic.tools.DEFAULT_GROUPS
+    "user_name": None,  # how the assistant addresses you
+    "tool_groups": None,  # None = cagentic.tools.DEFAULT_GROUPS
     "ollama": {
         "num_ctx": 8192,
         "keep_alive": "30m",
@@ -56,9 +57,18 @@ _DEFAULTS: dict[str, Any] = {
         },
     },
     "github": {"token": None},
-    "mcp": {"servers": {}},      # {name: {"command": [...], "env": {...}, "enabled": bool}}
-    "browser": {"enabled": True, "port": 8765},   # companion Chrome extension bridge
-    "gateway": {"port": 8700},   # /gateway web UI
+    "mcp": {"servers": {}},  # {name: {"command": [...], "env": {...}, "enabled": bool}}
+    "browser": {"enabled": True, "port": 8765},  # companion Chrome extension bridge
+    "gateway": {
+        "port": 8700,
+        "auto_port": True,  # try the next 20 ports when the preferred one is occupied
+        "workspace_roots": None,
+    },  # /gateway web UI
+    "proactive": {
+        "enabled": True,
+        "interval": 60,
+        "desktop_notifications": True,
+    },
 }
 
 

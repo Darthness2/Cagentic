@@ -12,12 +12,12 @@ converting them to plain text first.
 The old binary `.doc` format (pre-2007 Word) is not supported — it's an
 OLE compound file with no stdlib reader. Ask the user to "Save As .docx".
 """
+
 from __future__ import annotations
 
 import xml.etree.ElementTree as ET
 import zipfile
 from pathlib import Path
-
 
 # Extensions this module knows how to turn into text.
 SUPPORTED = {".pdf", ".docx"}
@@ -76,8 +76,7 @@ def _extract_docx(path: Path) -> str:
         zf = zipfile.ZipFile(path)
     except zipfile.BadZipFile as e:
         raise DocumentError(
-            f"'{path.name}' is not a valid .docx (not a ZIP archive — "
-            f"maybe it's an old .doc?): {e}"
+            f"'{path.name}' is not a valid .docx (not a ZIP archive — maybe it's an old .doc?): {e}"
         ) from e
     except OSError as e:
         raise DocumentError(f"could not open '{path.name}': {e}") from e
@@ -87,8 +86,7 @@ def _extract_docx(path: Path) -> str:
             xml = zf.read("word/document.xml")
         except KeyError as e:
             raise DocumentError(
-                f"'{path.name}' is missing word/document.xml — corrupt or "
-                f"not a Word document"
+                f"'{path.name}' is missing word/document.xml — corrupt or not a Word document"
             ) from e
 
     try:
@@ -109,17 +107,16 @@ def _extract_docx(path: Path) -> str:
         parts: list[str] = []
         for node in para.iter():
             tag = node.tag
-            if tag == f"{_W}t":                       # a run of text
+            if tag == f"{_W}t":  # a run of text
                 parts.append(node.text or "")
-            elif tag == f"{_W}tab":                   # tab stop
+            elif tag == f"{_W}tab":  # tab stop
                 parts.append("\t")
-            elif tag in (f"{_W}br", f"{_W}cr"):       # line / carriage break
+            elif tag in (f"{_W}br", f"{_W}cr"):  # line / carriage break
                 parts.append("\n")
         paragraphs.append("".join(parts))
         total += len(paragraphs[-1])
         if total > _EXTRACT_CHAR_CAP:
-            paragraphs.append("… [document truncated — it's large; ask for a "
-                              "specific section]")
+            paragraphs.append("… [document truncated — it's large; ask for a specific section]")
             break
 
     text = "\n".join(paragraphs).strip()
@@ -128,13 +125,13 @@ def _extract_docx(path: Path) -> str:
 
 # --------------------------------------------------------------- PDF --------
 
+
 def _extract_pdf(path: Path) -> str:
     try:
         from pypdf import PdfReader
     except ImportError:
         raise DocumentError(
-            "reading PDF files needs the 'pypdf' package. Install it with:\n"
-            "  pip install pypdf"
+            "reading PDF files needs the 'pypdf' package. Install it with:\n  pip install pypdf"
         ) from None
     except (KeyboardInterrupt, SystemExit):
         raise
@@ -153,9 +150,7 @@ def _extract_pdf(path: Path) -> str:
     except FileNotFoundError as e:
         raise DocumentError(f"PDF not found: {e}") from e
     except Exception as e:
-        raise DocumentError(
-            f"could not open '{path.name}': {type(e).__name__}: {e}"
-        ) from e
+        raise DocumentError(f"could not open '{path.name}': {type(e).__name__}: {e}") from e
 
     # Many PDFs are 'encrypted' only with an empty user password — try that
     # before giving up so ordinary protected-but-readable files still work.
@@ -169,8 +164,7 @@ def _extract_pdf(path: Path) -> str:
         pages = list(reader.pages)
     except Exception as e:
         raise DocumentError(
-            f"'{path.name}' looks password-protected or damaged "
-            f"({type(e).__name__}: {e})"
+            f"'{path.name}' looks password-protected or damaged ({type(e).__name__}: {e})"
         ) from e
 
     if not pages:
@@ -190,13 +184,17 @@ def _extract_pdf(path: Path) -> str:
         out.append(f"{header}\n{txt}" if txt else f"{header}  (no extractable text)")
         total += len(txt)
         if total > _EXTRACT_CHAR_CAP:
-            out.append(f"… [stopped after {i} pages — the PDF is large; ask "
-                       f"for a specific page or section]")
+            out.append(
+                f"… [stopped after {i} pages — the PDF is large; ask "
+                f"for a specific page or section]"
+            )
             break
 
     if not extracted_any:
         # A PDF that's all scanned images yields no text layer.
-        return ("(no extractable text — this PDF is likely scanned images. "
-                "It would need OCR, which Cagentic doesn't do.)")
+        return (
+            "(no extractable text — this PDF is likely scanned images. "
+            "It would need OCR, which Cagentic doesn't do.)"
+        )
 
     return "\n\n".join(out)

@@ -3,6 +3,7 @@
 Every tool receives a dict of arguments and returns a string result that gets
 fed back to the model as the tool's output.
 """
+
 from __future__ import annotations
 
 import logging
@@ -10,14 +11,21 @@ import os
 import re
 import shutil
 import subprocess
+import time
 from dataclasses import dataclass, field
+from functools import lru_cache
 from pathlib import Path
 from typing import Any, Callable
 
 from . import diff as _diff
 from . import documents as _documents
+from . import integrations as _integrations
+from . import inbox as _inbox
 from . import notes as _notes
+from . import personal_os as _personal_os
+from . import proactive as _proactive
 from . import reminders as _reminders
+from . import routines as _routines
 from . import ui
 
 logger = logging.getLogger(__name__)
@@ -63,8 +71,7 @@ def _contain(p: Path, root: Path) -> Path:
     target_real = p.resolve()
     if not _is_within(target_real, root_real):
         raise PathEscapeError(
-            f"path escapes workspace: {p} resolves to {target_real}, "
-            f"which is outside {root_real}"
+            f"path escapes workspace: {p} resolves to {target_real}, which is outside {root_real}"
         )
     return target_real
 
@@ -90,12 +97,15 @@ class ToolContext:
     root: Path
     yolo: bool = False
     github_token: str | None = None
+    default_repository: str | None = None
+    workspace_boundary: Path | None = None
     insecure_ssl: bool = False
     # Plumbing populated by the QueryEngine.
     state: object | None = None
     engine: object | None = None
     background: object | None = None
     tasks: object | None = None
+    teams: object | None = None
     read_cache: dict | None = None
     # A tool that produces an image (e.g. browser_screenshot) appends raw
     # base64 PNG data here; the engine attaches it to the tool result
@@ -119,6 +129,7 @@ class ToolContext:
 # Files: read, write, edit, replace_lines, list_dir, grep, glob, set_workspace
 # ============================================================================
 
+
 def t_read_file(args: dict, ctx: ToolContext) -> str:
     path = args["path"]
     start = int(args.get("start_line", 1))
@@ -141,9 +152,8 @@ def t_read_file(args: dict, ctx: ToolContext) -> str:
     range_key = f"{abs_path}::{max(1, start)}-{'' if end is None else int(end)}"
     cache = ctx.read_cache if isinstance(ctx.read_cache, dict) else None
     state = getattr(ctx, "state", None)
-    already_read = (
-        (cache is not None and range_key in cache)
-        or (state is not None and range_key in getattr(state, "files_read", set()))
+    already_read = (cache is not None and abs_path in cache) or (
+        state is not None and abs_path in getattr(state, "files_read", set())
     )
     if already_read:
         return (
@@ -193,14 +203,17 @@ def _record_edit(ctx: ToolContext, path: Path, before: str, after: str, op: str)
     state = getattr(ctx, "state", None)
     if state is not None:
         import time as _t
+
         hist: list = getattr(state, "edit_history", None) or []
-        hist.append({
-            "ts": _t.time(),
-            "path": str(path.resolve()),
-            "before": before,
-            "after": after,
-            "op": op,
-        })
+        hist.append(
+            {
+                "ts": _t.time(),
+                "path": str(path.resolve()),
+                "before": before,
+                "after": after,
+                "op": op,
+            }
+        )
         del hist[:-MAX_EDIT_HISTORY]
         state.update(edit_history=hist)
     # Editing the file invalidates EVERY cached range of it, not just the one
@@ -298,19 +311,21 @@ def _fuzzy_span(text: str, old: str):
         return None
     norm_old = [ln.rstrip() for ln in old_lines]
     hits = [
-        i for i in range(len(text_lines) - n + 1)
-        if [ln.rstrip() for ln in text_lines[i:i + n]] == norm_old
+        i
+        for i in range(len(text_lines) - n + 1)
+        if [ln.rstrip() for ln in text_lines[i : i + n]] == norm_old
     ]
     if len(hits) != 1:
         return None
     start = hits[0]
-    region = text_lines[start:start + n]
+    region = text_lines[start : start + n]
     exact = region == old_lines
     return (start, start + n, exact)
 
 
 def _closest_region(text: str, old: str) -> str:
     import difflib
+
     first = ""
     for ln in old.split("\n"):
         if ln.strip():
@@ -548,11 +563,10 @@ def t_grep(args: dict, ctx: ToolContext) -> str:
     home = Path.home().resolve()
     target = p.resolve()
     if target == home or target == Path(home.anchor):
-        return (
-            f"ERROR: grep target {p} is too broad. Specify a narrower path."
-        )
+        return f"ERROR: grep target {p} is too broad. Specify a narrower path."
 
     import shutil as _sh
+
     rg = _sh.which("rg")
     if rg and p.exists():
         cmd = [rg, "-n", "--no-heading", "--color=never", "-m", "200"]
@@ -604,6 +618,7 @@ def t_grep(args: dict, ctx: ToolContext) -> str:
 
 def t_glob(args: dict, ctx: ToolContext) -> str:
     import fnmatch
+
     pattern = args["pattern"]
     try:
         base = _resolve_contained(args.get("path", "."), ctx.root)
@@ -632,6 +647,11 @@ def t_set_workspace(args: dict, ctx: ToolContext) -> str:
     path = args["path"]
     create = bool(args.get("create", False))
     p = _resolve(path, ctx.root)
+    if ctx.workspace_boundary is not None:
+        try:
+            p = _contain(p, ctx.workspace_boundary)
+        except PathEscapeError as e:
+            return f"ERROR: pinned project boundary: {e}"
     if not p.exists():
         if not create:
             return f"ERROR: directory does not exist: {p}. Pass create=true to mkdir it."
@@ -646,13 +666,16 @@ def t_set_workspace(args: dict, ctx: ToolContext) -> str:
 # Notes — persistent knowledge base
 # ============================================================================
 
+
 def t_note_write(args: dict, ctx: ToolContext) -> str:
     name = args.get("name")
     body = args.get("body") or args.get("content")
     append = bool(args.get("append", False))
     if not name or body is None:
         return "ERROR: note_write requires 'name' and 'body'"
-    if not ctx.confirm("save note", f"{name} ({len(body)} chars, {'append' if append else 'overwrite'})"):
+    if not ctx.confirm(
+        "save note", f"{name} ({len(body)} chars, {'append' if append else 'overwrite'})"
+    ):
         return "ERROR: user denied"
     note = _notes.write(name, body, append=append)
     return f"OK: saved note '{note.name}' ({len(note.body)} chars) at {note.path}"
@@ -702,6 +725,7 @@ def t_note_delete(args: dict, ctx: ToolContext) -> str:
 def t_chat_search(args: dict, ctx: ToolContext) -> str:
     """Search the user's previous conversations for a phrase."""
     from . import sessions as _sessions
+
     query = (args.get("query") or args.get("q") or "").strip()
     if not query:
         return "ERROR: chat_search requires 'query'"
@@ -720,7 +744,7 @@ def t_chat_search(args: dict, ctx: ToolContext) -> str:
             if idx < 0:
                 continue
             start = max(0, idx - 80)
-            snippet = " ".join(content[start:idx + len(query) + 160].split())
+            snippet = " ".join(content[start : idx + len(query) + 160].split())
             hits.append(f"  [{m['role']}] …{snippet}…")
             if len(hits) >= 3:
                 break
@@ -740,6 +764,7 @@ def t_chat_search(args: dict, ctx: ToolContext) -> str:
 def t_chat_get(args: dict, ctx: ToolContext) -> str:
     """Read one previous conversation in full (by id from chat_search)."""
     from . import sessions as _sessions
+
     sid = (args.get("id") or "").strip()
     if not sid:
         return "ERROR: chat_get requires 'id' (from chat_search results)"
@@ -757,35 +782,6 @@ def t_chat_get(args: dict, ctx: ToolContext) -> str:
 # ============================================================================
 # Reminders — persistent to-do across sessions
 # ============================================================================
-
-def _no_reminder(rid: str) -> str:
-    """Message for an id that matched nothing — or matched too much.
-
-    A short prefix can be ambiguous (every id starts with "r"), and reminders
-    refuses to act on an ambiguous one, so say that rather than claiming the
-    reminder doesn't exist.
-    """
-    matches = [r for r in _reminders.list_all(include_done=True) if r.id.startswith(rid)]
-    if len(matches) > 1:
-        ids = ", ".join(r.id for r in matches[:5])
-        return f"ERROR: '{rid}' matches {len(matches)} reminders ({ids}) — use the full id"
-    return f"ERROR: no reminder {rid}"
-
-
-def _as_tag_list(raw) -> list[str]:
-    """Coerce a 'tags' argument into a list of strings.
-
-    Models routinely send a bare string ("work") or a comma-separated one
-    ("work, home") where the schema asks for an array. list("work") would
-    explode that into ['w','o','r','k'] and store four one-letter tags.
-    """
-    if not raw:
-        return []
-    if isinstance(raw, str):
-        return [t.strip() for t in raw.split(",") if t.strip()]
-    if isinstance(raw, (list, tuple, set)):
-        return [str(t).strip() for t in raw if str(t).strip()]
-    return [str(raw)]
 
 
 def t_reminder_add(args: dict, ctx: ToolContext) -> str:
@@ -853,8 +849,355 @@ def t_reminder_update(args: dict, ctx: ToolContext) -> str:
 
 
 # ============================================================================
+# Personal OS — goals, calendar, and proactive planning context
+# ============================================================================
+
+
+def t_goal_create(args: dict, ctx: ToolContext) -> str:
+    if not args.get("title"):
+        return "ERROR: goal_create requires 'title'"
+    goal = _personal_os.create_goal(
+        args["title"],
+        description=args.get("description", ""),
+        target_at=args.get("target"),
+        category=args.get("category", "personal"),
+        progress=args.get("progress", 0),
+    )
+    return f"OK: {goal['id']} — {goal['title']} ({goal['progress']}%)"
+
+
+def t_goal_list(args: dict, ctx: ToolContext) -> str:
+    goals = _personal_os.list_goals(include_completed=bool(args.get("include_completed", True)))
+    if not goals:
+        return "(no goals)"
+    return "\n".join(
+        f"{g['id']}  [{g.get('status', 'active')}]  {g['title']}  {g.get('progress', 0)}%"
+        for g in goals[:80]
+    )
+
+
+def t_goal_update(args: dict, ctx: ToolContext) -> str:
+    goal_id = str(args.get("id", ""))
+    if not goal_id:
+        return "ERROR: goal_update requires 'id'"
+    changes = {
+        key: args[key]
+        for key in ("title", "description", "category", "progress", "status")
+        if key in args
+    }
+    if "target" in args:
+        changes["target_at"] = args["target"]
+    goal = _personal_os.update_goal(goal_id, **changes)
+    return (
+        f"OK: {goal['id']} — {goal['title']} ({goal.get('progress', 0)}%)"
+        if goal
+        else f"ERROR: no goal {goal_id}"
+    )
+
+
+def t_goal_delete(args: dict, ctx: ToolContext) -> str:
+    goal_id = str(args.get("id", ""))
+    if not goal_id:
+        return "ERROR: goal_delete requires 'id'"
+    return "OK: deleted" if _personal_os.delete_goal(goal_id) else f"ERROR: no goal {goal_id}"
+
+
+def t_calendar_event_add(args: dict, ctx: ToolContext) -> str:
+    if not args.get("title") or not args.get("start"):
+        return "ERROR: calendar_event_add requires 'title' and 'start'"
+    event = _personal_os.create_event(
+        args["title"],
+        start_at=args["start"],
+        end_at=args.get("end"),
+        description=args.get("description", ""),
+        location=args.get("location", ""),
+        all_day=bool(args.get("all_day", False)),
+        source=args.get("source", "cagentic"),
+        external_id=args.get("external_id", ""),
+    )
+    return f"OK: {event['id']} — {event['title']}"
+
+
+def t_calendar_event_list(args: dict, ctx: ToolContext) -> str:
+    start = args.get("start", time.time() - 86400)
+    end = args.get("end", time.time() + 30 * 86400)
+    events = _personal_os.list_events(start_at=start, end_at=end)
+    if not events:
+        return "(no calendar events)"
+    return "\n".join(
+        f"{e['id']}  {time.strftime('%Y-%m-%d %H:%M', time.localtime(e['start_at']))}  "
+        f"{e['title']}" + (f" @ {e['location']}" if e.get("location") else "")
+        for e in events[:100]
+    )
+
+
+def t_calendar_event_update(args: dict, ctx: ToolContext) -> str:
+    event_id = str(args.get("id", ""))
+    if not event_id:
+        return "ERROR: calendar_event_update requires 'id'"
+    changes = {
+        key: args[key]
+        for key in ("title", "description", "location", "all_day", "status")
+        if key in args
+    }
+    if "start" in args:
+        changes["start_at"] = args["start"]
+    if "end" in args:
+        changes["end_at"] = args["end"]
+    event = _personal_os.update_event(event_id, **changes)
+    return f"OK: {event['id']} — {event['title']}" if event else f"ERROR: no event {event_id}"
+
+
+def t_calendar_event_delete(args: dict, ctx: ToolContext) -> str:
+    event_id = str(args.get("id", ""))
+    if not event_id:
+        return "ERROR: calendar_event_delete requires 'id'"
+    return (
+        "OK: deleted"
+        if _personal_os.delete_event(event_id)
+        else f"ERROR: no calendar event {event_id}"
+    )
+
+
+def t_personal_briefing(args: dict, ctx: ToolContext) -> str:
+    data = _personal_os.briefing()
+    lines = [
+        f"{data['greeting']} — {data['date_label']}",
+        f"Today: {data['stats']['events_today']} events, "
+        f"{data['stats']['open_deadlines']} open deadlines, "
+        f"{data['stats']['active_goals']} active goals",
+    ]
+    lines.extend(f"- {item['title']}: {item['body']}" for item in data["insights"])
+    if data["agenda"]:
+        lines.append("Upcoming:")
+        lines.extend(
+            f"- {time.strftime('%a %H:%M', time.localtime(item['start_at']))} "
+            f"{item['title']}"
+            for item in data["agenda"][:12]
+        )
+    return "\n".join(lines)
+
+
+def t_calendar_connection_create(args: dict, ctx: ToolContext) -> str:
+    if not args.get("name") or not args.get("url"):
+        return "ERROR: calendar_connection_create requires 'name' and 'url'"
+    connection = _integrations.create_connection(
+        args["name"],
+        args.get("kind", "ical"),
+        args["url"],
+        username=args.get("username", ""),
+        password=args.get("password", ""),
+        direction=args.get("direction"),
+        auto_sync=bool(args.get("auto_sync", True)),
+        sync_interval=args.get("sync_interval", 900),
+    )
+    return f"OK: {connection['id']} — {connection['name']} ({connection['kind']})"
+
+
+def t_calendar_connection_list(args: dict, ctx: ToolContext) -> str:
+    connections = _integrations.list_connections()
+    if not connections:
+        return "(no calendar connections)"
+    return "\n".join(
+        f"{item['id']}  [{item['status']}]  {item['name']}  {item['kind']}  {item['detail']}"
+        for item in connections
+    )
+
+
+def t_calendar_connection_sync(args: dict, ctx: ToolContext) -> str:
+    connection_id = str(args.get("id", ""))
+    if not connection_id:
+        return "ERROR: calendar_connection_sync requires 'id'"
+    result = _integrations.sync_connection(connection_id)
+    if not result.get("ok"):
+        return f"ERROR: {result.get('error', 'sync failed')}"
+    return (
+        f"OK: imported {result['imported']}, updated {result['updated']}, "
+        f"removed {result['removed']}, pushed {result['pushed']}"
+    )
+
+
+def t_calendar_connection_delete(args: dict, ctx: ToolContext) -> str:
+    connection_id = str(args.get("id", ""))
+    if not connection_id:
+        return "ERROR: calendar_connection_delete requires 'id'"
+    deleted = _integrations.delete_connection(
+        connection_id,
+        remove_imported_events=bool(args.get("remove_imported_events", False)),
+    )
+    return "OK: deleted" if deleted else f"ERROR: no connection {connection_id}"
+
+
+def t_notification_list(args: dict, ctx: ToolContext) -> str:
+    notifications = _proactive.list_notifications(
+        include_dismissed=bool(args.get("include_dismissed", False))
+    )
+    if not notifications:
+        return "(no proactive notifications)"
+    return "\n".join(
+        f"{item['id']}  [{'new' if not item.get('read') else 'read'}]  "
+        f"{item['title']} — {item['body']}"
+        for item in notifications
+    )
+
+
+def t_notification_update(args: dict, ctx: ToolContext) -> str:
+    notification_id = str(args.get("id", ""))
+    action = str(args.get("action", "read"))
+    if action == "read_all":
+        return f"OK: marked {_proactive.mark_all_read()} notifications read"
+    if not notification_id:
+        return "ERROR: notification_update requires 'id'"
+    if action == "dismiss":
+        return "OK: dismissed" if _proactive.dismiss(notification_id) else "ERROR: not found"
+    item = _proactive.mark_read(notification_id, read=bool(args.get("read", True)))
+    return "OK: updated" if item else "ERROR: not found"
+
+
+def t_inbox_capture(args: dict, ctx: ToolContext) -> str:
+    if not args.get("title"):
+        return "ERROR: inbox_capture requires 'title'"
+    item = _inbox.create_item(
+        args["title"],
+        summary=args.get("summary", ""),
+        kind=args.get("kind", "capture"),
+        priority=args.get("priority", 0),
+        tags=args.get("tags") or [],
+    )
+    return f"OK: {item['id']} — {item['title']}"
+
+
+def t_inbox_list(args: dict, ctx: ToolContext) -> str:
+    items = _inbox.list_items(
+        status=args.get("status"),
+        include_archived=bool(args.get("include_archived", False)),
+        limit=args.get("limit", 100),
+    )
+    if not items:
+        return "(inbox is empty)"
+    return "\n".join(
+        f"{item['id']}  [{item.get('status', 'new')}/{item.get('kind', 'item')}]  "
+        f"{item['title']}" + (f" — {item['sender']}" if item.get("sender") else "")
+        for item in items
+    )
+
+
+def t_inbox_update(args: dict, ctx: ToolContext) -> str:
+    item_id = str(args.get("id", ""))
+    if not item_id:
+        return "ERROR: inbox_update requires 'id'"
+    changes = {
+        key: args[key]
+        for key in ("title", "summary", "status", "priority", "tags", "snoozed_until")
+        if key in args
+    }
+    item = _inbox.update_item(item_id, **changes)
+    return f"OK: {item['id']} — {item['title']}" if item else f"ERROR: no inbox item {item_id}"
+
+
+def t_inbox_delete(args: dict, ctx: ToolContext) -> str:
+    item_id = str(args.get("id", ""))
+    if not item_id:
+        return "ERROR: inbox_delete requires 'id'"
+    return "OK: deleted" if _inbox.delete_item(item_id) else f"ERROR: no inbox item {item_id}"
+
+
+def t_email_connection_create(args: dict, ctx: ToolContext) -> str:
+    if not args.get("name") or not args.get("host") or not args.get("username"):
+        return "ERROR: email_connection_create requires name, host, and username"
+    connection = _inbox.create_email_connection(
+        args["name"],
+        args["host"],
+        args["username"],
+        args.get("password", ""),
+        port=args.get("port", 993),
+        use_ssl=bool(args.get("use_ssl", True)),
+        folder=args.get("folder", "INBOX"),
+        auto_sync=bool(args.get("auto_sync", True)),
+        sync_interval=args.get("sync_interval", 900),
+    )
+    return f"OK: {connection['id']} — {connection['name']}"
+
+
+def t_email_connection_list(args: dict, ctx: ToolContext) -> str:
+    connections = _inbox.list_email_connections()
+    if not connections:
+        return "(no email connections)"
+    return "\n".join(
+        f"{item['id']}  [{item['status']}]  {item['name']}  {item['detail']}"
+        for item in connections
+    )
+
+
+def t_email_connection_sync(args: dict, ctx: ToolContext) -> str:
+    connection_id = str(args.get("id", ""))
+    if not connection_id:
+        return "ERROR: email_connection_sync requires 'id'"
+    result = _inbox.sync_email_connection(connection_id)
+    if not result.get("ok"):
+        return f"ERROR: {result.get('error', 'sync failed')}"
+    return f"OK: imported {result['imported']}, updated {result['updated']}"
+
+
+def t_email_connection_delete(args: dict, ctx: ToolContext) -> str:
+    connection_id = str(args.get("id", ""))
+    if not connection_id:
+        return "ERROR: email_connection_delete requires 'id'"
+    deleted = _inbox.delete_email_connection(
+        connection_id, remove_items=bool(args.get("remove_items", False))
+    )
+    return "OK: deleted" if deleted else f"ERROR: no email connection {connection_id}"
+
+
+def t_routine_create(args: dict, ctx: ToolContext) -> str:
+    if not args.get("name"):
+        return "ERROR: routine_create requires 'name'"
+    routine = _routines.create_routine(
+        args["name"],
+        kind=args.get("kind", "daily_plan"),
+        schedule_time=args.get("schedule_time", "08:00"),
+        days=args.get("days"),
+        prompt=args.get("prompt", ""),
+        enabled=bool(args.get("enabled", True)),
+    )
+    return f"OK: {routine['id']} — {routine['name']} at {routine['schedule_time']}"
+
+
+def t_routine_list(args: dict, ctx: ToolContext) -> str:
+    items = _routines.list_routines(include_disabled=bool(args.get("include_disabled", True)))
+    if not items:
+        return "(no proactive routines)"
+    return "\n".join(
+        f"{item['id']}  [{'on' if item.get('enabled') else 'off'}]  "
+        f"{item['schedule_time']}  {item['name']} ({item['kind']})"
+        for item in items
+    )
+
+
+def t_routine_update(args: dict, ctx: ToolContext) -> str:
+    routine_id = str(args.get("id", ""))
+    if not routine_id:
+        return "ERROR: routine_update requires 'id'"
+    changes = {
+        key: args[key]
+        for key in ("name", "kind", "schedule_time", "days", "prompt", "enabled")
+        if key in args
+    }
+    routine = _routines.update_routine(routine_id, **changes)
+    return f"OK: {routine['id']} — {routine['name']}" if routine else f"ERROR: no routine {routine_id}"
+
+
+def t_routine_delete(args: dict, ctx: ToolContext) -> str:
+    routine_id = str(args.get("id", ""))
+    if not routine_id:
+        return "ERROR: routine_delete requires 'id'"
+    return "OK: deleted" if _routines.delete_routine(routine_id) else f"ERROR: no routine {routine_id}"
+
+
+# ============================================================================
 # MCP — Model Context Protocol bridge
 # ============================================================================
+
 
 def _mcp_manager(ctx: ToolContext):
     """Lazy-init the MCPManager on the engine state."""
@@ -863,6 +1206,7 @@ def _mcp_manager(ctx: ToolContext):
         return None
     if getattr(state, "mcp", None) is None:
         from .mcp_client import MCPManager
+
         engine = getattr(ctx, "engine", None)
         cfg = engine.config if engine is not None else {}
         state.mcp = MCPManager(cfg or {})
@@ -875,8 +1219,10 @@ def t_mcp_list_servers(args: dict, ctx: ToolContext) -> str:
         return "ERROR: MCP manager unavailable"
     names = mgr.names()
     if not names:
-        return ("(no MCP servers configured — add one under mcp.servers in "
-                "~/.config/cagentic/config.json, e.g. notion / gdrive / slack)")
+        return (
+            "(no MCP servers configured — add one under mcp.servers in "
+            "~/.config/cagentic/config.json, e.g. notion / gdrive / slack)"
+        )
     return "\n".join(f"  - {n}" for n in names)
 
 
@@ -914,6 +1260,7 @@ def t_mcp_call(args: dict, ctx: ToolContext) -> str:
         return "ERROR: user denied"
     try:
         from .mcp_client import format_tool_result
+
         result = mgr.call_tool(server, name, arguments)
     except Exception as e:
         return f"ERROR: {e}"
@@ -966,9 +1313,30 @@ def t_mcp_read_resource(args: dict, ctx: ToolContext) -> str:
     return _truncate("\n".join(parts) if parts else "(empty resource)")
 
 
+def t_mcp_restart(args: dict, ctx: ToolContext) -> str:
+    """Stop and re-spawn one configured MCP server. Handy after editing its
+    environment or upgrading the server binary."""
+    mgr = _mcp_manager(ctx)
+    if mgr is None:
+        return "ERROR: MCP manager unavailable"
+    name = args.get("name") or args.get("server")
+    if not name:
+        return "ERROR: missing argument 'name'"
+    if not ctx.confirm("restart MCP server", str(name)):
+        return "ERROR: user denied"
+    try:
+        srv = mgr.get(str(name), start=False)
+        srv.stop()
+        srv.start()
+    except Exception as e:
+        return f"ERROR: {e}"
+    return f"OK: restarted MCP server '{name}'"
+
+
 # ============================================================================
 # Browser — control Chrome through the companion extension
 # ============================================================================
+
 
 def _browser(ctx: ToolContext):
     """Get (lazily creating + starting) the BrowserBridge on the state."""
@@ -977,6 +1345,7 @@ def _browser(ctx: ToolContext):
         return None
     if getattr(state, "browser", None) is None:
         from .browser import BrowserBridge
+
         engine = getattr(ctx, "engine", None)
         cfg = (engine.config if engine is not None else {}) or {}
         port = int((cfg.get("browser") or {}).get("port", 8765))
@@ -1032,9 +1401,7 @@ def t_browser_read(args: dict, ctx: ToolContext) -> str:
     if not r.get("ok"):
         return f"ERROR: {r.get('error')}"
     res = r.get("result") or {}
-    return _truncate(
-        f"{res.get('title', '')}\n{res.get('url', '')}\n\n{res.get('text', '')}"
-    )
+    return _truncate(f"{res.get('title', '')}\n{res.get('url', '')}\n\n{res.get('text', '')}")
 
 
 def t_browser_open(args: dict, ctx: ToolContext) -> str:
@@ -1156,9 +1523,15 @@ def t_browser_scroll(args: dict, ctx: ToolContext) -> str:
     target = selector or (f"y={y}" if y is not None else (to or "bottom"))
     if not ctx.confirm("scroll the page", target):
         return "ERROR: user denied"
-    r = b.send("scroll", {
-        "to": to, "y": y, "selector": selector, "tab_id": args.get("tab_id"),
-    })
+    r = b.send(
+        "scroll",
+        {
+            "to": to,
+            "y": y,
+            "selector": selector,
+            "tab_id": args.get("tab_id"),
+        },
+    )
     if not r.get("ok"):
         return f"ERROR: {r.get('error')}"
     res = r.get("result") or {}
@@ -1192,6 +1565,7 @@ def t_browser_screenshot(args: dict, ctx: ToolContext) -> str:
         import base64 as _b64
         import time as _t
         from pathlib import Path
+
         sdir = Path.home() / ".config" / "cagentic" / "screenshots"
         sdir.mkdir(parents=True, exist_ok=True)
         path = sdir / f"shot-{int(_t.time())}.png"
@@ -1199,9 +1573,11 @@ def t_browser_screenshot(args: dict, ctx: ToolContext) -> str:
         saved = f"  ·  saved to {path}"
     except Exception:
         logger.warning("browser_screenshot: failed saving screenshot to disk", exc_info=True)
-    return (f"OK: captured the viewport ({w}×{h}). The image is attached for "
-            f"vision models — use browser_click_at with x,y in this coordinate "
-            f"space (origin top-left).{saved}")
+    return (
+        f"OK: captured the viewport ({w}×{h}). The image is attached for "
+        f"vision models — use browser_click_at with x,y in this coordinate "
+        f"space (origin top-left).{saved}"
+    )
 
 
 def t_browser_links(args: dict, ctx: ToolContext) -> str:
@@ -1218,7 +1594,8 @@ def t_browser_links(args: dict, ctx: ToolContext) -> str:
     contains = (args.get("contains") or "").lower().strip()
     if contains:
         links = [
-            ln for ln in links
+            ln
+            for ln in links
             if contains in (ln.get("text", "").lower())
             or contains in (ln.get("aria", "").lower())
             or contains in (ln.get("href", "").lower())
@@ -1263,6 +1640,7 @@ def t_browser_download(args: dict, ctx: ToolContext) -> str:
         )
 
     import base64 as _b64
+
     try:
         raw = _b64.b64decode(data_b64)
     except Exception as e:
@@ -1285,20 +1663,31 @@ def t_browser_download(args: dict, ctx: ToolContext) -> str:
     else:
         import re as _re
         import time as _t
+
         ddir = Path.home() / ".config" / "cagentic" / "downloads"
         ddir.mkdir(parents=True, exist_ok=True)
         ext = ""
         ct = (res.get("contentType") or "").lower()
-        if "pdf" in ct: ext = ".pdf"
-        elif "html" in ct: ext = ".html"
-        elif "json" in ct: ext = ".json"
-        elif "text/plain" in ct: ext = ".txt"
-        elif "csv" in ct: ext = ".csv"
-        elif "presentation" in ct or "powerpoint" in ct: ext = ".pptx"
-        elif "wordprocessing" in ct or "msword" in ct: ext = ".docx"
-        elif "png" in ct: ext = ".png"
-        elif "jpeg" in ct or "jpg" in ct: ext = ".jpg"
-        elif "zip" in ct: ext = ".zip"
+        if "pdf" in ct:
+            ext = ".pdf"
+        elif "html" in ct:
+            ext = ".html"
+        elif "json" in ct:
+            ext = ".json"
+        elif "text/plain" in ct:
+            ext = ".txt"
+        elif "csv" in ct:
+            ext = ".csv"
+        elif "presentation" in ct or "powerpoint" in ct:
+            ext = ".pptx"
+        elif "wordprocessing" in ct or "msword" in ct:
+            ext = ".docx"
+        elif "png" in ct:
+            ext = ".png"
+        elif "jpeg" in ct or "jpg" in ct:
+            ext = ".jpg"
+        elif "zip" in ct:
+            ext = ".zip"
         # Try to lift a name out of the URL.
         slug = _re.search(r"[?&]title=([^&]+)", url)
         name = slug.group(1) if slug else f"download-{int(_t.time())}"
@@ -1307,8 +1696,7 @@ def t_browser_download(args: dict, ctx: ToolContext) -> str:
 
     p.write_bytes(raw)
     sz = len(raw)
-    return (f"OK: saved {sz:,} bytes to {p}  "
-            f"(content-type: {res.get('contentType', 'unknown')})")
+    return f"OK: saved {sz:,} bytes to {p}  (content-type: {res.get('contentType', 'unknown')})"
 
 
 def t_browser_click_at(args: dict, ctx: ToolContext) -> str:
@@ -1318,13 +1706,20 @@ def t_browser_click_at(args: dict, ctx: ToolContext) -> str:
     x = args.get("x")
     y = args.get("y")
     if x is None or y is None:
-        return ("ERROR: browser_click_at needs 'x' and 'y' — call "
-                "browser_screenshot first to see where things are")
+        return (
+            "ERROR: browser_click_at needs 'x' and 'y' — call "
+            "browser_screenshot first to see where things are"
+        )
     if not ctx.confirm("click at coordinates", f"({x}, {y})"):
         return "ERROR: user denied"
-    r = b.send("click_at", {
-        "x": int(x), "y": int(y), "tab_id": args.get("tab_id"),
-    })
+    r = b.send(
+        "click_at",
+        {
+            "x": int(x),
+            "y": int(y),
+            "tab_id": args.get("tab_id"),
+        },
+    )
     if not r.get("ok"):
         return f"ERROR: {r.get('error')}"
     res = r.get("result") or {}
@@ -1337,6 +1732,7 @@ def t_browser_click_at(args: dict, ctx: ToolContext) -> str:
 # Web — fetch + search
 # ============================================================================
 
+
 def _ip_is_blocked(ip: str) -> bool:
     """True if `ip` is loopback/link-local/private/reserved/multicast.
 
@@ -1345,6 +1741,7 @@ def _ip_is_blocked(ip: str) -> bool:
     used to reach internal services.
     """
     import ipaddress
+
     try:
         addr = ipaddress.ip_address(ip)
     except ValueError:
@@ -1370,6 +1767,7 @@ def _host_is_blocked(host: str) -> tuple[bool, str]:
     resolved address is unsafe (DNS rebinding / multi-record defence).
     """
     import socket
+
     if not host:
         return True, "missing host"
     try:
@@ -1385,8 +1783,9 @@ def _host_is_blocked(host: str) -> tuple[bool, str]:
 
 
 def t_web_fetch(args: dict, ctx: ToolContext) -> str:
+    from urllib.parse import urljoin, urlparse
+
     import requests
-    from urllib.parse import urlparse, urljoin
 
     url = args["url"]
     if not url.startswith(("http://", "https://")):
@@ -1409,8 +1808,12 @@ def t_web_fetch(args: dict, ctx: ToolContext) -> str:
             return f"ERROR: refusing to fetch internal/blocked address ({detail})"
         try:
             r = requests.get(
-                current, timeout=timeout, headers=headers,
-                verify=not ctx.insecure_ssl, stream=True, allow_redirects=False,
+                current,
+                timeout=timeout,
+                headers=headers,
+                verify=not ctx.insecure_ssl,
+                stream=True,
+                allow_redirects=False,
             )
         except requests.RequestException as e:
             logger.warning("web_fetch: request to %r failed", current, exc_info=True)
@@ -1494,13 +1897,16 @@ def _strip_html(html: str) -> str:
 def t_web_search(args: dict, ctx: ToolContext) -> str:
     """DuckDuckGo HTML-frontend scrape (no API key needed)."""
     import requests
+
     q = args["query"]
     n = int(args.get("limit", 10))
     try:
         r = requests.get(
-            "https://duckduckgo.com/html/", params={"q": q},
+            "https://duckduckgo.com/html/",
+            params={"q": q},
             headers={"User-Agent": "Mozilla/5.0 cagentic/0.1"},
-            timeout=15, verify=not ctx.insecure_ssl,
+            timeout=15,
+            verify=not ctx.insecure_ssl,
         )
     except requests.RequestException as e:
         return f"ERROR: search failed: {e}"
@@ -1511,7 +1917,9 @@ def t_web_search(args: dict, ctx: ToolContext) -> str:
     html = r.text
     if len(html) > _HTML_SCAN_CAP:
         html = html[:_HTML_SCAN_CAP]
-    rx = re.compile(r'<a[^>]*class="[^"]*result__a[^"]*"[^>]*href="([^"]+)"[^>]*>(.*?)</a>', re.DOTALL)
+    rx = re.compile(
+        r'<a[^>]*class="[^"]*result__a[^"]*"[^>]*href="([^"]+)"[^>]*>(.*?)</a>', re.DOTALL
+    )
     items = rx.findall(html)
     out: list[str] = []
     for href, title in items[:n]:
@@ -1526,12 +1934,12 @@ def t_web_search(args: dict, ctx: ToolContext) -> str:
 
 _ERR_LOC_PATTERNS = [
     re.compile(r'File "([^"]+)", line (\d+)'),
-    re.compile(r'-->\s+([^\s:]+):(\d+):\d+'),
-    re.compile(r'\(([^()\s]+):(\d+):\d+\)'),
-    re.compile(r'([\w./\\+-]+\.\w+):(\d+):\d+'),
-    re.compile(r'([\w./\\+-]+\.\w+):(\d+)\b'),
+    re.compile(r"-->\s+([^\s:]+):(\d+):\d+"),
+    re.compile(r"\(([^()\s]+):(\d+):\d+\)"),
+    re.compile(r"([\w./\\+-]+\.\w+):(\d+):\d+"),
+    re.compile(r"([\w./\\+-]+\.\w+):(\d+)\b"),
 ]
-_ERR_MSG_RX = re.compile(r'^\s*([A-Z]\w*(?:Error|Exception|Warning|Fault)): ?(.*)$', re.M)
+_ERR_MSG_RX = re.compile(r"^\s*([A-Z]\w*(?:Error|Exception|Warning|Fault)): ?(.*)$", re.M)
 
 
 def _analyze_failure(stdout: str, stderr: str) -> str:
@@ -1579,8 +1987,12 @@ def t_run_bash(args: dict, ctx: ToolContext) -> str:
     try:
         with ui.Spinner(f"running: {cmd[:40] + ('…' if len(cmd) > 40 else '')}"):
             proc = subprocess.run(
-                run_cmd, shell=use_shell, cwd=str(ctx.root),
-                capture_output=True, text=True, timeout=timeout,
+                run_cmd,
+                shell=use_shell,
+                cwd=str(ctx.root),
+                capture_output=True,
+                text=True,
+                timeout=timeout,
             )
     except subprocess.TimeoutExpired:
         return f"ERROR: timed out after {timeout}s"
@@ -1613,6 +2025,7 @@ def t_bash_async(args: dict, ctx: ToolContext) -> str:
 # Tasks (light, kept for background-job tracking)
 # ============================================================================
 
+
 def _tasks(ctx: ToolContext):
     return getattr(ctx, "tasks", None)
 
@@ -1625,6 +2038,7 @@ def t_task_get(args: dict, ctx: ToolContext) -> str:
     if not task:
         return f"ERROR: no task with id {args['id']}"
     import json as _json
+
     return _json.dumps(task.to_dict(), indent=2)
 
 
@@ -1681,6 +2095,7 @@ def t_task_output(args: dict, ctx: ToolContext) -> str:
 # Interaction, planning, todo, config, sleep
 # ============================================================================
 
+
 def t_ask_user_question(args: dict, ctx: ToolContext) -> str:
     question = args.get("question") or args.get("prompt") or args.get("q")
     if not question:
@@ -1708,6 +2123,7 @@ def t_ask_user_question(args: dict, ctx: ToolContext) -> str:
     # so it's allowed regardless. EOFError still handles non-interactive runs.
     ui.stop_all_spinners()
     import sys as _sys
+
     if _sys.stdout.isatty():
         _sys.stdout.write("\033[?25h")
         _sys.stdout.flush()
@@ -1794,6 +2210,7 @@ def t_config_get(args: dict, ctx: ToolContext) -> str:
     if engine is None or engine.config is None:
         return "ERROR: config not available"
     from .config import get_value
+
     key = args["key"]
     v = get_value(engine.config, key, None)
     if v is None:
@@ -1806,31 +2223,30 @@ def t_config_get(args: dict, ctx: ToolContext) -> str:
 
 
 # Keys the model is allowed to set via the config_set tool. Anything that
-# affects security posture (insecure_ssl, yolo), networking (ports/hosts),
-# secrets (tokens/keys), or process execution (MCP commands) is deliberately
-# excluded — those must be edited in the config file by the user directly.
-#
-# "yolo" used to be listed here, which contradicted that rule: it is exactly a
-# security-posture key. Writing it turns off the approval prompt for every tool
-# on the next launch, so the one prompt the user answers to allow config_set
-# would be trading away all future prompts. Use /yolo instead.
-_CONFIG_SET_ALLOWLIST = frozenset({
-    "model",
-    "temperature",
-    "max_tokens",
-    "system_prompt",
-    "theme",
-    "editor",
-    "default_workspace",
-    "auto_continue",
-})
+# affects security posture (insecure_ssl), networking (ports/hosts), secrets
+# (tokens/keys), or process execution (MCP commands) is deliberately excluded —
+# those must be edited in the config file by the user directly.
+_CONFIG_SET_ALLOWLIST = frozenset(
+    {
+        "model",
+        "temperature",
+        "max_tokens",
+        "system_prompt",
+        "theme",
+        "editor",
+        "default_workspace",
+        "yolo",
+        "auto_continue",
+    }
+)
 
 
 def t_config_set(args: dict, ctx: ToolContext) -> str:
     engine = getattr(ctx, "engine", None)
     if engine is None or engine.config is None:
         return "ERROR: config not available"
-    from .config import set_value, save
+    from .config import save, set_value
+
     key = args["key"]
     val = args["value"]
     if key not in _CONFIG_SET_ALLOWLIST:
@@ -1849,6 +2265,7 @@ def t_config_set(args: dict, ctx: ToolContext) -> str:
 
 def t_sleep(args: dict, ctx: ToolContext) -> str:
     import time as _time
+
     secs = float(args.get("seconds", 1))
     secs = max(0.0, min(60.0, secs))
     _time.sleep(secs)
@@ -1859,6 +2276,7 @@ def t_skill(args: dict, ctx: ToolContext) -> str:
     """Append a named skill's instructions onto the engine for the rest of
     the session. Skills live at ~/.config/cagentic/skills/<name>.md."""
     from .config import config_dir
+
     op = args.get("op", "use")
     name = args.get("name", "")
     skills_dir = config_dir() / "skills"
@@ -1932,12 +2350,41 @@ TOOLS: dict[str, ToolFn] = {
     "reminder_done": t_reminder_done,
     "reminder_delete": t_reminder_delete,
     "reminder_update": t_reminder_update,
+    # personal OS
+    "goal_create": t_goal_create,
+    "goal_list": t_goal_list,
+    "goal_update": t_goal_update,
+    "goal_delete": t_goal_delete,
+    "calendar_event_add": t_calendar_event_add,
+    "calendar_event_list": t_calendar_event_list,
+    "calendar_event_update": t_calendar_event_update,
+    "calendar_event_delete": t_calendar_event_delete,
+    "personal_briefing": t_personal_briefing,
+    "calendar_connection_create": t_calendar_connection_create,
+    "calendar_connection_list": t_calendar_connection_list,
+    "calendar_connection_sync": t_calendar_connection_sync,
+    "calendar_connection_delete": t_calendar_connection_delete,
+    "notification_list": t_notification_list,
+    "notification_update": t_notification_update,
+    "inbox_capture": t_inbox_capture,
+    "inbox_list": t_inbox_list,
+    "inbox_update": t_inbox_update,
+    "inbox_delete": t_inbox_delete,
+    "email_connection_create": t_email_connection_create,
+    "email_connection_list": t_email_connection_list,
+    "email_connection_sync": t_email_connection_sync,
+    "email_connection_delete": t_email_connection_delete,
+    "routine_create": t_routine_create,
+    "routine_list": t_routine_list,
+    "routine_update": t_routine_update,
+    "routine_delete": t_routine_delete,
     # mcp
     "mcp_list_servers": t_mcp_list_servers,
     "mcp_list_tools": t_mcp_list_tools,
     "mcp_call": t_mcp_call,
     "mcp_list_resources": t_mcp_list_resources,
     "mcp_read_resource": t_mcp_read_resource,
+    "mcp_restart": t_mcp_restart,
     # browser
     "browser_status": t_browser_status,
     "browser_tabs": t_browser_tabs,
@@ -1980,459 +2427,1354 @@ TOOLS: dict[str, ToolFn] = {
 
 TOOL_SCHEMAS: list[dict[str, Any]] = [
     # ---------- files ----------
-    {"type": "function", "function": {
-        "name": "read_file",
-        "description": "Read a text file, or extract the text from a PDF or Word (.docx) document. Returns line-numbered content.",
-        "parameters": {"type": "object", "properties": {
-            "path": {"type": "string"},
-            "start_line": {"type": "integer"},
-            "end_line": {"type": "integer"},
-        }, "required": ["path"]},
-    }},
-    {"type": "function", "function": {
-        "name": "write_file",
-        "description": "Create or overwrite a file with the given content. Asks for approval.",
-        "parameters": {"type": "object", "properties": {
-            "path": {"type": "string"},
-            "content": {"type": "string"},
-        }, "required": ["path", "content"]},
-    }},
-    {"type": "function", "function": {
-        "name": "edit_file",
-        "description": "Replace an exact string in a file. old_string must be unique unless replace_all=true.",
-        "parameters": {"type": "object", "properties": {
-            "path": {"type": "string"},
-            "old_string": {"type": "string"},
-            "new_string": {"type": "string"},
-            "replace_all": {"type": "boolean"},
-        }, "required": ["path", "old_string", "new_string"]},
-    }},
-    {"type": "function", "function": {
-        "name": "replace_lines",
-        "description": "Surgical line-range replacement (1-indexed, inclusive). Use when edit_file fails on string matching.",
-        "parameters": {"type": "object", "properties": {
-            "path": {"type": "string"},
-            "start_line": {"type": "integer"},
-            "end_line": {"type": "integer"},
-            "new_content": {"type": "string"},
-        }, "required": ["path", "start_line", "end_line", "new_content"]},
-    }},
-    {"type": "function", "function": {
-        "name": "list_dir",
-        "description": "List entries in a directory (skips dotfiles).",
-        "parameters": {"type": "object", "properties": {"path": {"type": "string"}}},
-    }},
-    {"type": "function", "function": {
-        "name": "grep",
-        "description": "Recursive regex search. Skips .git, node_modules, build dirs.",
-        "parameters": {"type": "object", "properties": {
-            "pattern": {"type": "string"}, "path": {"type": "string"},
-            "case_insensitive": {"type": "boolean"},
-        }, "required": ["pattern"]},
-    }},
-    {"type": "function", "function": {
-        "name": "glob",
-        "description": "File pattern matching (supports ** for recursive globs).",
-        "parameters": {"type": "object", "properties": {
-            "pattern": {"type": "string"}, "path": {"type": "string"},
-        }, "required": ["pattern"]},
-    }},
-    {"type": "function", "function": {
-        "name": "set_workspace",
-        "description": "Change the workspace directory used to resolve relative paths.",
-        "parameters": {"type": "object", "properties": {
-            "path": {"type": "string"},
-            "create": {"type": "boolean"},
-        }, "required": ["path"]},
-    }},
-
+    {
+        "type": "function",
+        "function": {
+            "name": "read_file",
+            "description": "Read a text file, or extract the text from a PDF or Word (.docx) document. Returns line-numbered content.",
+            "parameters": {
+                "type": "object",
+                "properties": {
+                    "path": {"type": "string"},
+                    "start_line": {"type": "integer"},
+                    "end_line": {"type": "integer"},
+                },
+                "required": ["path"],
+            },
+        },
+    },
+    {
+        "type": "function",
+        "function": {
+            "name": "write_file",
+            "description": "Create or overwrite a file with the given content. Asks for approval.",
+            "parameters": {
+                "type": "object",
+                "properties": {
+                    "path": {"type": "string"},
+                    "content": {"type": "string"},
+                },
+                "required": ["path", "content"],
+            },
+        },
+    },
+    {
+        "type": "function",
+        "function": {
+            "name": "edit_file",
+            "description": "Replace an exact string in a file. old_string must be unique unless replace_all=true.",
+            "parameters": {
+                "type": "object",
+                "properties": {
+                    "path": {"type": "string"},
+                    "old_string": {"type": "string"},
+                    "new_string": {"type": "string"},
+                    "replace_all": {"type": "boolean"},
+                },
+                "required": ["path", "old_string", "new_string"],
+            },
+        },
+    },
+    {
+        "type": "function",
+        "function": {
+            "name": "replace_lines",
+            "description": "Surgical line-range replacement (1-indexed, inclusive). Use when edit_file fails on string matching.",
+            "parameters": {
+                "type": "object",
+                "properties": {
+                    "path": {"type": "string"},
+                    "start_line": {"type": "integer"},
+                    "end_line": {"type": "integer"},
+                    "new_content": {"type": "string"},
+                },
+                "required": ["path", "start_line", "end_line", "new_content"],
+            },
+        },
+    },
+    {
+        "type": "function",
+        "function": {
+            "name": "list_dir",
+            "description": "List entries in a directory (skips dotfiles).",
+            "parameters": {"type": "object", "properties": {"path": {"type": "string"}}},
+        },
+    },
+    {
+        "type": "function",
+        "function": {
+            "name": "grep",
+            "description": "Recursive regex search. Skips .git, node_modules, build dirs.",
+            "parameters": {
+                "type": "object",
+                "properties": {
+                    "pattern": {"type": "string"},
+                    "path": {"type": "string"},
+                    "case_insensitive": {"type": "boolean"},
+                },
+                "required": ["pattern"],
+            },
+        },
+    },
+    {
+        "type": "function",
+        "function": {
+            "name": "glob",
+            "description": "File pattern matching (supports ** for recursive globs).",
+            "parameters": {
+                "type": "object",
+                "properties": {
+                    "pattern": {"type": "string"},
+                    "path": {"type": "string"},
+                },
+                "required": ["pattern"],
+            },
+        },
+    },
+    {
+        "type": "function",
+        "function": {
+            "name": "set_workspace",
+            "description": "Change the workspace directory used to resolve relative paths.",
+            "parameters": {
+                "type": "object",
+                "properties": {
+                    "path": {"type": "string"},
+                    "create": {"type": "boolean"},
+                },
+                "required": ["path"],
+            },
+        },
+    },
     # ---------- notes ----------
-    {"type": "function", "function": {
-        "name": "note_write",
-        "description": "Save or update a markdown note in the assistant's knowledge base. Use for facts the user wants you to remember across sessions.",
-        "parameters": {"type": "object", "properties": {
-            "name": {"type": "string", "description": "Short name like 'home-wifi' or 'travel-prefs'"},
-            "body": {"type": "string"},
-            "append": {"type": "boolean", "description": "Prepend a dated entry instead of overwriting"},
-        }, "required": ["name", "body"]},
-    }},
-    {"type": "function", "function": {
-        "name": "note_get",
-        "description": "Read a saved note by name.",
-        "parameters": {"type": "object", "properties": {"name": {"type": "string"}}, "required": ["name"]},
-    }},
-    {"type": "function", "function": {
-        "name": "note_list",
-        "description": "List all saved notes (most recently updated first).",
-        "parameters": {"type": "object", "properties": {}},
-    }},
-    {"type": "function", "function": {
-        "name": "note_search",
-        "description": "Substring search across saved notes.",
-        "parameters": {"type": "object", "properties": {"query": {"type": "string"}}, "required": ["query"]},
-    }},
-    {"type": "function", "function": {
-        "name": "note_delete",
-        "description": "Delete a saved note. Asks for approval.",
-        "parameters": {"type": "object", "properties": {"name": {"type": "string"}}, "required": ["name"]},
-    }},
-    {"type": "function", "function": {
-        "name": "chat_search",
-        "description": "Search the user's previous conversations for a phrase. Returns matching chats with snippets and ids.",
-        "parameters": {"type": "object", "properties": {"query": {"type": "string"}}, "required": ["query"]},
-    }},
-    {"type": "function", "function": {
-        "name": "chat_get",
-        "description": "Read one previous conversation in full, by id from chat_search.",
-        "parameters": {"type": "object", "properties": {"id": {"type": "string"}}, "required": ["id"]},
-    }},
-
+    {
+        "type": "function",
+        "function": {
+            "name": "note_write",
+            "description": "Save or update a markdown note in the assistant's knowledge base. Use for facts the user wants you to remember across sessions.",
+            "parameters": {
+                "type": "object",
+                "properties": {
+                    "name": {
+                        "type": "string",
+                        "description": "Short name like 'home-wifi' or 'travel-prefs'",
+                    },
+                    "body": {"type": "string"},
+                    "append": {
+                        "type": "boolean",
+                        "description": "Prepend a dated entry instead of overwriting",
+                    },
+                },
+                "required": ["name", "body"],
+            },
+        },
+    },
+    {
+        "type": "function",
+        "function": {
+            "name": "note_get",
+            "description": "Read a saved note by name.",
+            "parameters": {
+                "type": "object",
+                "properties": {"name": {"type": "string"}},
+                "required": ["name"],
+            },
+        },
+    },
+    {
+        "type": "function",
+        "function": {
+            "name": "note_list",
+            "description": "List all saved notes (most recently updated first).",
+            "parameters": {"type": "object", "properties": {}},
+        },
+    },
+    {
+        "type": "function",
+        "function": {
+            "name": "note_search",
+            "description": "Substring search across saved notes.",
+            "parameters": {
+                "type": "object",
+                "properties": {"query": {"type": "string"}},
+                "required": ["query"],
+            },
+        },
+    },
+    {
+        "type": "function",
+        "function": {
+            "name": "note_delete",
+            "description": "Delete a saved note. Asks for approval.",
+            "parameters": {
+                "type": "object",
+                "properties": {"name": {"type": "string"}},
+                "required": ["name"],
+            },
+        },
+    },
+    {
+        "type": "function",
+        "function": {
+            "name": "chat_search",
+            "description": "Search the user's previous conversations for a phrase. Returns matching chats with snippets and ids.",
+            "parameters": {
+                "type": "object",
+                "properties": {"query": {"type": "string"}},
+                "required": ["query"],
+            },
+        },
+    },
+    {
+        "type": "function",
+        "function": {
+            "name": "chat_get",
+            "description": "Read one previous conversation in full, by id from chat_search.",
+            "parameters": {
+                "type": "object",
+                "properties": {"id": {"type": "string"}},
+                "required": ["id"],
+            },
+        },
+    },
     # ---------- reminders ----------
-    {"type": "function", "function": {
-        "name": "reminder_add",
-        "description": "Add a persistent reminder. 'when' accepts 'in 10m', 'in 2h', 'tomorrow', 'tonight', or YYYY-MM-DD[ HH:MM].",
-        "parameters": {"type": "object", "properties": {
-            "text": {"type": "string"},
-            "when": {"type": "string"},
-            "tags": {"type": "array", "items": {"type": "string"}},
-        }, "required": ["text"]},
-    }},
-    {"type": "function", "function": {
-        "name": "reminder_list",
-        "description": "List active reminders (use include_done=true for all).",
-        "parameters": {"type": "object", "properties": {
-            "include_done": {"type": "boolean"},
-            "status": {"type": "string"},
-        }},
-    }},
-    {"type": "function", "function": {
-        "name": "reminder_done",
-        "description": "Mark a reminder done by id.",
-        "parameters": {"type": "object", "properties": {"id": {"type": "string"}}, "required": ["id"]},
-    }},
-    {"type": "function", "function": {
-        "name": "reminder_delete",
-        "description": "Delete a reminder by id. Asks for approval.",
-        "parameters": {"type": "object", "properties": {"id": {"type": "string"}}, "required": ["id"]},
-    }},
-    {"type": "function", "function": {
-        "name": "reminder_update",
-        "description": "Update a reminder's text, status, when, or tags by id.",
-        "parameters": {"type": "object", "properties": {
-            "id": {"type": "string"},
-            "text": {"type": "string"},
-            "status": {"type": "string"},
-            "when": {"type": "string"},
-            "tags": {"type": "array", "items": {"type": "string"}},
-        }, "required": ["id"]},
-    }},
-
+    {
+        "type": "function",
+        "function": {
+            "name": "reminder_add",
+            "description": "Add a persistent reminder. 'when' accepts 'in 10m', 'in 2h', 'tomorrow', 'tonight', or YYYY-MM-DD[ HH:MM].",
+            "parameters": {
+                "type": "object",
+                "properties": {
+                    "text": {"type": "string"},
+                    "when": {"type": "string"},
+                    "tags": {"type": "array", "items": {"type": "string"}},
+                },
+                "required": ["text"],
+            },
+        },
+    },
+    {
+        "type": "function",
+        "function": {
+            "name": "reminder_list",
+            "description": "List active reminders (use include_done=true for all).",
+            "parameters": {
+                "type": "object",
+                "properties": {
+                    "include_done": {"type": "boolean"},
+                    "status": {"type": "string"},
+                },
+            },
+        },
+    },
+    {
+        "type": "function",
+        "function": {
+            "name": "reminder_done",
+            "description": "Mark a reminder done by id.",
+            "parameters": {
+                "type": "object",
+                "properties": {"id": {"type": "string"}},
+                "required": ["id"],
+            },
+        },
+    },
+    {
+        "type": "function",
+        "function": {
+            "name": "reminder_delete",
+            "description": "Delete a reminder by id. Asks for approval.",
+            "parameters": {
+                "type": "object",
+                "properties": {"id": {"type": "string"}},
+                "required": ["id"],
+            },
+        },
+    },
+    {
+        "type": "function",
+        "function": {
+            "name": "reminder_update",
+            "description": "Update a reminder's text, status, when, or tags by id.",
+            "parameters": {
+                "type": "object",
+                "properties": {
+                    "id": {"type": "string"},
+                    "text": {"type": "string"},
+                    "status": {"type": "string"},
+                    "when": {"type": "string"},
+                    "tags": {"type": "array", "items": {"type": "string"}},
+                },
+                "required": ["id"],
+            },
+        },
+    },
+    # ---------- personal OS ----------
+    {
+        "type": "function",
+        "function": {
+            "name": "goal_create",
+            "description": "Create a persistent personal goal with optional target date and progress.",
+            "parameters": {
+                "type": "object",
+                "properties": {
+                    "title": {"type": "string"},
+                    "description": {"type": "string"},
+                    "target": {"type": "string"},
+                    "category": {"type": "string"},
+                    "progress": {"type": "integer", "minimum": 0, "maximum": 100},
+                },
+                "required": ["title"],
+            },
+        },
+    },
+    {
+        "type": "function",
+        "function": {
+            "name": "goal_list",
+            "description": "List the user's persistent goals and progress.",
+            "parameters": {
+                "type": "object",
+                "properties": {"include_completed": {"type": "boolean"}},
+            },
+        },
+    },
+    {
+        "type": "function",
+        "function": {
+            "name": "goal_update",
+            "description": "Update a goal's title, target, progress, category, or status.",
+            "parameters": {
+                "type": "object",
+                "properties": {
+                    "id": {"type": "string"},
+                    "title": {"type": "string"},
+                    "description": {"type": "string"},
+                    "target": {"type": "string"},
+                    "category": {"type": "string"},
+                    "progress": {"type": "integer", "minimum": 0, "maximum": 100},
+                    "status": {
+                        "type": "string",
+                        "enum": ["active", "paused", "completed", "cancelled"],
+                    },
+                },
+                "required": ["id"],
+            },
+        },
+    },
+    {
+        "type": "function",
+        "function": {
+            "name": "goal_delete",
+            "description": "Delete a personal goal by id.",
+            "parameters": {
+                "type": "object",
+                "properties": {"id": {"type": "string"}},
+                "required": ["id"],
+            },
+        },
+    },
+    {
+        "type": "function",
+        "function": {
+            "name": "calendar_event_add",
+            "description": "Add an event to the local personal calendar. start/end accept ISO date-times or natural reminder dates.",
+            "parameters": {
+                "type": "object",
+                "properties": {
+                    "title": {"type": "string"},
+                    "start": {"type": "string"},
+                    "end": {"type": "string"},
+                    "description": {"type": "string"},
+                    "location": {"type": "string"},
+                    "all_day": {"type": "boolean"},
+                    "source": {"type": "string"},
+                    "external_id": {"type": "string"},
+                },
+                "required": ["title", "start"],
+            },
+        },
+    },
+    {
+        "type": "function",
+        "function": {
+            "name": "calendar_event_list",
+            "description": "List calendar events in an optional start/end window.",
+            "parameters": {
+                "type": "object",
+                "properties": {"start": {"type": "string"}, "end": {"type": "string"}},
+            },
+        },
+    },
+    {
+        "type": "function",
+        "function": {
+            "name": "calendar_event_update",
+            "description": "Update a calendar event.",
+            "parameters": {
+                "type": "object",
+                "properties": {
+                    "id": {"type": "string"},
+                    "title": {"type": "string"},
+                    "start": {"type": "string"},
+                    "end": {"type": "string"},
+                    "description": {"type": "string"},
+                    "location": {"type": "string"},
+                    "all_day": {"type": "boolean"},
+                    "status": {"type": "string"},
+                },
+                "required": ["id"],
+            },
+        },
+    },
+    {
+        "type": "function",
+        "function": {
+            "name": "calendar_event_delete",
+            "description": "Delete a calendar event by id.",
+            "parameters": {
+                "type": "object",
+                "properties": {"id": {"type": "string"}},
+                "required": ["id"],
+            },
+        },
+    },
+    {
+        "type": "function",
+        "function": {
+            "name": "personal_briefing",
+            "description": "Read today's proactive briefing across calendar events, deadlines, and goals.",
+            "parameters": {"type": "object", "properties": {}},
+        },
+    },
+    {
+        "type": "function",
+        "function": {
+            "name": "calendar_connection_create",
+            "description": "Connect an iCalendar feed or CalDAV calendar. Credentials remain local. Ask the user for approval before creating it.",
+            "parameters": {
+                "type": "object",
+                "properties": {
+                    "name": {"type": "string"},
+                    "kind": {"type": "string", "enum": ["ical", "caldav"]},
+                    "url": {"type": "string"},
+                    "username": {"type": "string"},
+                    "password": {"type": "string"},
+                    "direction": {"type": "string", "enum": ["pull", "push", "both"]},
+                    "auto_sync": {"type": "boolean"},
+                    "sync_interval": {"type": "integer"},
+                },
+                "required": ["name", "url"],
+            },
+        },
+    },
+    {
+        "type": "function",
+        "function": {
+            "name": "calendar_connection_list",
+            "description": "List calendar connections and their last sync state without exposing credentials.",
+            "parameters": {"type": "object", "properties": {}},
+        },
+    },
+    {
+        "type": "function",
+        "function": {
+            "name": "calendar_connection_sync",
+            "description": "Synchronize one calendar connection now.",
+            "parameters": {
+                "type": "object",
+                "properties": {"id": {"type": "string"}},
+                "required": ["id"],
+            },
+        },
+    },
+    {
+        "type": "function",
+        "function": {
+            "name": "calendar_connection_delete",
+            "description": "Delete a calendar connection, optionally removing its imported events.",
+            "parameters": {
+                "type": "object",
+                "properties": {
+                    "id": {"type": "string"},
+                    "remove_imported_events": {"type": "boolean"},
+                },
+                "required": ["id"],
+            },
+        },
+    },
+    {
+        "type": "function",
+        "function": {
+            "name": "notification_list",
+            "description": "Read proactive personal-OS notifications.",
+            "parameters": {
+                "type": "object",
+                "properties": {"include_dismissed": {"type": "boolean"}},
+            },
+        },
+    },
+    {
+        "type": "function",
+        "function": {
+            "name": "notification_update",
+            "description": "Mark a proactive notification read, unread, dismissed, or mark all read.",
+            "parameters": {
+                "type": "object",
+                "properties": {
+                    "id": {"type": "string"},
+                    "action": {"type": "string", "enum": ["read", "dismiss", "read_all"]},
+                    "read": {"type": "boolean"},
+                },
+            },
+        },
+    },
+    {
+        "type": "function",
+        "function": {
+            "name": "inbox_capture",
+            "description": "Capture a thought, task, message, or document reference in the local unified inbox.",
+            "parameters": {
+                "type": "object",
+                "properties": {
+                    "title": {"type": "string"},
+                    "summary": {"type": "string"},
+                    "kind": {"type": "string", "enum": ["capture", "task", "message", "document"]},
+                    "priority": {"type": "integer", "minimum": 0, "maximum": 3},
+                    "tags": {"type": "array", "items": {"type": "string"}},
+                },
+                "required": ["title"],
+            },
+        },
+    },
+    {
+        "type": "function",
+        "function": {
+            "name": "inbox_list",
+            "description": "List active items in the local unified inbox.",
+            "parameters": {
+                "type": "object",
+                "properties": {
+                    "status": {"type": "string", "enum": ["new", "read", "done", "archived"]},
+                    "include_archived": {"type": "boolean"},
+                    "limit": {"type": "integer"},
+                },
+            },
+        },
+    },
+    {
+        "type": "function",
+        "function": {
+            "name": "inbox_update",
+            "description": "Update an inbox item's content, priority, status, tags, or snooze time.",
+            "parameters": {
+                "type": "object",
+                "properties": {
+                    "id": {"type": "string"},
+                    "title": {"type": "string"},
+                    "summary": {"type": "string"},
+                    "status": {"type": "string", "enum": ["new", "read", "done", "archived"]},
+                    "priority": {"type": "integer", "minimum": 0, "maximum": 3},
+                    "tags": {"type": "array", "items": {"type": "string"}},
+                    "snoozed_until": {"type": "number"},
+                },
+                "required": ["id"],
+            },
+        },
+    },
+    {
+        "type": "function",
+        "function": {
+            "name": "inbox_delete",
+            "description": "Permanently delete a unified inbox item.",
+            "parameters": {
+                "type": "object",
+                "properties": {"id": {"type": "string"}},
+                "required": ["id"],
+            },
+        },
+    },
+    {
+        "type": "function",
+        "function": {
+            "name": "email_connection_create",
+            "description": "Connect an email inbox over IMAP. Credentials remain local and sync fetches headers only.",
+            "parameters": {
+                "type": "object",
+                "properties": {
+                    "name": {"type": "string"},
+                    "host": {"type": "string"},
+                    "port": {"type": "integer"},
+                    "username": {"type": "string"},
+                    "password": {"type": "string"},
+                    "use_ssl": {"type": "boolean"},
+                    "folder": {"type": "string"},
+                    "auto_sync": {"type": "boolean"},
+                    "sync_interval": {"type": "integer"},
+                },
+                "required": ["name", "host", "username"],
+            },
+        },
+    },
+    {
+        "type": "function",
+        "function": {
+            "name": "email_connection_list",
+            "description": "List email connections and sync state without exposing credentials.",
+            "parameters": {"type": "object", "properties": {}},
+        },
+    },
+    {
+        "type": "function",
+        "function": {
+            "name": "email_connection_sync",
+            "description": "Synchronize unread email headers from one IMAP connection now.",
+            "parameters": {
+                "type": "object",
+                "properties": {"id": {"type": "string"}},
+                "required": ["id"],
+            },
+        },
+    },
+    {
+        "type": "function",
+        "function": {
+            "name": "email_connection_delete",
+            "description": "Delete an email connection, optionally removing its imported inbox items.",
+            "parameters": {
+                "type": "object",
+                "properties": {
+                    "id": {"type": "string"},
+                    "remove_items": {"type": "boolean"},
+                },
+                "required": ["id"],
+            },
+        },
+    },
+    {
+        "type": "function",
+        "function": {
+            "name": "routine_create",
+            "description": "Create a scheduled proactive personal-OS routine.",
+            "parameters": {
+                "type": "object",
+                "properties": {
+                    "name": {"type": "string"},
+                    "kind": {"type": "string", "enum": ["daily_plan", "inbox_digest", "weekly_review", "custom"]},
+                    "schedule_time": {"type": "string", "description": "Local 24-hour HH:MM"},
+                    "days": {"type": "array", "items": {"type": "integer", "minimum": 0, "maximum": 6}},
+                    "prompt": {"type": "string"},
+                    "enabled": {"type": "boolean"},
+                },
+                "required": ["name"],
+            },
+        },
+    },
+    {
+        "type": "function",
+        "function": {
+            "name": "routine_list",
+            "description": "List configured proactive routines and schedules.",
+            "parameters": {
+                "type": "object",
+                "properties": {"include_disabled": {"type": "boolean"}},
+            },
+        },
+    },
+    {
+        "type": "function",
+        "function": {
+            "name": "routine_update",
+            "description": "Update a proactive routine's schedule, prompt, type, or enabled state.",
+            "parameters": {
+                "type": "object",
+                "properties": {
+                    "id": {"type": "string"},
+                    "name": {"type": "string"},
+                    "kind": {"type": "string", "enum": ["daily_plan", "inbox_digest", "weekly_review", "custom"]},
+                    "schedule_time": {"type": "string"},
+                    "days": {"type": "array", "items": {"type": "integer", "minimum": 0, "maximum": 6}},
+                    "prompt": {"type": "string"},
+                    "enabled": {"type": "boolean"},
+                },
+                "required": ["id"],
+            },
+        },
+    },
+    {
+        "type": "function",
+        "function": {
+            "name": "routine_delete",
+            "description": "Delete a proactive routine.",
+            "parameters": {
+                "type": "object",
+                "properties": {"id": {"type": "string"}},
+                "required": ["id"],
+            },
+        },
+    },
     # ---------- mcp ----------
-    {"type": "function", "function": {
-        "name": "mcp_list_servers",
-        "description": "List configured MCP servers (Notion, Google Drive, Slack, etc.).",
-        "parameters": {"type": "object", "properties": {}},
-    }},
-    {"type": "function", "function": {
-        "name": "mcp_list_tools",
-        "description": "List the tools an MCP server exposes.",
-        "parameters": {"type": "object", "properties": {"server": {"type": "string"}}, "required": ["server"]},
-    }},
-    {"type": "function", "function": {
-        "name": "mcp_call",
-        "description": "Call a tool on an MCP server. Asks for approval.",
-        "parameters": {"type": "object", "properties": {
-            "server": {"type": "string"},
-            "tool": {"type": "string"},
-            "arguments": {"type": "object"},
-        }, "required": ["server", "tool"]},
-    }},
-    {"type": "function", "function": {
-        "name": "mcp_list_resources",
-        "description": "List URI-addressable resources exposed by an MCP server.",
-        "parameters": {"type": "object", "properties": {"server": {"type": "string"}}, "required": ["server"]},
-    }},
-    {"type": "function", "function": {
-        "name": "mcp_read_resource",
-        "description": "Read a resource by URI from an MCP server.",
-        "parameters": {"type": "object", "properties": {
-            "server": {"type": "string"}, "uri": {"type": "string"},
-        }, "required": ["server", "uri"]},
-    }},
-
+    {
+        "type": "function",
+        "function": {
+            "name": "mcp_list_servers",
+            "description": "List configured MCP servers (Notion, Google Drive, Slack, etc.).",
+            "parameters": {"type": "object", "properties": {}},
+        },
+    },
+    {
+        "type": "function",
+        "function": {
+            "name": "mcp_list_tools",
+            "description": "List the tools an MCP server exposes.",
+            "parameters": {
+                "type": "object",
+                "properties": {"server": {"type": "string"}},
+                "required": ["server"],
+            },
+        },
+    },
+    {
+        "type": "function",
+        "function": {
+            "name": "mcp_call",
+            "description": "Call a tool on an MCP server. Asks for approval.",
+            "parameters": {
+                "type": "object",
+                "properties": {
+                    "server": {"type": "string"},
+                    "tool": {"type": "string"},
+                    "arguments": {"type": "object"},
+                },
+                "required": ["server", "tool"],
+            },
+        },
+    },
+    {
+        "type": "function",
+        "function": {
+            "name": "mcp_list_resources",
+            "description": "List URI-addressable resources exposed by an MCP server.",
+            "parameters": {
+                "type": "object",
+                "properties": {"server": {"type": "string"}},
+                "required": ["server"],
+            },
+        },
+    },
+    {
+        "type": "function",
+        "function": {
+            "name": "mcp_read_resource",
+            "description": "Read a resource by URI from an MCP server.",
+            "parameters": {
+                "type": "object",
+                "properties": {
+                    "server": {"type": "string"},
+                    "uri": {"type": "string"},
+                },
+                "required": ["server", "uri"],
+            },
+        },
+    },
+    {
+        "type": "function",
+        "function": {
+            "name": "mcp_restart",
+            "description": "Stop and respawn one configured MCP server.",
+            "parameters": {
+                "type": "object",
+                "properties": {
+                    "name": {"type": "string"},
+                },
+                "required": ["name"],
+            },
+        },
+    },
     # ---------- browser ----------
-    {"type": "function", "function": {
-        "name": "browser_status",
-        "description": "Check whether the Cagentic Chrome extension is connected. Call this before other browser_* tools.",
-        "parameters": {"type": "object", "properties": {}},
-    }},
-    {"type": "function", "function": {
-        "name": "browser_tabs",
-        "description": "List the open browser tabs (id, title, url, which is active).",
-        "parameters": {"type": "object", "properties": {}},
-    }},
-    {"type": "function", "function": {
-        "name": "browser_read",
-        "description": "Read the title, URL and visible text of a browser tab (the active tab if tab_id is omitted).",
-        "parameters": {"type": "object", "properties": {
-            "tab_id": {"type": "integer"},
-        }},
-    }},
-    {"type": "function", "function": {
-        "name": "browser_open",
-        "description": "Open a URL in a new browser tab. Asks for approval.",
-        "parameters": {"type": "object", "properties": {
-            "url": {"type": "string"},
-            "active": {"type": "boolean"},
-        }, "required": ["url"]},
-    }},
-    {"type": "function", "function": {
-        "name": "browser_navigate",
-        "description": "Navigate a tab to a URL (active tab if tab_id omitted). Asks for approval.",
-        "parameters": {"type": "object", "properties": {
-            "url": {"type": "string"},
-            "tab_id": {"type": "integer"},
-        }, "required": ["url"]},
-    }},
-    {"type": "function", "function": {
-        "name": "browser_click",
-        "description": "Click an element in a tab — by CSS 'selector' or by visible 'text'. Asks for approval.",
-        "parameters": {"type": "object", "properties": {
-            "selector": {"type": "string"},
-            "text": {"type": "string"},
-            "tab_id": {"type": "integer"},
-        }},
-    }},
-    {"type": "function", "function": {
-        "name": "browser_fill",
-        "description": "Set the value of a form field matched by CSS selector. Asks for approval.",
-        "parameters": {"type": "object", "properties": {
-            "selector": {"type": "string"},
-            "value": {"type": "string"},
-            "tab_id": {"type": "integer"},
-        }, "required": ["selector", "value"]},
-    }},
-    {"type": "function", "function": {
-        "name": "browser_eval",
-        "description": "Run a JavaScript expression in a browser tab and return its result. Prefer the dedicated browser_scroll, browser_click, and browser_fill for those actions — pages with strict Content Security Policy reject eval. Asks for approval.",
-        "parameters": {"type": "object", "properties": {
-            "code": {"type": "string"},
-            "tab_id": {"type": "integer"},
-        }, "required": ["code"]},
-    }},
-    {"type": "function", "function": {
-        "name": "browser_scroll",
-        "description": "Scroll a browser tab. Set 'to' to 'top' or 'bottom', OR pass a 'selector' to scroll an element into view, OR pass a numeric 'y' pixel offset. CSP-safe — works on every page.",
-        "parameters": {"type": "object", "properties": {
-            "to": {"type": "string", "enum": ["top", "bottom"]},
-            "selector": {"type": "string"},
-            "y": {"type": "integer"},
-            "tab_id": {"type": "integer"},
-        }},
-    }},
-    {"type": "function", "function": {
-        "name": "browser_screenshot",
-        "description": "Capture the visible viewport of the current browser tab as a PNG. Vision-capable models receive the image inline (attached to the tool result); a copy is also saved to ~/.config/cagentic/screenshots/. Use this with browser_click_at when CSS selectors aren't enough.",
-        "parameters": {"type": "object", "properties": {
-            "tab_id": {"type": "integer"},
-        }},
-    }},
-    {"type": "function", "function": {
-        "name": "browser_click_at",
-        "description": "Click at exact viewport coordinates (x, y) — the fallback when browser_click can't find the element by CSS. Coordinates are in the same space as the most recent browser_screenshot (origin top-left, pixels). Bypasses CSP and works with framework-rendered apps. Asks for approval.",
-        "parameters": {"type": "object", "properties": {
-            "x": {"type": "integer"},
-            "y": {"type": "integer"},
-            "tab_id": {"type": "integer"},
-        }, "required": ["x", "y"]},
-    }},
-    {"type": "function", "function": {
-        "name": "browser_links",
-        "description": "List every clickable thing on the page — text, href, aria-label — without using eval. Use this on dynamically-rendered pages (Google Drive, Classroom, React apps) where browser_read returns very little. Pass 'contains' to filter to matching links.",
-        "parameters": {"type": "object", "properties": {
-            "contains": {"type": "string", "description": "Case-insensitive substring filter."},
-            "tab_id": {"type": "integer"},
-        }},
-    }},
-    {"type": "function", "function": {
-        "name": "browser_download",
-        "description": "Download a URL through the browser session and save the bytes to disk. Authenticated as the user (their cookies are sent), so it works with Google Drive / Docs export URLs and any other login-walled file. Saves to ~/.config/cagentic/downloads/ unless 'path' is given; returns the local file path so you can read_file it. Asks for approval. Google export URL patterns:  https://docs.google.com/document/d/<ID>/export?format=txt  ·  https://docs.google.com/presentation/d/<ID>/export/txt  ·  https://docs.google.com/presentation/d/<ID>/export/pdf  ·  https://drive.google.com/uc?export=download&id=<ID>",
-        "parameters": {"type": "object", "properties": {
-            "url": {"type": "string"},
-            "path": {"type": "string", "description": "Optional destination path; defaults to ~/.config/cagentic/downloads/."},
-        }, "required": ["url"]},
-    }},
-    {"type": "function", "function": {
-        "name": "browser_close",
-        "description": "Close a browser tab by id. Asks for approval.",
-        "parameters": {"type": "object", "properties": {
-            "tab_id": {"type": "integer"},
-        }, "required": ["tab_id"]},
-    }},
-
+    {
+        "type": "function",
+        "function": {
+            "name": "browser_status",
+            "description": "Check whether the Cagentic Chrome extension is connected. Call this before other browser_* tools.",
+            "parameters": {"type": "object", "properties": {}},
+        },
+    },
+    {
+        "type": "function",
+        "function": {
+            "name": "browser_tabs",
+            "description": "List the open browser tabs (id, title, url, which is active).",
+            "parameters": {"type": "object", "properties": {}},
+        },
+    },
+    {
+        "type": "function",
+        "function": {
+            "name": "browser_read",
+            "description": "Read the title, URL and visible text of a browser tab (the active tab if tab_id is omitted).",
+            "parameters": {
+                "type": "object",
+                "properties": {
+                    "tab_id": {"type": "integer"},
+                },
+            },
+        },
+    },
+    {
+        "type": "function",
+        "function": {
+            "name": "browser_open",
+            "description": "Open a URL in a new browser tab. Asks for approval.",
+            "parameters": {
+                "type": "object",
+                "properties": {
+                    "url": {"type": "string"},
+                    "active": {"type": "boolean"},
+                },
+                "required": ["url"],
+            },
+        },
+    },
+    {
+        "type": "function",
+        "function": {
+            "name": "browser_navigate",
+            "description": "Navigate a tab to a URL (active tab if tab_id omitted). Asks for approval.",
+            "parameters": {
+                "type": "object",
+                "properties": {
+                    "url": {"type": "string"},
+                    "tab_id": {"type": "integer"},
+                },
+                "required": ["url"],
+            },
+        },
+    },
+    {
+        "type": "function",
+        "function": {
+            "name": "browser_click",
+            "description": "Click an element in a tab — by CSS 'selector' or by visible 'text'. Asks for approval.",
+            "parameters": {
+                "type": "object",
+                "properties": {
+                    "selector": {"type": "string"},
+                    "text": {"type": "string"},
+                    "tab_id": {"type": "integer"},
+                },
+            },
+        },
+    },
+    {
+        "type": "function",
+        "function": {
+            "name": "browser_fill",
+            "description": "Set the value of a form field matched by CSS selector. Asks for approval.",
+            "parameters": {
+                "type": "object",
+                "properties": {
+                    "selector": {"type": "string"},
+                    "value": {"type": "string"},
+                    "tab_id": {"type": "integer"},
+                },
+                "required": ["selector", "value"],
+            },
+        },
+    },
+    {
+        "type": "function",
+        "function": {
+            "name": "browser_eval",
+            "description": "Run a JavaScript expression in a browser tab and return its result. Prefer the dedicated browser_scroll, browser_click, and browser_fill for those actions — pages with strict Content Security Policy reject eval. Asks for approval.",
+            "parameters": {
+                "type": "object",
+                "properties": {
+                    "code": {"type": "string"},
+                    "tab_id": {"type": "integer"},
+                },
+                "required": ["code"],
+            },
+        },
+    },
+    {
+        "type": "function",
+        "function": {
+            "name": "browser_scroll",
+            "description": "Scroll a browser tab. Set 'to' to 'top' or 'bottom', OR pass a 'selector' to scroll an element into view, OR pass a numeric 'y' pixel offset. CSP-safe — works on every page.",
+            "parameters": {
+                "type": "object",
+                "properties": {
+                    "to": {"type": "string", "enum": ["top", "bottom"]},
+                    "selector": {"type": "string"},
+                    "y": {"type": "integer"},
+                    "tab_id": {"type": "integer"},
+                },
+            },
+        },
+    },
+    {
+        "type": "function",
+        "function": {
+            "name": "browser_screenshot",
+            "description": "Capture the visible viewport of the current browser tab as a PNG. Vision-capable models receive the image inline (attached to the tool result); a copy is also saved to ~/.config/cagentic/screenshots/. Use this with browser_click_at when CSS selectors aren't enough.",
+            "parameters": {
+                "type": "object",
+                "properties": {
+                    "tab_id": {"type": "integer"},
+                },
+            },
+        },
+    },
+    {
+        "type": "function",
+        "function": {
+            "name": "browser_click_at",
+            "description": "Click at exact viewport coordinates (x, y) — the fallback when browser_click can't find the element by CSS. Coordinates are in the same space as the most recent browser_screenshot (origin top-left, pixels). Bypasses CSP and works with framework-rendered apps. Asks for approval.",
+            "parameters": {
+                "type": "object",
+                "properties": {
+                    "x": {"type": "integer"},
+                    "y": {"type": "integer"},
+                    "tab_id": {"type": "integer"},
+                },
+                "required": ["x", "y"],
+            },
+        },
+    },
+    {
+        "type": "function",
+        "function": {
+            "name": "browser_links",
+            "description": "List every clickable thing on the page — text, href, aria-label — without using eval. Use this on dynamically-rendered pages (Google Drive, Classroom, React apps) where browser_read returns very little. Pass 'contains' to filter to matching links.",
+            "parameters": {
+                "type": "object",
+                "properties": {
+                    "contains": {
+                        "type": "string",
+                        "description": "Case-insensitive substring filter.",
+                    },
+                    "tab_id": {"type": "integer"},
+                },
+            },
+        },
+    },
+    {
+        "type": "function",
+        "function": {
+            "name": "browser_download",
+            "description": "Download a URL through the browser session and save the bytes to disk. Authenticated as the user (their cookies are sent), so it works with Google Drive / Docs export URLs and any other login-walled file. Saves to ~/.config/cagentic/downloads/ unless 'path' is given; returns the local file path so you can read_file it. Asks for approval. Google export URL patterns:  https://docs.google.com/document/d/<ID>/export?format=txt  ·  https://docs.google.com/presentation/d/<ID>/export/txt  ·  https://docs.google.com/presentation/d/<ID>/export/pdf  ·  https://drive.google.com/uc?export=download&id=<ID>",
+            "parameters": {
+                "type": "object",
+                "properties": {
+                    "url": {"type": "string"},
+                    "path": {
+                        "type": "string",
+                        "description": "Optional destination path; defaults to ~/.config/cagentic/downloads/.",
+                    },
+                },
+                "required": ["url"],
+            },
+        },
+    },
+    {
+        "type": "function",
+        "function": {
+            "name": "browser_close",
+            "description": "Close a browser tab by id. Asks for approval.",
+            "parameters": {
+                "type": "object",
+                "properties": {
+                    "tab_id": {"type": "integer"},
+                },
+                "required": ["tab_id"],
+            },
+        },
+    },
     # ---------- web ----------
-    {"type": "function", "function": {
-        "name": "web_fetch",
-        "description": "Fetch a URL and return the body. Pass text_only=true to strip HTML for readability.",
-        "parameters": {"type": "object", "properties": {
-            "url": {"type": "string"},
-            "timeout": {"type": "integer"},
-            "max_bytes": {"type": "integer"},
-            "text_only": {"type": "boolean"},
-        }, "required": ["url"]},
-    }},
-    {"type": "function", "function": {
-        "name": "web_search",
-        "description": "Search the web (DuckDuckGo HTML frontend). Returns title + URL pairs.",
-        "parameters": {"type": "object", "properties": {
-            "query": {"type": "string"}, "limit": {"type": "integer"},
-        }, "required": ["query"]},
-    }},
-
+    {
+        "type": "function",
+        "function": {
+            "name": "web_fetch",
+            "description": "Fetch a URL and return the body. Pass text_only=true to strip HTML for readability.",
+            "parameters": {
+                "type": "object",
+                "properties": {
+                    "url": {"type": "string"},
+                    "timeout": {"type": "integer"},
+                    "max_bytes": {"type": "integer"},
+                    "text_only": {"type": "boolean"},
+                },
+                "required": ["url"],
+            },
+        },
+    },
+    {
+        "type": "function",
+        "function": {
+            "name": "web_search",
+            "description": "Search the web (DuckDuckGo HTML frontend). Returns title + URL pairs.",
+            "parameters": {
+                "type": "object",
+                "properties": {
+                    "query": {"type": "string"},
+                    "limit": {"type": "integer"},
+                },
+                "required": ["query"],
+            },
+        },
+    },
     # ---------- shell ----------
-    {"type": "function", "function": {
-        "name": "run_bash",
-        "description": "Run a shell command in the workspace. Requires user approval.",
-        "parameters": {"type": "object", "properties": {
-            "command": {"type": "string"},
-            "timeout": {"type": "integer"},
-        }, "required": ["command"]},
-    }},
-    {"type": "function", "function": {
-        "name": "bash_async",
-        "description": "Run a shell command in the background. Returns a job id; poll with task_status / task_wait.",
-        "parameters": {"type": "object", "properties": {
-            "command": {"type": "string"}, "timeout": {"type": "integer"},
-        }, "required": ["command"]},
-    }},
-
+    {
+        "type": "function",
+        "function": {
+            "name": "run_bash",
+            "description": "Run a shell command in the workspace. Requires user approval.",
+            "parameters": {
+                "type": "object",
+                "properties": {
+                    "command": {"type": "string"},
+                    "timeout": {"type": "integer"},
+                },
+                "required": ["command"],
+            },
+        },
+    },
+    {
+        "type": "function",
+        "function": {
+            "name": "bash_async",
+            "description": "Run a shell command in the background. Returns a job id; poll with task_status / task_wait.",
+            "parameters": {
+                "type": "object",
+                "properties": {
+                    "command": {"type": "string"},
+                    "timeout": {"type": "integer"},
+                },
+                "required": ["command"],
+            },
+        },
+    },
     # ---------- tasks ----------
-    {"type": "function", "function": {
-        "name": "task_get",
-        "description": "Get one task by id.",
-        "parameters": {"type": "object", "properties": {"id": {"type": "string"}}, "required": ["id"]},
-    }},
-    {"type": "function", "function": {
-        "name": "task_list",
-        "description": "List tasks, optionally filtered by status.",
-        "parameters": {"type": "object", "properties": {"status": {"type": "string"}}},
-    }},
-    {"type": "function", "function": {
-        "name": "task_status",
-        "description": "Check the status of a background job.",
-        "parameters": {"type": "object", "properties": {"task_id": {"type": "string"}}, "required": ["task_id"]},
-    }},
-    {"type": "function", "function": {
-        "name": "task_wait",
-        "description": "Block until a background job finishes or timeout elapses.",
-        "parameters": {"type": "object", "properties": {
-            "task_id": {"type": "string"}, "timeout": {"type": "number"},
-        }, "required": ["task_id"]},
-    }},
-    {"type": "function", "function": {
-        "name": "task_output",
-        "description": "Read the result/output of a task or background job.",
-        "parameters": {"type": "object", "properties": {"id": {"type": "string"}}, "required": ["id"]},
-    }},
-
+    {
+        "type": "function",
+        "function": {
+            "name": "task_get",
+            "description": "Get one task by id.",
+            "parameters": {
+                "type": "object",
+                "properties": {"id": {"type": "string"}},
+                "required": ["id"],
+            },
+        },
+    },
+    {
+        "type": "function",
+        "function": {
+            "name": "task_list",
+            "description": "List tasks, optionally filtered by status.",
+            "parameters": {"type": "object", "properties": {"status": {"type": "string"}}},
+        },
+    },
+    {
+        "type": "function",
+        "function": {
+            "name": "task_status",
+            "description": "Check the status of a background job.",
+            "parameters": {
+                "type": "object",
+                "properties": {"task_id": {"type": "string"}},
+                "required": ["task_id"],
+            },
+        },
+    },
+    {
+        "type": "function",
+        "function": {
+            "name": "task_wait",
+            "description": "Block until a background job finishes or timeout elapses.",
+            "parameters": {
+                "type": "object",
+                "properties": {
+                    "task_id": {"type": "string"},
+                    "timeout": {"type": "number"},
+                },
+                "required": ["task_id"],
+            },
+        },
+    },
+    {
+        "type": "function",
+        "function": {
+            "name": "task_output",
+            "description": "Read the result/output of a task or background job.",
+            "parameters": {
+                "type": "object",
+                "properties": {"id": {"type": "string"}},
+                "required": ["id"],
+            },
+        },
+    },
     # ---------- interaction / planning ----------
-    {"type": "function", "function": {
-        "name": "ask_user_question",
-        "description": "Pause and ask the user a question, with optional multiple-choice options.",
-        "parameters": {"type": "object", "properties": {
-            "question": {"type": "string"},
-            "options": {"type": "array", "items": {"type": "string"}},
-        }, "required": ["question"]},
-    }},
-    {"type": "function", "function": {
-        "name": "enter_plan_mode",
-        "description": "Enter PLAN MODE: read-only, no mutating tools.",
-        "parameters": {"type": "object", "properties": {}},
-    }},
-    {"type": "function", "function": {
-        "name": "exit_plan_mode",
-        "description": "Leave plan mode.",
-        "parameters": {"type": "object", "properties": {}},
-    }},
-    {"type": "function", "function": {
-        "name": "todo_write",
-        "description": "Replace this session's todo list. Use reminder_add for persistent reminders.",
-        "parameters": {"type": "object", "properties": {"items": {"type": "array", "items": {}}}, "required": ["items"]},
-    }},
-    {"type": "function", "function": {
-        "name": "tool_search",
-        "description": "Search the registered tools by keyword.",
-        "parameters": {"type": "object", "properties": {"query": {"type": "string"}}},
-    }},
-
+    {
+        "type": "function",
+        "function": {
+            "name": "ask_user_question",
+            "description": "Pause and ask the user a question, with optional multiple-choice options.",
+            "parameters": {
+                "type": "object",
+                "properties": {
+                    "question": {"type": "string"},
+                    "options": {"type": "array", "items": {"type": "string"}},
+                },
+                "required": ["question"],
+            },
+        },
+    },
+    {
+        "type": "function",
+        "function": {
+            "name": "enter_plan_mode",
+            "description": "Enter PLAN MODE: read-only, no mutating tools.",
+            "parameters": {"type": "object", "properties": {}},
+        },
+    },
+    {
+        "type": "function",
+        "function": {
+            "name": "exit_plan_mode",
+            "description": "Leave plan mode.",
+            "parameters": {"type": "object", "properties": {}},
+        },
+    },
+    {
+        "type": "function",
+        "function": {
+            "name": "todo_write",
+            "description": "Replace this session's todo list. Use reminder_add for persistent reminders.",
+            "parameters": {
+                "type": "object",
+                "properties": {"items": {"type": "array", "items": {}}},
+                "required": ["items"],
+            },
+        },
+    },
+    {
+        "type": "function",
+        "function": {
+            "name": "tool_search",
+            "description": "Search the registered tools by keyword.",
+            "parameters": {"type": "object", "properties": {"query": {"type": "string"}}},
+        },
+    },
     # ---------- system ----------
-    {"type": "function", "function": {
-        "name": "config_get",
-        "description": "Read a value from the persistent config (e.g. 'user_name').",
-        "parameters": {"type": "object", "properties": {"key": {"type": "string"}}, "required": ["key"]},
-    }},
-    {"type": "function", "function": {
-        "name": "config_set",
-        "description": "Set a config value. Asks for approval.",
-        "parameters": {"type": "object", "properties": {
-            "key": {"type": "string"}, "value": {},
-        }, "required": ["key", "value"]},
-    }},
-    {"type": "function", "function": {
-        "name": "sleep",
-        "description": "Pause for `seconds` (capped at 60).",
-        "parameters": {"type": "object", "properties": {"seconds": {"type": "number"}}},
-    }},
-    {"type": "function", "function": {
-        "name": "skill",
-        "description": "Manage and apply skills (markdown bundles in ~/.config/cagentic/skills/). op: list | get | use.",
-        "parameters": {"type": "object", "properties": {
-            "op": {"type": "string", "enum": ["list", "get", "use"]},
-            "name": {"type": "string"},
-        }},
-    }},
+    {
+        "type": "function",
+        "function": {
+            "name": "config_get",
+            "description": "Read a value from the persistent config (e.g. 'user_name').",
+            "parameters": {
+                "type": "object",
+                "properties": {"key": {"type": "string"}},
+                "required": ["key"],
+            },
+        },
+    },
+    {
+        "type": "function",
+        "function": {
+            "name": "config_set",
+            "description": "Set a config value. Asks for approval.",
+            "parameters": {
+                "type": "object",
+                "properties": {
+                    "key": {"type": "string"},
+                    "value": {},
+                },
+                "required": ["key", "value"],
+            },
+        },
+    },
+    {
+        "type": "function",
+        "function": {
+            "name": "sleep",
+            "description": "Pause for `seconds` (capped at 60).",
+            "parameters": {"type": "object", "properties": {"seconds": {"type": "number"}}},
+        },
+    },
+    {
+        "type": "function",
+        "function": {
+            "name": "skill",
+            "description": "Manage and apply skills (markdown bundles in ~/.config/cagentic/skills/). op: list | get | use.",
+            "parameters": {
+                "type": "object",
+                "properties": {
+                    "op": {"type": "string", "enum": ["list", "get", "use"]},
+                    "name": {"type": "string"},
+                },
+            },
+        },
+    },
 ]
 
 
 def _all_tools() -> dict[str, ToolFn]:
+    from .coding_tools import CODING_TOOLS
     from .github import GITHUB_TOOLS
-    return {**TOOLS, **GITHUB_TOOLS}
+
+    return {**TOOLS, **CODING_TOOLS, **GITHUB_TOOLS}
 
 
 # Tool groups — bundle related tools so the user can keep the prompt lean.
 TOOL_GROUPS: dict[str, list[str]] = {
-    "files": ["read_file", "write_file", "edit_file", "replace_lines",
-              "list_dir", "grep", "glob", "set_workspace"],
+    "files": [
+        "read_file",
+        "write_file",
+        "edit_file",
+        "replace_lines",
+        "list_dir",
+        "grep",
+        "glob",
+        "set_workspace",
+    ],
     "web": ["web_fetch", "web_search"],
-    "notes": ["note_write", "note_get", "note_list", "note_search", "note_delete",
-              "chat_search", "chat_get"],
-    "reminders": ["reminder_add", "reminder_list", "reminder_done",
-                  "reminder_delete", "reminder_update"],
-    "mcp": ["mcp_list_servers", "mcp_list_tools", "mcp_call",
-            "mcp_list_resources", "mcp_read_resource"],
-    "browser": ["browser_status", "browser_tabs", "browser_read",
-                "browser_open", "browser_navigate", "browser_click",
-                "browser_fill", "browser_scroll", "browser_screenshot",
-                "browser_click_at", "browser_links", "browser_download",
-                "browser_eval", "browser_close"],
-    "shell": ["run_bash", "bash_async"],
-    "tasks": ["task_get", "task_list", "task_status", "task_wait", "task_output"],
+    "notes": [
+        "note_write",
+        "note_get",
+        "note_list",
+        "note_search",
+        "note_delete",
+        "chat_search",
+        "chat_get",
+    ],
+    "reminders": [
+        "reminder_add",
+        "reminder_list",
+        "reminder_done",
+        "reminder_delete",
+        "reminder_update",
+    ],
+    "life": [
+        "goal_create",
+        "goal_list",
+        "goal_update",
+        "goal_delete",
+        "calendar_event_add",
+        "calendar_event_list",
+        "calendar_event_update",
+        "calendar_event_delete",
+        "personal_briefing",
+        "calendar_connection_create",
+        "calendar_connection_list",
+        "calendar_connection_sync",
+        "calendar_connection_delete",
+        "notification_list",
+        "notification_update",
+        "inbox_capture",
+        "inbox_list",
+        "inbox_update",
+        "inbox_delete",
+        "email_connection_create",
+        "email_connection_list",
+        "email_connection_sync",
+        "email_connection_delete",
+        "routine_create",
+        "routine_list",
+        "routine_update",
+        "routine_delete",
+    ],
+    "mcp": [
+        "mcp_list_servers",
+        "mcp_list_tools",
+        "mcp_call",
+        "mcp_list_resources",
+        "mcp_read_resource",
+        "mcp_restart",
+    ],
+    "browser": [
+        "browser_status",
+        "browser_tabs",
+        "browser_read",
+        "browser_open",
+        "browser_navigate",
+        "browser_click",
+        "browser_fill",
+        "browser_scroll",
+        "browser_screenshot",
+        "browser_click_at",
+        "browser_links",
+        "browser_download",
+        "browser_eval",
+        "browser_close",
+    ],
+    "shell": ["run_bash", "bash_async", "powershell"],
+    "tasks": [
+        "task_create",
+        "task_update",
+        "task_get",
+        "task_list",
+        "task_delete",
+        "task_status",
+        "task_wait",
+        "task_stop",
+        "task_output",
+        "brief",
+    ],
     "interaction": ["ask_user_question"],
     "planning": ["enter_plan_mode", "exit_plan_mode", "todo_write"],
     "system": ["config_get", "config_set", "sleep", "skill", "tool_search"],
+    # Coding-agent tools absorbed from Collama.
+    "coding": ["check_syntax", "multi_edit", "notebook_edit"],
+    "worktree": ["enter_worktree", "exit_worktree"],
+    "subagent": ["agent_call", "agent_call_async"],
     # off by default
+    "teams": [
+        "team_create",
+        "team_delete",
+        "team_list",
+        "teammate_create",
+        "teammate_delete",
+        "teammate_list",
+        "send_message",
+        "inbox",
+        "coordinator_tick",
+        "coordinator_run",
+    ],
     "github": [
-        "gh_whoami", "gh_list_repos", "gh_get_repo", "gh_get_file",
-        "gh_list_issues", "gh_create_issue", "gh_list_pulls", "gh_get_pull",
-        "gh_search_code", "github_api",
+        "gh_whoami",
+        "gh_list_repos",
+        "gh_get_repo",
+        "gh_get_file",
+        "gh_list_issues",
+        "gh_create_issue",
+        "gh_list_pulls",
+        "gh_get_pull",
+        "gh_search_code",
+        "github_api",
     ],
 }
 
 # Personal-assistant defaults. Shell uses run_bash's per-call confirm;
 # browser tools gate their mutating actions the same way.
 DEFAULT_GROUPS: set[str] = {
-    "files", "web", "notes", "reminders", "mcp", "browser",
-    "shell", "tasks", "interaction", "planning", "system",
+    "files",
+    "web",
+    "notes",
+    "reminders",
+    "life",
+    "mcp",
+    "browser",
+    "shell",
+    "tasks",
+    "interaction",
+    "planning",
+    "system",
+    "coding",
+    "worktree",
+    "subagent",
 }
 
 
@@ -2459,47 +3801,57 @@ def all_tool_schemas(
     enabled_groups: set[str] | None = None,
     compact: bool = True,
 ) -> list[dict]:
-    from .github import GITHUB_TOOL_SCHEMAS
     groups = DEFAULT_GROUPS if enabled_groups is None else set(enabled_groups)
+    return list(_cached_tool_schemas(frozenset(groups), compact))
+
+
+@lru_cache(maxsize=32)
+def _cached_tool_schemas(groups: frozenset[str], compact: bool) -> tuple[dict, ...]:
+    from .coding_tools import CODING_TOOL_SCHEMAS
+    from .github import GITHUB_TOOL_SCHEMAS
+
     allowed = {n for g in groups for n in TOOL_GROUPS.get(g, ())}
-    schemas = TOOL_SCHEMAS + GITHUB_TOOL_SCHEMAS
+    schemas = TOOL_SCHEMAS + CODING_TOOL_SCHEMAS + GITHUB_TOOL_SCHEMAS
     filtered = [s for s in schemas if s.get("function", {}).get("name") in allowed]
-    return [_compact_schema(s) for s in filtered] if compact else filtered
+    result = [_compact_schema(s) for s in filtered] if compact else filtered
+    return tuple(result)
 
 
 TOOL_ALIASES: dict[str, str] = {
-    "read":         "read_file",
-    "open":         "read_file",
-    "view":         "read_file",
-    "cat":          "read_file",
-    "write":        "write_file",
-    "create":       "write_file",
-    "edit":         "edit_file",
-    "patch":        "edit_file",
-    "replace":      "edit_file",
-    "ls":           "list_dir",
-    "list":         "list_dir",
-    "dir":          "list_dir",
-    "search":       "grep",
-    "find":         "glob",
-    "bash":         "run_bash",
-    "shell":        "run_bash",
-    "exec":         "run_bash",
-    "run":          "run_bash",
-    "cd":           "set_workspace",
-    "fetch":        "web_fetch",
-    "curl":         "web_fetch",
-    "wget":         "web_fetch",
-    "search_web":   "web_search",
-    "todo":         "todo_write",
-    "todos":        "todo_write",
+    "read": "read_file",
+    "open": "read_file",
+    "view": "read_file",
+    "cat": "read_file",
+    "write": "write_file",
+    "create": "write_file",
+    "edit": "edit_file",
+    "patch": "edit_file",
+    "replace": "edit_file",
+    "ls": "list_dir",
+    "list": "list_dir",
+    "dir": "list_dir",
+    "search": "grep",
+    "find": "glob",
+    "bash": "run_bash",
+    "shell": "run_bash",
+    "exec": "run_bash",
+    "run": "run_bash",
+    "cd": "set_workspace",
+    "fetch": "web_fetch",
+    "curl": "web_fetch",
+    "wget": "web_fetch",
+    "search_web": "web_search",
+    "todo": "todo_write",
+    "todos": "todo_write",
     # personal-assistant friendly aliases
-    "note":         "note_write",
-    "save_note":    "note_write",
-    "remember":     "note_write",
-    "remind":       "reminder_add",
+    "note": "note_write",
+    "save_note": "note_write",
+    "remember": "note_write",
+    "remind": "reminder_add",
     "add_reminder": "reminder_add",
     "todo_persistent": "reminder_add",
+    # Collama-era name for the server listing.
+    "mcp_servers": "mcp_list_servers",
 }
 
 
@@ -2515,17 +3867,20 @@ def dispatch(name: str, args: dict, ctx: ToolContext) -> str:
             try:
                 result = all_tools[canonical](args, ctx)
             except KeyError as e:
-                logger.warning("tool %r (alias %r) missing argument %s",
-                               canonical, name, e, exc_info=True)
+                logger.warning(
+                    "tool %r (alias %r) missing argument %s", canonical, name, e, exc_info=True
+                )
                 return f"ERROR: missing argument {e}"
             except Exception as e:
-                logger.warning("tool %r (alias %r) raised %s",
-                               canonical, name, type(e).__name__, exc_info=True)
+                logger.warning(
+                    "tool %r (alias %r) raised %s", canonical, name, type(e).__name__, exc_info=True
+                )
                 return f"ERROR: {type(e).__name__}: {e}"
             if isinstance(result, str) and not result.startswith("ERROR"):
                 result = f"[note: '{name}' is an alias for '{canonical}']\n{result}"
             return result
         import difflib
+
         pool = list(all_tools.keys()) + list(TOOL_ALIASES.keys())
         suggestions = difflib.get_close_matches(name.lower(), pool, n=3, cutoff=0.4)
         canonical_suggestions: list[str] = []
@@ -2533,7 +3888,9 @@ def dispatch(name: str, args: dict, ctx: ToolContext) -> str:
             c = TOOL_ALIASES.get(s, s)
             if c in all_tools and c not in canonical_suggestions:
                 canonical_suggestions.append(c)
-        hint = f"  Did you mean: {', '.join(canonical_suggestions)}?" if canonical_suggestions else ""
+        hint = (
+            f"  Did you mean: {', '.join(canonical_suggestions)}?" if canonical_suggestions else ""
+        )
         return f"ERROR: unknown tool '{name}'.{hint}  Use /tools to see the full list."
     try:
         return fn(args, ctx)

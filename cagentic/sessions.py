@@ -1,8 +1,9 @@
 """Saved conversation sessions on disk.
 
 Each session is JSON at ~/.config/cagentic/sessions/<id>.json with:
-    {id, title, model, created_at, updated_at, messages: [...]}
+    {id, title, model, project, created_at, updated_at, messages: [...]}
 """
+
 from __future__ import annotations
 
 import json
@@ -17,6 +18,7 @@ import uuid
 from pathlib import Path
 from typing import Any
 
+from . import storage
 from .config import config_dir
 
 logger = logging.getLogger(__name__)
@@ -33,6 +35,8 @@ def sessions_dir() -> Path:
 
 
 def _path(session_id: str) -> Path:
+    if not isinstance(session_id, str) or not re.fullmatch(r"[A-Za-z0-9_-]{1,64}", session_id):
+        raise ValueError("invalid session id")
     return sessions_dir() / f"{session_id}.json"
 
 
@@ -40,17 +44,23 @@ def new_id() -> str:
     return uuid.uuid4().hex[:12]
 
 
-def make(model: str, title: str | None = None, project_id: str | None = None) -> dict[str, Any]:
-      now = int(time.time())
-      return {
-          "id": new_id(),
-          "title": title or "untitled",
-          "model": model,
-          "project_id": project_id or "",
-          "created_at": now,
-          "updated_at": now,
-          "messages": [],
-      }
+def make(
+    model: str,
+    title: str | None = None,
+    project_id: str | None = None,
+    project: dict | None = None,
+) -> dict[str, Any]:
+    now = int(time.time())
+    return {
+        "id": new_id(),
+        "title": title or "untitled",
+        "model": model,
+        "project_id": project_id or "",
+        "project": project,
+        "created_at": now,
+        "updated_at": now,
+        "messages": [],
+    }
 
 
 def derive_title(messages: list[dict]) -> str:
@@ -95,44 +105,70 @@ def save(session: dict) -> Path:
             except OSError:
                 logger.warning("could not clean up temp file %s", tmp_name, exc_info=True)
             raise
+    storage.put("sessions", session["id"], session, session["updated_at"])
     return p
 
 
 def load(session_id: str) -> dict | None:
-    p = _path(session_id)
+    try:
+        p = _path(session_id)
+    except ValueError:
+        return None
+    storage.migrate_json_files("sessions", sessions_dir().glob("*.json"))
+    stored = storage.get("sessions", session_id)
+    if isinstance(stored, dict):
+        stored.setdefault("project", None)
+        return stored
     if not p.exists():
         return None
     try:
-        return json.loads(p.read_text(encoding="utf-8"))
+        data = json.loads(p.read_text(encoding="utf-8"))
+        data.setdefault("project", None)
+        return data
     except (json.JSONDecodeError, OSError):
         return None
 
 
 def delete(session_id: str) -> bool:
-    p = _path(session_id)
+    try:
+        p = _path(session_id)
+    except ValueError:
+        return False
+    deleted = storage.delete("sessions", session_id)
     if p.exists():
         p.unlink()
         return True
-    return False
+    return deleted
 
 
 def list_all() -> list[dict]:
+    storage.migrate_json_files("sessions", sessions_dir().glob("*.json"))
     out = []
-    for p in sessions_dir().glob("*.json"):
-        try:
-            data = json.loads(p.read_text())
-        except (json.JSONDecodeError, OSError):
+    for data in storage.list_values("sessions"):
+        if not isinstance(data, dict):
             continue
-        out.append({
-            "id": data.get("id", p.stem),
-            "title": data.get("title", "untitled"),
-            "model": data.get("model", "?"),
-            "project_id": data.get("project_id", ""),
-            "updated_at": data.get("updated_at", 0),
-            "turns": sum(1 for m in data.get("messages", []) if m.get("role") == "user"),
-        })
+        out.append(
+            {
+                "id": data.get("id", ""),
+                "title": data.get("title", "untitled"),
+                "model": data.get("model", "?"),
+                "project_id": data.get("project_id", ""),
+                "project": data.get("project"),
+                "updated_at": data.get("updated_at", 0),
+                "turns": sum(1 for m in data.get("messages", []) if m.get("role") == "user"),
+            }
+        )
     out.sort(key=lambda s: s["updated_at"], reverse=True)
     return out
+
+
+def search(query: str, limit: int = 50) -> list[dict]:
+    storage.migrate_json_files("sessions", sessions_dir().glob("*.json"))
+    found = []
+    for data in storage.search_values("sessions", query, limit):
+        if isinstance(data, dict):
+            found.append(data)
+    return found
 
 
 def fmt_time(ts: int) -> str:

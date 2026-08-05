@@ -9,6 +9,7 @@ Message-format translation (Ollama ↔ Anthropic):
 - tool call: assistant content block  {"type":"tool_use","id":…,"name":…,"input":{…}}
 - tool result: user content block     {"type":"tool_result","tool_use_id":…,"content":…}
 """
+
 from __future__ import annotations
 
 import json
@@ -96,9 +97,7 @@ class AnthropicClient:
     # Message / tool format conversion
     # ------------------------------------------------------------------
 
-    def _convert_messages(
-        self, messages: list[dict]
-    ) -> tuple[str, list[dict]]:
+    def _convert_messages(self, messages: list[dict]) -> tuple[str, list[dict]]:
         """Convert Cagentic's OpenAI-style messages to Anthropic format.
 
         Returns (system_text, anthropic_messages).
@@ -303,9 +302,7 @@ class AnthropicClient:
         saw_message_stop = False
 
         try:
-            with self._session.post(
-                _API_URL, json=body, stream=True, timeout=self.timeout
-            ) as r:
+            with self._session.post(_API_URL, json=body, stream=True, timeout=self.timeout) as r:
                 try:
                     r.raise_for_status()
                 except requests.RequestException as e:
@@ -346,9 +343,7 @@ class AnthropicClient:
                             full += text
                             yield ("delta", text)
                         elif dtype == "input_json_delta" and current_id:
-                            tool_blocks[current_id]["input_str"] += delta.get(
-                                "partial_json", ""
-                            )
+                            tool_blocks[current_id]["input_str"] += delta.get("partial_json", "")
 
                     elif etype == "content_block_stop":
                         current_id = None

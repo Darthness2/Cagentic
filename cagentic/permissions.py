@@ -7,36 +7,73 @@ Decision sources, in order:
     4. Resolver callback — interactive y/n/a prompt for the REPL,
        or auto-decide for the SDK / headless caller.
 """
+
 from __future__ import annotations
 
 from typing import Callable
 
 from .state import AppState
 
-
 # Tools that don't mutate anything we care about — always allowed.
 READ_ONLY: set[str] = {
     # files / search / shell-less inspection
-    "read_file", "list_dir", "grep", "glob", "tool_search",
+    "read_file",
+    "list_dir",
+    "grep",
+    "glob",
+    "tool_search",
     # asking the user is interactive but not destructive — skip the
     # extra approval prompt so it just shows the question.
     "ask_user_question",
     # web
-    "web_fetch", "web_search",
+    "web_fetch",
+    "web_search",
     # tasks / state inspection
-    "task_get", "task_list", "task_output", "task_status",
-    "config_get", "sleep",
+    "task_get",
+    "task_list",
+    "task_output",
+    "task_status",
+    "config_get",
+    "sleep",
+    # coding inspection (parser-only; never executes the code under test)
+    "check_syntax",
+    # teams inspection
+    "inbox",
+    "team_list",
+    "teammate_list",
     # notes / reminders read paths
-    "note_get", "note_list", "note_search",
+    "note_get",
+    "note_list",
+    "note_search",
     "reminder_list",
+    "goal_list",
+    "calendar_event_list",
+    "personal_briefing",
+    "calendar_connection_list",
+    "notification_list",
+    "inbox_list",
+    "email_connection_list",
+    "routine_list",
     # mcp inspection
-    "mcp_list_servers", "mcp_list_tools", "mcp_list_resources", "mcp_read_resource",
+    "mcp_list_servers",
+    "mcp_list_tools",
+    "mcp_list_resources",
+    "mcp_read_resource",
     # browser inspection (acting in the browser is gated; looking is not)
-    "browser_status", "browser_tabs", "browser_read", "browser_screenshot",
+    "browser_status",
+    "browser_tabs",
+    "browser_read",
+    "browser_screenshot",
     "browser_links",
     # github read
-    "gh_whoami", "gh_list_repos", "gh_get_repo", "gh_get_file",
-    "gh_list_issues", "gh_list_pulls", "gh_get_pull", "gh_search_code",
+    "gh_whoami",
+    "gh_list_repos",
+    "gh_get_repo",
+    "gh_get_file",
+    "gh_list_issues",
+    "gh_list_pulls",
+    "gh_get_pull",
+    "gh_search_code",
 }
 
 
@@ -59,8 +96,15 @@ def auto_deny_resolver(name: str, args: dict, state: AppState) -> str:
 # Tools allowed in plan mode even though they aren't strictly read-only —
 # things the model needs to organize its thinking without touching the world.
 PLAN_MODE_EXTRAS = {
-    "enter_plan_mode", "exit_plan_mode", "ask_user_question", "todo_write",
-    "tool_search", "task_get", "task_list", "task_output", "config_get",
+    "enter_plan_mode",
+    "exit_plan_mode",
+    "ask_user_question",
+    "todo_write",
+    "tool_search",
+    "task_get",
+    "task_list",
+    "task_output",
+    "config_get",
 }
 
 
@@ -78,7 +122,11 @@ def can_use_tool(
         return False, "permission cache: never"
 
     # Plan-mode gate: only read-only tools are allowed.
-    if getattr(state, "plan_mode", False) and name not in READ_ONLY and name not in PLAN_MODE_EXTRAS:
+    if (
+        getattr(state, "plan_mode", False)
+        and name not in READ_ONLY
+        and name not in PLAN_MODE_EXTRAS
+    ):
         return False, "plan mode active — mutating tools blocked"
 
     if name in READ_ONLY:
@@ -113,6 +161,7 @@ def terminal_resolver(name: str, args: dict, state: AppState) -> str:
 
     ui.stop_all_spinners()
     import sys as _sys
+
     if _sys.stdout.isatty():
         _sys.stdout.write("\033[?25h")
         _sys.stdout.flush()
@@ -134,7 +183,11 @@ def terminal_resolver(name: str, args: dict, state: AppState) -> str:
         detail = f": {name} {args}"
     ui.warn(f"\nApprove {name}{detail}?")
     try:
-        ans = input("  [y]es / [n]o / [a]lways this tool / 'yolo' to approve all / never: ").strip().lower()
+        ans = (
+            input("  [y]es / [n]o / [a]lways this tool / 'yolo' to approve all / never: ")
+            .strip()
+            .lower()
+        )
     except EOFError:
         return "no"
 

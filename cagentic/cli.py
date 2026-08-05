@@ -1,7 +1,9 @@
 """Command-line entry point for Cagentic."""
+
 from __future__ import annotations
 
 import argparse
+import json
 import logging
 import os
 import sys
@@ -10,12 +12,29 @@ from pathlib import Path
 
 logger = logging.getLogger(__name__)
 
-from . import __version__, config, notes as _notes, reminders as _reminders, sessions, ui
+from . import (
+    __version__,
+    config,
+    sessions,
+    ui,
+)
 from . import diff as _diff
+from . import (
+    notes as _notes,
+)
+from . import (
+    reminders as _reminders,
+)
 from .agent import Agent
 from .ollama_client import OllamaClient, OllamaError, _is_apple_silicon
 from .prompt import Prompt
-from .providers import build_client as _build_client, parse_model as _parse_model_provider
+from .providers import (
+    build_client as _build_client,
+)
+from .providers import (
+    parse_model as _parse_model_provider,
+)
+from .services.compact import SUMMARY_MARKER
 
 
 def parse_args(argv: list[str]) -> argparse.Namespace:
@@ -31,14 +50,37 @@ def parse_args(argv: list[str]) -> argparse.Namespace:
     p.add_argument("-t", "--temperature", type=float)
     p.add_argument("--name", help="What the assistant should call you (e.g. --name Alex).")
     p.add_argument("--reset-config", action="store_true")
-    p.add_argument("--serve", action="store_true",
-                   help="Run the gateway web UI headless (no REPL) until killed.")
-    p.add_argument("--port", type=int,
-                   help="Gateway port for --serve (default: config or 8700).")
-    p.add_argument("--install-service", action="store_true",
-                   help="Install the gateway as a background service that runs at login.")
-    p.add_argument("--uninstall-service", action="store_true",
-                   help="Remove the background gateway service.")
+    p.add_argument("--doctor", action="store_true", help="Run diagnostics and exit.")
+    p.add_argument(
+        "--json", action="store_true", help="Emit machine-readable JSON where supported."
+    )
+    p.add_argument("--setup", action="store_true", help="Run the interactive setup wizard.")
+    p.add_argument(
+        "--completion", choices=("bash", "zsh", "fish"), help="Print shell completion script."
+    )
+    p.add_argument("--sessions", action="store_true", help="List saved sessions and exit.")
+    p.add_argument("--search", metavar="TEXT", help="Search saved session titles/messages.")
+    p.add_argument("--context", metavar="SESSION", help="Show context usage for a session.")
+    p.add_argument("--compact", metavar="SESSION", help="Compact a saved session and exit.")
+    p.add_argument(
+        "--threshold", type=float, default=0.9, help="Compaction threshold (default: 0.9)."
+    )
+    p.add_argument(
+        "--serve",
+        action="store_true",
+        help="Run the gateway web UI headless (no REPL) until killed.",
+    )
+    p.add_argument("--port", type=int, help="Gateway port for --serve (default: config or 8700).")
+    p.add_argument(
+        "--install-service",
+        action="store_true",
+        help="Install the gateway as a background service that runs at login.",
+    )
+    p.add_argument(
+        "--uninstall-service",
+        action="store_true",
+        help="Remove the background gateway service.",
+    )
     p.add_argument("-V", "--version", action="version", version=f"cagentic {__version__}")
     return p.parse_args(argv)
 
@@ -57,6 +99,7 @@ Slash commands:
   /gateway [off]         start (or stop) the Cagentic web UI
                          (cagentic --install-service keeps it running 24/7)
   /plan on|off           toggle plan mode (read-only)
+  /effort low|med|high   how hard the model works per turn
   /todo [add|done|clear] session todo list
   /stream on|off         toggle token streaming
   /diag                  print model / workspace / tools / mcp status
@@ -78,12 +121,83 @@ Slash commands:
   /new [title]           start a new conversation
   /resume [id|num]       list/resume saved conversations
   /sessions              list saved conversations
+  /search <text>         search saved conversation titles and messages
+  /context               show current context usage
+  /compact               compact older context and keep recent turns
   /save [title]          force-save current conversation
   /rename <new title>    rename current conversation
   /delete <id|num>       delete a saved conversation
   /yolo [on|off]         toggle auto-approve
   /exit, /quit           leave
 """
+
+
+def _search_sessions(query: str) -> list[dict]:
+    needle = query.casefold().strip()
+    if not needle:
+        return []
+    results = []
+    for data in sessions.search(needle):
+        results.append(
+            {
+                "id": data.get("id", ""),
+                "title": data.get("title", "untitled"),
+                "model": data.get("model", "?"),
+                "updated_at": data.get("updated_at", 0),
+                "turns": sum(
+                    1 for message in data.get("messages", []) if message.get("role") == "user"
+                ),
+            }
+        )
+    return results
+
+
+def _setup_wizard(cfg: dict) -> None:
+    ui.info("Cagentic setup — press Enter to keep the current value.")
+    current_model = str(cfg.get("model") or "")
+    model = input(f"Model [{current_model or 'none'}]: ").strip() or current_model
+    if model:
+        cfg["model"] = model
+    name = input(f"Your name [{cfg.get('user_name') or ''}]: ").strip()
+    if name:
+        cfg["user_name"] = name
+    roots = input("Allowed workspace roots (separate with OS path separator): ").strip()
+    if roots:
+        config.set_value(cfg, "gateway.workspace_roots", roots.split(os.pathsep))
+    lan = input("Enable LAN gateway access? [y/N]: ").strip().lower()
+    if lan in ("y", "yes"):
+        config.set_value(cfg, "gateway.lan", True)
+        if not config.get_value(cfg, "gateway.token"):
+            import secrets
+
+            config.set_value(cfg, "gateway.token", secrets.token_urlsafe(32))
+    config.save(cfg)
+    ui.info(f"saved setup to {config.config_path()}")
+
+
+def _print_context(session_id: str, threshold: float, compact: bool = False) -> int:
+    from .services.compact import SUMMARY_MARKER, auto_compact
+    from .token_count import count_messages
+
+    data = sessions.load(session_id)
+    if data is None:
+        ui.error(f"session not found: {session_id}")
+        return 1
+    messages = [dict(message) for message in data.get("messages", [])]
+    before = count_messages(messages, str(data.get("model") or ""))
+    limit = max(1, int(8192 * threshold))
+    if compact:
+        auto_compact(messages, max_tokens=limit, keep_recent=6)
+        data["messages"] = [
+            message
+            for message in messages
+            if message.get("role") != "system"
+            or SUMMARY_MARKER in str(message.get("content") or "")
+        ]
+        sessions.save(data)
+    after = count_messages(messages, str(data.get("model") or ""))
+    print(json.dumps({"id": session_id, "before": before, "after": after}, indent=2))
+    return 0
 
 
 def _pick_model_interactive(client: OllamaClient) -> str | None:
@@ -150,20 +264,25 @@ def _redact(cfg: dict) -> dict:
 def _apply_setting_live(agent: Agent, key: str, value) -> bool:
     if key == "temperature":
         try:
-            agent.engine.temperature = float(value); return True
+            agent.engine.temperature = float(value)
+            return True
         except (TypeError, ValueError):
             return False
     if key == "ollama.num_ctx":
         try:
-            agent.client.num_ctx = int(value); return True
+            agent.client.num_ctx = int(value)
+            return True
         except (TypeError, ValueError):
             return False
     if key == "ollama.stream":
-        agent.engine.stream = bool(value); return True
+        agent.engine.stream = bool(value)
+        return True
     if key == "ollama.keep_alive":
-        agent.client.keep_alive = value; return True
+        agent.client.keep_alive = value
+        return True
     if key == "yolo":
-        agent.state.update(yolo=bool(value)); return True
+        agent.state.update(yolo=bool(value))
+        return True
     if key == "user_name":
         agent.state.update(user_name=str(value) if value else None)
         agent.engine.refresh_system_prompt()
@@ -177,9 +296,23 @@ def _apply_to_agent(agent: Agent, cfg: dict) -> None:
     agent.state.insecure_ssl = bool(config.get_value(cfg, "insecure_ssl", False))
 
 
+def _activate_model(agent: Agent, cfg: dict, model_spec: str) -> None:
+    """Switch both the provider client and model, preserving the full spec."""
+    provider, model_name = _parse_model_provider(model_spec)
+    new_client = _build_client(cfg, provider)
+    agent.client = new_client
+    agent.engine.client = new_client
+    agent.model = model_name
+    agent.state.active_model_spec = model_spec if provider != "ollama" else model_name
+
+
 def _autosave(session: dict, agent: Agent) -> None:
-    session["model"] = agent.model
-    session["messages"] = [m for m in agent.messages if m.get("role") != "system"]
+    session["model"] = agent.state.active_model_spec or agent.model
+    session["messages"] = [
+        m
+        for m in agent.messages
+        if m.get("role") != "system" or SUMMARY_MARKER in str(m.get("content") or "")
+    ]
     sessions.save(session)
 
 
@@ -189,11 +322,18 @@ def _print_sessions(active_id: str | None = None) -> list[dict]:
         ui.info("(no saved conversations)")
         return []
     print()
-    print(ui.color(f"  {'#':<3} {'id':<14} {'updated':<10} {'turns':<6} {'model':<20} title", ui.GRAY))
+    print(
+        ui.color(
+            f"  {'#':<3} {'id':<14} {'updated':<10} {'turns':<6} {'model':<20} title",
+            ui.GRAY,
+        )
+    )
     for i, s in enumerate(listed, 1):
         marker = ui.color(" ✦", ui.GLOW) if s["id"] == active_id else "  "
-        print(f"{marker}{i:<3} {s['id']:<14} {sessions.fmt_time(s['updated_at']):<10} "
-              f"{s['turns']:<6} {s['model'][:19]:<20} {s['title'][:60]}")
+        print(
+            f"{marker}{i:<3} {s['id']:<14} {sessions.fmt_time(s['updated_at']):<10} "
+            f"{s['turns']:<6} {s['model'][:19]:<20} {s['title'][:60]}"
+        )
     return listed
 
 
@@ -226,10 +366,14 @@ def _replay_conversation(messages: list[dict], max_turns: int = 12) -> None:
         role = m.get("role")
         content = (m.get("content") or "").strip()
         if role == "user":
-            if content.startswith((
-                "Tool result for ", "[background] ",
-                "STOP. You have called", "STOP. Tool outputs",
-            )):
+            if content.startswith(
+                (
+                    "Tool result for ",
+                    "[background] ",
+                    "STOP. You have called",
+                    "STOP. Tool outputs",
+                )
+            ):
                 continue
             print(ui.color("✦ ", ui.GLOW) + ui.color(content, ui.SURFACE))
         elif role == "assistant":
@@ -255,6 +399,7 @@ def _settle_in(agent: Agent) -> None:
     except Exception:
         rems, notes_n = [], 0
     import time as _t
+
     overdue = [r for r in rems if r.due_at and r.due_at < _t.time() and r.status == "pending"]
 
     bits = []
@@ -270,8 +415,10 @@ def _settle_in(agent: Agent) -> None:
 
     if overdue:
         print()
-        ui.warn(f"a heads-up — {len(overdue)} reminder"
-                f"{'s are' if len(overdue) != 1 else ' is'} overdue:")
+        ui.warn(
+            f"a heads-up — {len(overdue)} reminder"
+            f"{'s are' if len(overdue) != 1 else ' is'} overdue:"
+        )
         for r in overdue[:5]:
             print("    " + r.short().strip())
         if len(overdue) > 5:
@@ -280,11 +427,14 @@ def _settle_in(agent: Agent) -> None:
 
 def repl(agent: Agent, cfg: dict, gateway_holder: dict | None = None) -> int:
     gateway_holder = gateway_holder if gateway_holder is not None else {"server": None}
-    ui.banner(agent.model, str(agent.state.workspace),
-              tools_enabled=agent.tools_enabled,
-              user_name=agent.state.user_name)
+    ui.banner(
+        agent.model,
+        str(agent.state.workspace),
+        tools_enabled=agent.tools_enabled,
+        user_name=agent.state.user_name,
+    )
 
-    session = sessions.make(agent.model)
+    session = sessions.make(agent.state.active_model_spec or agent.model)
 
     def _on_turn(a):
         _autosave(session, a)
@@ -325,14 +475,20 @@ def repl(agent: Agent, cfg: dict, gateway_holder: dict | None = None) -> int:
                 continue
             if cmd == "tools":
                 from .tools import _all_tools
+
                 mode = "native" if agent.tools_enabled else "text-protocol fallback"
                 ui.info(f"mode: {mode}")
                 for n in _all_tools():
                     print(f"  - {n}")
                 continue
             if cmd == "groups":
-                from .tools import TOOL_GROUPS, DEFAULT_GROUPS
-                active = agent.state.tool_groups if agent.state.tool_groups is not None else DEFAULT_GROUPS
+                from .tools import DEFAULT_GROUPS, TOOL_GROUPS
+
+                active = (
+                    agent.state.tool_groups
+                    if agent.state.tool_groups is not None
+                    else DEFAULT_GROUPS
+                )
                 if not arg1:
                     ui.info("tool groups (✓ = sent to the model):")
                     for g, names in TOOL_GROUPS.items():
@@ -400,7 +556,9 @@ def repl(agent: Agent, cfg: dict, gateway_holder: dict | None = None) -> int:
             if cmd in ("remind", "reminders"):
                 if arg1 == "add":
                     if not arg2:
-                        ui.warn("usage: /remind add <text>  (or include time: 'call mom @ tomorrow')")
+                        ui.warn(
+                            "usage: /remind add <text>  (or include time: 'call mom @ tomorrow')"
+                        )
                         continue
                     # Crude '@ when' splitter
                     text, when = arg2, None
@@ -449,6 +607,7 @@ def repl(agent: Agent, cfg: dict, gateway_holder: dict | None = None) -> int:
             if cmd == "mcp":
                 # Lazy-init the MCP manager on the state
                 from .mcp_client import MCPManager
+
                 if agent.state.mcp is None:
                     agent.state.mcp = MCPManager(cfg)
                 mgr = agent.state.mcp
@@ -456,11 +615,17 @@ def repl(agent: Agent, cfg: dict, gateway_holder: dict | None = None) -> int:
                     names = mgr.names()
                     if not names:
                         ui.info("no MCP servers configured.")
-                        ui.info("add one under mcp.servers in ~/.config/cagentic/config.json, e.g.:")
+                        ui.info(
+                            "add one under mcp.servers in ~/.config/cagentic/config.json, e.g.:"
+                        )
                         print('  {"mcp": {"servers": {')
-                        print('    "notion": {"command": ["npx", "-y", "@notionhq/notion-mcp-server"],')
-                        print('               "env": {"NOTION_TOKEN": "secret_xxx"}, "enabled": true}')
-                        print('  }}}')
+                        print(
+                            '    "notion": {"command": ["npx", "-y", "@notionhq/notion-mcp-server"],'
+                        )
+                        print(
+                            '               "env": {"NOTION_TOKEN": "secret_xxx"}, "enabled": true}'
+                        )
+                        print("  }}}")
                     else:
                         ui.info(f"{len(names)} MCP server(s) configured:")
                         for n in names:
@@ -483,6 +648,7 @@ def repl(agent: Agent, cfg: dict, gateway_holder: dict | None = None) -> int:
                 continue
             if cmd == "browser":
                 from .browser import BrowserBridge
+
                 if agent.state.browser is None:
                     port = int((cfg.get("browser") or {}).get("port", 8765))
                     b = BrowserBridge(port=port)
@@ -496,8 +662,10 @@ def repl(agent: Agent, cfg: dict, gateway_holder: dict | None = None) -> int:
                     ui.info(f"Chrome extension is connected — bridge on port {b.port}.")
                     ui.info("Cagentic can read pages, open tabs, click, and fill forms.")
                 else:
-                    ui.warn(f"bridge running on port {b.port}, but the Chrome extension "
-                            f"isn't connected yet.")
+                    ui.warn(
+                        f"bridge running on port {b.port}, but the Chrome extension "
+                        f"isn't connected yet."
+                    )
                     ui.info("To connect it:")
                     print(f"  1. Open  chrome://extensions")
                     print(f"  2. Turn on 'Developer mode' (top-right)")
@@ -507,6 +675,7 @@ def repl(agent: Agent, cfg: dict, gateway_holder: dict | None = None) -> int:
                 continue
             if cmd == "gateway":
                 from .gateway import Gateway
+
                 gw = gateway_holder.get("server")
                 if arg1.lower() in ("off", "stop"):
                     if gw is None or not gw.running:
@@ -523,9 +692,13 @@ def repl(agent: Agent, cfg: dict, gateway_holder: dict | None = None) -> int:
                 gw = Gateway(agent, cfg, port=port)
                 if gw.start():
                     gateway_holder["server"] = gw
+                    if gw.start_notice:
+                        ui.warn(gw.start_notice)
                     ui.info(f"gateway is live — open {gw.url()} in your browser.")
-                    ui.info("it's the full assistant on the web; tool approvals pop "
-                            "up right in the page. /gateway off to stop it.")
+                    ui.info(
+                        "it's the full assistant on the web; tool approvals pop "
+                        "up right in the page. /gateway off to stop it."
+                    )
                 else:
                     ui.error(f"gateway couldn't start: {gw.error}")
                 continue
@@ -539,13 +712,37 @@ def repl(agent: Agent, cfg: dict, gateway_holder: dict | None = None) -> int:
                 agent.engine.refresh_system_prompt()
                 ui.info(f"plan mode: {'ON (read-only)' if agent.state.plan_mode else 'off'}")
                 continue
+            if cmd == "effort":
+                from .engine import EFFORT_LEVELS
+
+                if not arg1:
+                    ui.info(
+                        f"effort: {getattr(agent.state, 'effort', 'medium')}  "
+                        f"(usage: /effort {'|'.join(EFFORT_LEVELS)})"
+                    )
+                    continue
+                level = arg1.lower()
+                if level not in EFFORT_LEVELS:
+                    ui.warn(f"usage: /effort {'|'.join(EFFORT_LEVELS)}")
+                    continue
+                agent.state.update(effort=level)
+                agent.engine.refresh_system_prompt()
+                cfg["effort"] = level
+                config.save(cfg)
+                ui.info(f"effort: {level}")
+                continue
             if cmd == "todo":
                 todos = list(agent.state.todos or [])
                 if not arg1:
                     if not todos:
                         ui.info("(no todos)")
                     for i, t in enumerate(todos, 1):
-                        mark = {"done": "✓", "pending": " ", "active": "→", "blocked": "✗"}.get(t.get("status", "pending"), "?")
+                        mark = {
+                            "done": "✓",
+                            "pending": " ",
+                            "active": "→",
+                            "blocked": "✗",
+                        }.get(t.get("status", "pending"), "?")
                         print(f"  [{mark}] {i}. {t.get('text', '')}")
                     continue
                 if arg1 == "add":
@@ -572,12 +769,19 @@ def repl(agent: Agent, cfg: dict, gateway_holder: dict | None = None) -> int:
                 continue
             if cmd == "diag":
                 from .tools import DEFAULT_GROUPS
-                groups = agent.state.tool_groups if agent.state.tool_groups is not None else DEFAULT_GROUPS
+
+                groups = (
+                    agent.state.tool_groups
+                    if agent.state.tool_groups is not None
+                    else DEFAULT_GROUPS
+                )
                 ui.info(f"model:    {agent.model}")
                 ui.info(f"name:     {agent.state.user_name or '(not set — /name <your name>)'}")
                 ui.info(f"workspace: {agent.state.workspace}")
                 ui.info(f"home:     {Path.home()}")
-                ui.info(f"tools:    {'native' if agent.tools_enabled else 'text-protocol fallback'}")
+                ui.info(
+                    f"tools:    {'native' if agent.tools_enabled else 'text-protocol fallback'}"
+                )
                 ui.info(f"groups:   {', '.join(sorted(groups))}")
                 ui.info(f"stream:   {'on' if agent.engine.stream else 'off'}")
                 if isinstance(agent.client, OllamaClient):
@@ -594,12 +798,16 @@ def repl(agent: Agent, cfg: dict, gateway_holder: dict | None = None) -> int:
                         size_gb = status["size"] / (1024**3)
                         cpu_gb = status["cpu_bytes"] / (1024**3)
                         pct = status["cpu_percent"]
-                        ui.warn(f"{label}:    {cpu_gb:.1f}/{size_gb:.1f} GB on CPU ({pct:.0f}% offloaded — slow)")
+                        ui.warn(
+                            f"{label}:    {cpu_gb:.1f}/{size_gb:.1f} GB on CPU ({pct:.0f}% offloaded — slow)"
+                        )
                 else:
                     provider_name = type(agent.client).__name__.replace("Client", "")
                     ui.info(f"provider: {provider_name} (cloud — no local VRAM info)")
                 mcp_servers = list(((cfg.get("mcp") or {}).get("servers") or {}).keys())
-                ui.info(f"mcp:      {len(mcp_servers)} configured ({', '.join(mcp_servers) or 'none'})")
+                ui.info(
+                    f"mcp:      {len(mcp_servers)} configured ({', '.join(mcp_servers) or 'none'})"
+                )
                 notes_n = len(_notes.list_all())
                 rems_n = len(_reminders.list_all())
                 ui.info(f"data:     {notes_n} notes · {rems_n} active reminders")
@@ -611,35 +819,23 @@ def repl(agent: Agent, cfg: dict, gateway_holder: dict | None = None) -> int:
                 if want not in ("on", "off"):
                     ui.warn("usage: /stream on|off")
                     continue
-                agent.engine.stream = (want == "on")
+                agent.engine.stream = want == "on"
                 config.set_value(cfg, "ollama.stream", agent.engine.stream)
                 config.save(cfg)
                 ui.info(f"streaming: {'on' if agent.engine.stream else 'off'} (saved)")
                 continue
             if cmd == "model":
                 if not arg1:
-                    ui.info(f"current model: {agent.model}")
+                    ui.info(f"current model: {agent.state.active_model_spec or agent.model}")
                 else:
-                    new_provider, new_model = _parse_model_provider(arg1)
-                    # Rebuild the client whenever the PROVIDER changes — including
-                    # cloud → ollama. Only rebuilding for cloud providers left the
-                    # OpenAI/Anthropic client in place when switching back to a
-                    # local model, so every request went to the cloud endpoint
-                    # with an Ollama model name and 404'd.
-                    current_provider = _client_provider(agent.client)
-                    if new_provider != current_provider:
-                        try:
-                            new_client = _build_client(cfg, new_provider)
-                        except RuntimeError as _e:
-                            ui.error(str(_e))
-                            continue
-                        agent.client = new_client
-                        agent.engine.client = new_client
-                    agent.model = new_model
-                    agent.engine.model = new_model
+                    try:
+                        _activate_model(agent, cfg, arg1)
+                    except RuntimeError as _e:
+                        ui.error(str(_e))
+                        continue
                     cfg["model"] = arg1  # save full provider:model
                     config.save(cfg)
-                    supported = config.get_value(cfg, f"models.{new_model}.tools_supported", True)
+                    supported = config.get_value(cfg, f"models.{agent.model}.tools_supported", True)
                     agent.tools_enabled = bool(supported)
                     agent.engine.refresh_system_prompt()
                     ui.info(f"switched to {arg1} (saved)")
@@ -669,13 +865,16 @@ def repl(agent: Agent, cfg: dict, gateway_holder: dict | None = None) -> int:
                     cfg["host"] = agent.client.host
                     config.save(cfg)
                     if "0.0.0.0" in arg1 or arg1.strip() in ("::", "[::]", "0"):
-                        ui.info(f"{arg1!r} is a bind-all address — "
-                                f"using {agent.client.host} (a client can't dial 0.0.0.0).")
+                        ui.info(
+                            f"{arg1!r} is a bind-all address — "
+                            f"using {agent.client.host} (a client can't dial 0.0.0.0)."
+                        )
                     else:
                         ui.info(f"host set to {agent.client.host}")
                 continue
             if cmd == "config":
                 import json as _json
+
                 print(_json.dumps(_redact(cfg), indent=2))
                 ui.info(f"file: {config.config_path()}")
                 continue
@@ -694,7 +893,9 @@ def repl(agent: Agent, cfg: dict, gateway_holder: dict | None = None) -> int:
                 config.set_value(cfg, arg1, v)
                 config.save(cfg)
                 applied = _apply_setting_live(agent, arg1, v)
-                ui.info(f"set {arg1} = {v}" + ("  → applied live" if applied else "  → config only"))
+                ui.info(
+                    f"set {arg1} = {v}" + ("  → applied live" if applied else "  → config only")
+                )
                 continue
             if cmd == "name":
                 if not arg1:
@@ -723,14 +924,18 @@ def repl(agent: Agent, cfg: dict, gateway_holder: dict | None = None) -> int:
                         continue
                     config.set_value(cfg, "providers.openai.api_key", arg2)
                     config.save(cfg)
-                    ui.info("OpenAI API key saved. Use 'openai:<model>' to switch (e.g. /model openai:gpt-4o).")
+                    ui.info(
+                        "OpenAI API key saved. Use 'openai:<model>' to switch (e.g. /model openai:gpt-4o)."
+                    )
                 elif svc == "anthropic":
                     if not arg2:
                         ui.warn("usage: /login anthropic <api-key>")
                         continue
                     config.set_value(cfg, "providers.anthropic.api_key", arg2)
                     config.save(cfg)
-                    ui.info("Anthropic API key saved. Use 'anthropic:<model>' to switch (e.g. /model anthropic:claude-opus-4-8).")
+                    ui.info(
+                        "Anthropic API key saved. Use 'anthropic:<model>' to switch (e.g. /model anthropic:claude-opus-4-8)."
+                    )
                 else:
                     ui.warn("usage: /login github|openai|anthropic <key>")
                 continue
@@ -754,6 +959,7 @@ def repl(agent: Agent, cfg: dict, gateway_holder: dict | None = None) -> int:
                 continue
             if cmd == "whoami":
                 from .github import t_gh_whoami
+
                 print(t_gh_whoami({}, agent.ctx))
                 continue
             if cmd == "clear":
@@ -772,8 +978,10 @@ def repl(agent: Agent, cfg: dict, gateway_holder: dict | None = None) -> int:
                     before = entry.get("before", "")
                     after = entry.get("after", "")
                     adds, dels = _diff.stats(before, after)
-                    print(ui.color(f"  {op}  {path}  ", ui.DUSK) +
-                          ui.color(f"(+{adds} -{dels})", ui.MUTED))
+                    print(
+                        ui.color(f"  {op}  {path}  ", ui.DUSK)
+                        + ui.color(f"(+{adds} -{dels})", ui.MUTED)
+                    )
                     rendered = _diff.render(before, after, path, max_lines=20)
                     if rendered:
                         print(rendered)
@@ -805,7 +1013,9 @@ def repl(agent: Agent, cfg: dict, gateway_holder: dict | None = None) -> int:
                     _autosave(session, agent)
                     ui.info(f"saved {session['id']}")
                 session.clear()
-                session.update(sessions.make(agent.model, title=title))
+                session.update(
+                    sessions.make(agent.state.active_model_spec or agent.model, title=title)
+                )
                 agent.reset()
                 agent.on_turn_complete = _on_turn
                 agent.engine.session_id = session["id"]
@@ -825,11 +1035,15 @@ def repl(agent: Agent, cfg: dict, gateway_holder: dict | None = None) -> int:
                 if not data:
                     ui.error(f"could not load {target['id']}")
                     continue
+                try:
+                    _activate_model(agent, cfg, data.get("model") or agent.model)
+                except RuntimeError as e:
+                    ui.error(f"could not activate session model: {e}")
+                    continue
                 if len(agent.messages) > 1:
                     _autosave(session, agent)
                 session.clear()
                 session.update(data)
-                agent.model = data.get("model") or agent.model
                 saved_messages = data.get("messages", [])
                 agent.load_messages(saved_messages)
                 agent.on_turn_complete = _on_turn
@@ -839,6 +1053,45 @@ def repl(agent: Agent, cfg: dict, gateway_holder: dict | None = None) -> int:
                 continue
             if cmd == "sessions":
                 _print_sessions(active_id=session.get("id"))
+                continue
+            if cmd == "search":
+                query = (arg1 + (" " + arg2 if arg2 else "")).strip()
+                if not query:
+                    ui.warn("usage: /search <text>")
+                    continue
+                found = _search_sessions(query)
+                if not found:
+                    ui.info("no matching sessions")
+                for item in found:
+                    print(f"  {item['id']}  {item['title']}")
+                continue
+            if cmd == "context":
+                from .token_count import count_messages
+
+                used = count_messages(agent.messages, agent.state.active_model_spec or agent.model)
+                limit = int(config.get_value(cfg, "ollama.num_ctx", 8192) or 8192)
+                ui.info(f"context: {used:,} / {limit:,} tokens ({used / max(1, limit):.0%})")
+                continue
+            if cmd == "compact":
+                from .services.compact import auto_compact
+                from .token_count import count_messages
+
+                before = count_messages(
+                    agent.messages, agent.state.active_model_spec or agent.model
+                )
+                report = auto_compact(
+                    agent.messages,
+                    max_tokens=int((config.get_value(cfg, "ollama.num_ctx", 8192) or 8192) * 0.9),
+                    keep_recent=6,
+                    summarize_with_model=agent.engine._summarize_with_model,
+                )
+                _autosave(session, agent)
+                after = count_messages(agent.messages, agent.state.active_model_spec or agent.model)
+                ui.info(
+                    f"context compacted: {before:,} → {after:,} tokens"
+                    if report.triggered
+                    else f"context already compact enough ({after:,} tokens)"
+                )
                 continue
             if cmd == "save":
                 if arg1 or arg2:
@@ -892,7 +1145,14 @@ def repl(agent: Agent, cfg: dict, gateway_holder: dict | None = None) -> int:
                 ui.info(f"retrying: {last_user_input[:80]}")
                 line = last_user_input
             else:
-                ui.warn(f"unknown command: /{cmd}")
+                import difflib
+
+                from .prompt import SLASH_COMMANDS
+
+                names = [name.lstrip("/") for name, _hint in SLASH_COMMANDS]
+                suggestion = difflib.get_close_matches(cmd, names, n=1, cutoff=0.5)
+                hint = f" Did you mean /{suggestion[0]}?" if suggestion else ""
+                ui.warn(f"unknown command: /{cmd}.{hint}")
                 continue
 
         last_user_input = line
@@ -915,6 +1175,7 @@ def _list_models_with_retry(client, attempts: int = 5, delay: float = 2.0):
     won't fix a broken server.
     """
     import requests
+
     last_err: OllamaError | None = None
     for i in range(attempts):
         try:
@@ -934,8 +1195,15 @@ def _list_models_with_retry(client, attempts: int = 5, delay: float = 2.0):
 def main(argv: list[str] | None = None) -> int:
     args = parse_args(argv if argv is not None else sys.argv[1:])
 
+    if args.completion:
+        from .completion import script
+
+        print(script(args.completion))
+        return 0
+
     if args.install_service or args.uninstall_service:
         from . import service
+
         return service.install() if args.install_service else service.uninstall()
 
     if args.reset_config:
@@ -946,6 +1214,36 @@ def main(argv: list[str] | None = None) -> int:
             ui.info("no config to reset")
 
     cfg = config.load()
+
+    if args.setup:
+        _setup_wizard(cfg)
+        return 0
+    if args.doctor:
+        from .diagnostics import run
+
+        report = run(cfg)
+        if args.json:
+            print(json.dumps(report, indent=2))
+        else:
+            for check in report["checks"]:
+                mark = "OK" if check["ok"] else "FAIL"
+                print(f"{mark:<4} {check['name']:<18} {check['detail']}")
+        return 0 if report["ok"] else 1
+    if args.sessions:
+        _print_sessions()
+        return 0
+    if args.search is not None:
+        found = _search_sessions(args.search)
+        if args.json:
+            print(json.dumps(found, indent=2))
+        else:
+            for item in found:
+                print(f"{item['id']}  {item['title']}")
+        return 0
+    if args.context:
+        return _print_context(args.context, args.threshold)
+    if args.compact:
+        return _print_context(args.compact, args.threshold, compact=True)
 
     if args.name:
         config.set_value(cfg, "user_name", args.name)
@@ -969,11 +1267,15 @@ def main(argv: list[str] | None = None) -> int:
 
     # Normalize the Ollama host so /config shows the routable address.
     if isinstance(client, OllamaClient):
-        raw_host = args.host or os.environ.get("OLLAMA_HOST") or cfg.get("host", "http://localhost:11434")
+        raw_host = (
+            args.host or os.environ.get("OLLAMA_HOST") or cfg.get("host", "http://localhost:11434")
+        )
         cfg["host"] = client.host
         if "0.0.0.0" in raw_host or raw_host.strip() in ("::", "[::]", "0"):
-            ui.info(f"Ollama host {raw_host!r} is a bind-all address — "
-                    f"connecting to {client.host} instead.")
+            ui.info(
+                f"Ollama host {raw_host!r} is a bind-all address — "
+                f"connecting to {client.host} instead."
+            )
 
     model = model_raw
     if not model:
@@ -1020,9 +1322,13 @@ def main(argv: list[str] | None = None) -> int:
             ui.warn(f"model '{model}' not installed locally. Available: {', '.join(models[:8])}")
             ui.warn(f"Pull it with:  ollama pull {model}")
         else:
-            ui.warn(f"model '{model}' not found in provider list. Available: {', '.join(m.split(':',1)[-1] for m in models[:8])}")
+            ui.warn(
+                f"model '{model}' not found in provider list. Available: {', '.join(m.split(':', 1)[-1] for m in models[:8])}"
+            )
 
-    temperature = args.temperature if args.temperature is not None else float(cfg.get("temperature", 0.4))
+    temperature = (
+        args.temperature if args.temperature is not None else float(cfg.get("temperature", 0.4))
+    )
     yolo = args.yolo or bool(cfg.get("yolo", False))
     user_name = cfg.get("user_name")
 
@@ -1049,6 +1355,7 @@ def main(argv: list[str] | None = None) -> int:
         config=cfg,
         user_name=user_name,
     )
+    agent.state.active_model_spec = f"{provider}:{model}" if provider != "ollama" else model
     agent.state.github_token = config.get_value(cfg, "github.token")
     agent.state.insecure_ssl = bool(config.get_value(cfg, "insecure_ssl", False))
 
@@ -1059,12 +1366,14 @@ def main(argv: list[str] | None = None) -> int:
     # Wire MCP manager onto state, but lazy-start servers
     if cfg.get("mcp", {}).get("servers"):
         from .mcp_client import MCPManager
+
         agent.state.mcp = MCPManager(cfg)
 
     # Start the browser bridge so the Chrome extension can connect.
     br_cfg = cfg.get("browser") or {}
     if br_cfg.get("enabled", True):
         from .browser import BrowserBridge
+
         bridge = BrowserBridge(port=int(br_cfg.get("port", 8765)))
         if bridge.start():
             bridge.set_status(model=model, activity="idle")
@@ -1078,6 +1387,7 @@ def main(argv: list[str] | None = None) -> int:
     # Shutdown handlers: unload model + shut down MCP / browser / gateway.
     import atexit
     import signal
+
     _shutdown_done = {"flag": False}
 
     def _shutdown(*_):
@@ -1116,15 +1426,19 @@ def main(argv: list[str] | None = None) -> int:
 
     if args.serve:
         from .gateway import Gateway
+
         port = args.port or int((cfg.get("gateway") or {}).get("port", 8700))
         gw = Gateway(agent, cfg, port=port)
         if not gw.start():
             ui.error(f"gateway couldn't start: {gw.error}")
             return 1
         gateway_holder["server"] = gw
+        if gw.start_notice:
+            ui.warn(gw.start_notice)
         ui.info(f"gateway running at {gw.url()} — press Ctrl-C to stop.")
         try:
             import threading
+
             # Park the main thread with a short-timeout poll rather than
             # Event().wait() with no timeout: on Windows an unbounded wait
             # blocks in a non-interruptible C-level call, so SIGINT (Ctrl-C)
