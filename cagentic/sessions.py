@@ -5,25 +5,14 @@ Each session is JSON at ~/.config/cagentic/sessions/<id>.json with:
 """
 from __future__ import annotations
 
-import json
-import logging
-import os
 import re
-import stat
-import tempfile
-import threading
 import time
 import uuid
 from pathlib import Path
 from typing import Any
 
 from .config import config_dir
-
-logger = logging.getLogger(__name__)
-
-# Serializes concurrent saves (gateway thread + REPL autosave) so the
-# write-temp-then-replace dance can't interleave and corrupt a session file.
-_SAVE_LOCK = threading.Lock()
+from .storage import atomic_write_json, fmt_ago, read_json
 
 
 def sessions_dir() -> Path:
@@ -69,43 +58,11 @@ def save(session: dict) -> Path:
     session["updated_at"] = int(time.time())
     if session.get("title") in (None, "", "untitled"):
         session["title"] = derive_title(session.get("messages", []))
-    p = _path(session["id"])
-    d = p.parent
-    data = json.dumps(session, indent=2)
-    # Unique temp name + lock so concurrent savers can't clobber each other's
-    # temp file or race the replace. Session files don't hold secrets, so the
-    # default temp perms are fine; the atomic replace is what matters.
-    with _SAVE_LOCK:
-        fd, tmp_name = tempfile.mkstemp(dir=str(d), prefix=f".{session['id']}.", suffix=".tmp")
-        try:
-            # fchmod is POSIX-only; on Windows it raises AttributeError (not
-            # OSError), which the handler below wouldn't catch — leaking the fd
-            # and temp file. Session files hold no secrets anyway.
-            if hasattr(os, "fchmod"):
-                os.fchmod(fd, stat.S_IRUSR | stat.S_IWUSR)
-            with os.fdopen(fd, "w", encoding="utf-8") as f:
-                f.write(data)
-                f.flush()
-                os.fsync(f.fileno())
-            os.replace(tmp_name, p)
-        except OSError:
-            logger.warning("session save failed for %s", p, exc_info=True)
-            try:
-                os.unlink(tmp_name)
-            except OSError:
-                logger.warning("could not clean up temp file %s", tmp_name, exc_info=True)
-            raise
-    return p
+    return atomic_write_json(_path(session["id"]), session)
 
 
 def load(session_id: str) -> dict | None:
-    p = _path(session_id)
-    if not p.exists():
-        return None
-    try:
-        return json.loads(p.read_text(encoding="utf-8"))
-    except (json.JSONDecodeError, OSError):
-        return None
+    return read_json(_path(session_id), None)
 
 
 def delete(session_id: str) -> bool:
@@ -119,9 +76,8 @@ def delete(session_id: str) -> bool:
 def list_all() -> list[dict]:
     out = []
     for p in sessions_dir().glob("*.json"):
-        try:
-            data = json.loads(p.read_text())
-        except (json.JSONDecodeError, OSError):
+        data = read_json(p, None)
+        if not isinstance(data, dict):
             continue
         out.append({
             "id": data.get("id", p.stem),
@@ -136,13 +92,6 @@ def list_all() -> list[dict]:
 
 
 def fmt_time(ts: int) -> str:
-    if not ts:
-        return "?"
-    delta = int(time.time()) - ts
-    if delta < 60:
-        return f"{delta}s ago"
-    if delta < 3600:
-        return f"{delta // 60}m ago"
-    if delta < 86400:
-        return f"{delta // 3600}h ago"
-    return f"{delta // 86400}d ago"
+    """Relative time for the /sessions table. Kept as the module's own name
+    since callers import it from here; the ladder itself lives in storage."""
+    return fmt_ago(ts)

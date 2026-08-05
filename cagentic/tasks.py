@@ -16,6 +16,7 @@ from enum import Enum
 from pathlib import Path
 
 from .config import config_dir
+from .storage import atomic_write_json, status_mark
 
 
 class TaskKind(str, Enum):
@@ -76,7 +77,7 @@ class Task:
     def short(self) -> str:
         title = self.title if len(self.title) < 60 else self.title[:57] + "…"
         wt = f"  [wt:{self.worktree}]" if self.worktree else ""
-        return f"{self.id}  [{self.status:<8}]  {title}{wt}"
+        return f"{status_mark(self.status)} {self.id}  [{self.status:<8}]  {title}{wt}"
 
 
 class TaskGraph:
@@ -168,7 +169,4 @@ class TaskGraph:
             return False
 
     def _write(self, task: Task) -> None:
-        p = self._path(task.id)
-        tmp = p.with_suffix(".json.tmp")
-        tmp.write_text(json.dumps(task.to_dict(), indent=2), encoding="utf-8")
-        tmp.replace(p)
+        atomic_write_json(self._path(task.id), task.to_dict())

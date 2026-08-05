@@ -7,3 +7,11 @@ venv/
 .DS_Store
 build/
 dist/
+.pytest_cache/
+
+# Runtime output from `cagentic --serve` / daemon.py
+*.log
+keepalive.in
+
+# `> nul` under Git Bash creates a real file instead of discarding output
+nul

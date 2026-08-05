@@ -7,15 +7,13 @@ days/weeks until you mark them done.
 """
 from __future__ import annotations
 
-import json
-import os
 import secrets
-import stat
 import time
 from dataclasses import asdict, dataclass, field
 from pathlib import Path
 
 from .config import config_dir
+from .storage import atomic_write_json, fmt_duration, read_json, status_mark
 
 
 def _path() -> Path:
@@ -40,39 +38,22 @@ class Reminder:
         return asdict(self)
 
     def short(self) -> str:
-        mark = {"done": "✓", "pending": " ", "snoozed": "z", "cancelled": "✗"}.get(self.status, "?")
+        mark = status_mark(self.status)
         when = ""
         if self.due_at:
             d = self.due_at - time.time()
             if d < 0:
-                when = f"  (overdue {_fmt_dt(-d)})"
+                when = f"  (overdue {fmt_duration(-d)})"
             elif d < 86400 * 2:
-                when = f"  (in {_fmt_dt(d)})"
+                when = f"  (in {fmt_duration(d)})"
             else:
                 when = f"  (due {time.strftime('%a %b %d', time.localtime(self.due_at))})"
         tags = f"  [{','.join(self.tags)}]" if self.tags else ""
         return f"  [{mark}] {self.id}  {self.text}{tags}{when}"
 
 
-def _fmt_dt(seconds: float) -> str:
-    s = int(seconds)
-    if s < 60:
-        return f"{s}s"
-    if s < 3600:
-        return f"{s // 60}m"
-    if s < 86400:
-        return f"{s // 3600}h"
-    return f"{s // 86400}d"
-
-
 def _load_all() -> list[Reminder]:
-    p = _path()
-    if not p.exists():
-        return []
-    try:
-        raw = json.loads(p.read_text(encoding="utf-8"))
-    except (json.JSONDecodeError, OSError, UnicodeDecodeError):
-        return []
+    raw = read_json(_path(), [])
     out: list[Reminder] = []
     if isinstance(raw, list):
         for item in raw:
@@ -84,17 +65,7 @@ def _load_all() -> list[Reminder]:
 
 
 def _save_all(rems: list[Reminder]) -> None:
-    p = _path()
-    p.parent.mkdir(parents=True, exist_ok=True)
-    tmp = p.with_suffix(".json.tmp")
-    tmp.write_text(
-        json.dumps([r.to_dict() for r in rems], indent=2), encoding="utf-8"
-    )
-    tmp.replace(p)
-    try:
-        os.chmod(p, stat.S_IRUSR | stat.S_IWUSR)
-    except OSError:
-        pass
+    atomic_write_json(_path(), [r.to_dict() for r in rems])
 
 
 def add(text: str, *, due_at: float | None = None, tags: list[str] | None = None) -> Reminder:

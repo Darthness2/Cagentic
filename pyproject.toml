@@ -32,10 +32,10 @@ dependencies = [
 ]
 
 [project.urls]
-Homepage = "https://github.com/YOUR_USERNAME/cagentic"
-Documentation = "https://github.com/YOUR_USERNAME/cagentic#readme"
-Repository = "https://github.com/YOUR_USERNAME/cagentic"
-Issues = "https://github.com/YOUR_USERNAME/cagentic/issues"
+Homepage = "https://github.com/Darthness2/Cagentic"
+Documentation = "https://github.com/Darthness2/Cagentic#readme"
+Repository = "https://github.com/Darthness2/Cagentic"
+Issues = "https://github.com/Darthness2/Cagentic/issues"
 
 [project.scripts]
 cagentic = "cagentic.cli:main"

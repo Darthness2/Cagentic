@@ -5,24 +5,13 @@ Each project is JSON at ~/.config/cagentic/projects/<id>.json with:
 """
 from __future__ import annotations
 
-import json
-import logging
-import os
-import stat
-import tempfile
-import threading
 import time
 import uuid
 from pathlib import Path
 from typing import Any
 
 from .config import config_dir
-
-logger = logging.getLogger(__name__)
-
-# Serializes concurrent saves so the write-temp-then-replace dance can't
-# interleave and corrupt a project file.
-_SAVE_LOCK = threading.Lock()
+from .storage import atomic_write_json, read_json
 
 
 def projects_dir() -> Path:
@@ -57,42 +46,11 @@ def create(name: str, color: str | None = None) -> dict[str, Any]:
 
 def save(proj: dict) -> Path:
     proj["updated_at"] = int(time.time())
-    p = _path(proj["id"])
-    d = p.parent
-    data = json.dumps(proj, indent=2)
-    # Unique temp name + lock so concurrent savers can't clobber each other's
-    # temp file or race the replace.
-    with _SAVE_LOCK:
-        fd, tmp_name = tempfile.mkstemp(dir=str(d), prefix=f".{proj['id']}.", suffix=".tmp")
-        try:
-            # fchmod is POSIX-only; on Windows it raises AttributeError (not
-            # OSError), which the handler below wouldn't catch — leaking the fd
-            # and temp file.
-            if hasattr(os, "fchmod"):
-                os.fchmod(fd, stat.S_IRUSR | stat.S_IWUSR)
-            with os.fdopen(fd, "w", encoding="utf-8") as f:
-                f.write(data)
-                f.flush()
-                os.fsync(f.fileno())
-            os.replace(tmp_name, p)
-        except OSError:
-            logger.warning("project save failed for %s", p, exc_info=True)
-            try:
-                os.unlink(tmp_name)
-            except OSError:
-                logger.warning("could not clean up temp file %s", tmp_name, exc_info=True)
-            raise
-    return p
+    return atomic_write_json(_path(proj["id"]), proj)
 
 
 def load(project_id: str) -> dict | None:
-    p = _path(project_id)
-    if not p.exists():
-        return None
-    try:
-        return json.loads(p.read_text(encoding="utf-8"))
-    except (json.JSONDecodeError, OSError):
-        return None
+    return read_json(_path(project_id), None)
 
 
 def delete(project_id: str) -> bool:
@@ -106,9 +64,8 @@ def delete(project_id: str) -> bool:
 def list_all() -> list[dict]:
     out = []
     for p in projects_dir().glob("*.json"):
-        try:
-            data = json.loads(p.read_text(encoding="utf-8"))
-        except (json.JSONDecodeError, OSError):
+        data = read_json(p, None)
+        if not isinstance(data, dict):
             continue
         out.append({
             "id": data.get("id", p.stem),

@@ -5,6 +5,7 @@ import argparse
 import logging
 import os
 import sys
+import textwrap
 import time
 from pathlib import Path
 
@@ -16,6 +17,7 @@ from .agent import Agent
 from .ollama_client import OllamaClient, OllamaError, _is_apple_silicon
 from .prompt import Prompt
 from .providers import build_client as _build_client, parse_model as _parse_model_provider
+from .storage import status_mark as _status_mark
 
 
 def parse_args(argv: list[str]) -> argparse.Namespace:
@@ -43,47 +45,33 @@ def parse_args(argv: list[str]) -> argparse.Namespace:
     return p.parse_args(argv)
 
 
-HELP_TEXT = """\
-Slash commands:
-  /help                  show this help
-  /tools                 list tools the model can call
-  /groups [en/disable G] show or change which tool groups are sent
-  /cd [path]             show or change the working dir
-  /notes                 list saved notes
-  /note <name>           show one note
-  /remind [add <text>]   list reminders or add one
-  /mcp [server]          list MCP servers, or list tools on one
-  /browser               Chrome extension status + setup steps
-  /gateway [off]         start (or stop) the Cagentic web UI
-                         (cagentic --install-service keeps it running 24/7)
-  /plan on|off           toggle plan mode (read-only)
-  /todo [add|done|clear] session todo list
-  /stream on|off         toggle token streaming
-  /diag                  print model / workspace / tools / mcp status
-  /model [name]          show or switch model (saved)
-  /models                list installed Ollama models
-  /host [url]            show or change Ollama host
-  /config                show current config (tokens redacted)
-  /set <key> <value>     set a config value (e.g. user_name Alex)
-  /name <your name>      tell the assistant what to call you
-  /login github <token>   save a GitHub PAT
-  /login openai <key>     save OpenAI API key
-  /login anthropic <key>  save Anthropic API key
-  /logout github|openai|anthropic  remove a saved key
-  /whoami                show authenticated GitHub user
-  /clear                 reset conversation history
-  /diff [N]              show file edits this session
-  /undo                  revert the most recent file edit
-  /retry                 re-run your last message
-  /new [title]           start a new conversation
-  /resume [id|num]       list/resume saved conversations
-  /sessions              list saved conversations
-  /save [title]          force-save current conversation
-  /rename <new title>    rename current conversation
-  /delete <id|num>       delete a saved conversation
-  /yolo [on|off]         toggle auto-approve
-  /exit, /quit           leave
-"""
+def print_help() -> None:
+    """Render the command catalog in the app's palette.
+
+    Built from prompt.COMMAND_GROUPS — the same source the completion popup
+    uses — so the two can't drift apart.
+    """
+    from .prompt import COMMAND_GROUPS
+
+    # Align the hint column across every section, so the whole list reads as
+    # one table rather than six ragged ones.
+    usage = {
+        name: (f"{name} {args}" if args else name)
+        for _s, entries in COMMAND_GROUPS for name, args, _h in entries
+    }
+    col = min(max(len(u) for u in usage.values()) + 2, 34)
+
+    print()
+    for section, entries in COMMAND_GROUPS:
+        print("  " + ui.color(section, ui.DUSK + ui.BOLD))
+        for name, args, hint in entries:
+            u = usage[name]
+            pad = " " * max(1, col - len(u))
+            print("    " + ui.color(u, ui.GLOW) + pad + ui.color(hint, ui.MUTED))
+        print()
+    print("  " + ui.color("type / for completions · @path to attach a file",
+                          ui.SOFT))
+    print()
 
 
 def _pick_model_interactive(client: OllamaClient) -> str | None:
@@ -119,6 +107,34 @@ def _pick_model_interactive(client: OllamaClient) -> str | None:
         if 0 <= idx < len(models):
             return models[idx]
     return ans
+
+
+def print_tools(agent: Agent) -> None:
+    """List the model's tools by group, marking which groups are actually sent.
+
+    A flat 60-line column told you nothing about why a tool wasn't being used;
+    grouping shows the off switches (/groups) right next to what they control.
+    """
+    from .tools import DEFAULT_GROUPS, TOOL_GROUPS, _all_tools
+
+    active = (agent.state.tool_groups
+              if agent.state.tool_groups is not None else DEFAULT_GROUPS)
+    known = set(_all_tools())
+
+    print()
+    for group, names in TOOL_GROUPS.items():
+        on = group in active
+        mark = ui.color("✓", ui.OK) if on else ui.color("·", ui.SOFT)
+        head = ui.color(group, (ui.DUSK + ui.BOLD) if on else ui.SOFT)
+        suffix = "" if on else ui.color(f"  (off — /groups enable {group})", ui.SOFT)
+        print(f"  {mark} {head}{suffix}")
+        body = ", ".join(n for n in names if n in known)
+        for line in textwrap.wrap(body, max(30, ui.width() - 8)):
+            print("      " + ui.color(line, ui.MUTED if on else ui.SOFT))
+    print()
+    mode = "native" if agent.tools_enabled else "text-protocol fallback"
+    sent = len({n for g in active for n in TOOL_GROUPS.get(g, ()) if n in known})
+    ui.info(f"{sent} of {len(known)} tools sent to the model · mode: {mode}")
 
 
 def _reminder_miss(rid: str) -> str:
@@ -172,9 +188,13 @@ def _apply_setting_live(agent: Agent, key: str, value) -> bool:
 
 
 def _apply_to_agent(agent: Agent, cfg: dict) -> None:
-    agent.state.github_token = config.get_value(cfg, "github.token")
-    agent.state.yolo = bool(cfg.get("yolo", agent.state.yolo))
-    agent.state.insecure_ssl = bool(config.get_value(cfg, "insecure_ssl", False))
+    # Go through state.update() so subscribers (autosave, tool-support
+    # detection) actually see the change — direct assignment skips them.
+    agent.state.update(
+        github_token=config.get_value(cfg, "github.token"),
+        yolo=bool(cfg.get("yolo", agent.state.yolo)),
+        insecure_ssl=bool(config.get_value(cfg, "insecure_ssl", False)),
+    )
 
 
 def _autosave(session: dict, agent: Agent) -> None:
@@ -189,7 +209,7 @@ def _print_sessions(active_id: str | None = None) -> list[dict]:
         ui.info("(no saved conversations)")
         return []
     print()
-    print(ui.color(f"  {'#':<3} {'id':<14} {'updated':<10} {'turns':<6} {'model':<20} title", ui.GRAY))
+    print(ui.color(f"  {'#':<3} {'id':<14} {'updated':<10} {'turns':<6} {'model':<20} title", ui.SOFT))
     for i, s in enumerate(listed, 1):
         marker = ui.color(" ✦", ui.GLOW) if s["id"] == active_id else "  "
         print(f"{marker}{i:<3} {s['id']:<14} {sessions.fmt_time(s['updated_at']):<10} "
@@ -321,14 +341,10 @@ def repl(agent: Agent, cfg: dict, gateway_holder: dict | None = None) -> int:
             if cmd in ("exit", "quit"):
                 return 0
             if cmd == "help":
-                print(HELP_TEXT)
+                print_help()
                 continue
             if cmd == "tools":
-                from .tools import _all_tools
-                mode = "native" if agent.tools_enabled else "text-protocol fallback"
-                ui.info(f"mode: {mode}")
-                for n in _all_tools():
-                    print(f"  - {n}")
+                print_tools(agent)
                 continue
             if cmd == "groups":
                 from .tools import TOOL_GROUPS, DEFAULT_GROUPS
@@ -348,7 +364,7 @@ def repl(agent: Agent, cfg: dict, gateway_holder: dict | None = None) -> int:
                         groups.add(arg2)
                     else:
                         groups.discard(arg2)
-                    agent.state.tool_groups = groups
+                    agent.state.update(tool_groups=groups)
                     agent.engine.refresh_system_prompt()
                     config.set_value(cfg, "tool_groups", sorted(groups))
                     config.save(cfg)
@@ -545,8 +561,10 @@ def repl(agent: Agent, cfg: dict, gateway_holder: dict | None = None) -> int:
                     if not todos:
                         ui.info("(no todos)")
                     for i, t in enumerate(todos, 1):
-                        mark = {"done": "✓", "pending": " ", "active": "→", "blocked": "✗"}.get(t.get("status", "pending"), "?")
-                        print(f"  [{mark}] {i}. {t.get('text', '')}")
+                        mark = _status_mark(t.get("status", "pending"))
+                        done = t.get("status") == "done"
+                        print(f"  [{mark}] {i}. "
+                              + ui.color(t.get("text", ""), ui.SOFT if done else ui.SURFACE))
                     continue
                 if arg1 == "add":
                     text = arg2.strip()
@@ -573,38 +591,51 @@ def repl(agent: Agent, cfg: dict, gateway_holder: dict | None = None) -> int:
             if cmd == "diag":
                 from .tools import DEFAULT_GROUPS
                 groups = agent.state.tool_groups if agent.state.tool_groups is not None else DEFAULT_GROUPS
-                ui.info(f"model:    {agent.model}")
-                ui.info(f"name:     {agent.state.user_name or '(not set — /name <your name>)'}")
-                ui.info(f"workspace: {agent.state.workspace}")
-                ui.info(f"home:     {Path.home()}")
-                ui.info(f"tools:    {'native' if agent.tools_enabled else 'text-protocol fallback'}")
-                ui.info(f"groups:   {', '.join(sorted(groups))}")
-                ui.info(f"stream:   {'on' if agent.engine.stream else 'off'}")
+                # Labels were hand-padded and drifted out of alignment
+                # ("workspace:" is a character wider than the rest); pad once.
+                def _row(label: str, value: str, warn: bool = False) -> None:
+                    line = f"{label + ':':<11}{value}"
+                    (ui.warn if warn else ui.info)(line)
+
+                print()
+                _row("model", agent.model)
+                _row("name", agent.state.user_name or "(not set — /name <your name>)")
+                _row("workspace", str(agent.state.workspace))
+                _row("home", str(Path.home()))
+                _row("tools", "native" if agent.tools_enabled else "text-protocol fallback")
+                _row("groups", ", ".join(sorted(groups)))
+                _row("stream", "on" if agent.engine.stream else "off")
                 if isinstance(agent.client, OllamaClient):
-                    ui.info(f"num_ctx:  {agent.client.num_ctx}")
+                    _row("host", agent.client.host)
+                    _row("num_ctx", str(agent.client.num_ctx))
                     status = agent.client.model_vram_status(agent.model)
                     mac = _is_apple_silicon()
                     label = "memory" if mac else "vram"
                     if status is None:
-                        ui.info(f"{label}:    model not currently loaded")
+                        _row(label, "model not currently loaded")
                     elif status["fully_gpu"]:
                         place = "in Metal buffer (unified)" if mac else "fully on GPU ✓"
-                        ui.info(f"{label}:    {status['size_vram'] / (1024**3):.1f} GB · {place}")
+                        _row(label, f"{status['size_vram'] / (1024**3):.1f} GB · {place}")
                     else:
                         size_gb = status["size"] / (1024**3)
                         cpu_gb = status["cpu_bytes"] / (1024**3)
                         pct = status["cpu_percent"]
-                        ui.warn(f"{label}:    {cpu_gb:.1f}/{size_gb:.1f} GB on CPU ({pct:.0f}% offloaded — slow)")
+                        _row(label, f"{cpu_gb:.1f}/{size_gb:.1f} GB on CPU "
+                                    f"({pct:.0f}% offloaded — slow)", warn=True)
                 else:
-                    provider_name = type(agent.client).__name__.replace("Client", "")
-                    ui.info(f"provider: {provider_name} (cloud — no local VRAM info)")
+                    _row("provider", f"{_client_provider(agent.client)} "
+                                     f"(cloud — no local VRAM info)")
                 mcp_servers = list(((cfg.get("mcp") or {}).get("servers") or {}).keys())
-                ui.info(f"mcp:      {len(mcp_servers)} configured ({', '.join(mcp_servers) or 'none'})")
+                _row("mcp", f"{len(mcp_servers)} configured "
+                            f"({', '.join(mcp_servers) or 'none'})")
                 notes_n = len(_notes.list_all())
                 rems_n = len(_reminders.list_all())
-                ui.info(f"data:     {notes_n} notes · {rems_n} active reminders")
-                ui.info(f"github:   {'logged in' if agent.state.github_token else 'no token'}")
-                ui.info(f"input:    {prompt.backend}")
+                _row("data", f"{notes_n} notes · {rems_n} active reminders")
+                _row("github", "logged in" if agent.state.github_token else "no token")
+                _row("input", prompt.backend)
+                gw = gateway_holder.get("server")
+                _row("gateway", gw.url() if gw is not None and gw.running else "off")
+                print()
                 continue
             if cmd == "stream":
                 want = arg1.lower() if arg1 else ("off" if agent.engine.stream else "on")
@@ -892,7 +923,17 @@ def repl(agent: Agent, cfg: dict, gateway_holder: dict | None = None) -> int:
                 ui.info(f"retrying: {last_user_input[:80]}")
                 line = last_user_input
             else:
-                ui.warn(f"unknown command: /{cmd}")
+                # Same courtesy the tool dispatcher extends to the model:
+                # point at the nearest real command instead of a flat "no".
+                import difflib as _difflib
+                from .prompt import ALL_COMMANDS
+                near = _difflib.get_close_matches(
+                    f"/{cmd}", ALL_COMMANDS, n=3, cutoff=0.6
+                )
+                hint = f" — did you mean {', '.join(near)}?" if near else ""
+                ui.warn(f"unknown command: /{cmd}{hint}")
+                if not near:
+                    ui.info("type /help to see everything I know.")
                 continue
 
         last_user_input = line
@@ -1049,12 +1090,19 @@ def main(argv: list[str] | None = None) -> int:
         config=cfg,
         user_name=user_name,
     )
-    agent.state.github_token = config.get_value(cfg, "github.token")
-    agent.state.insecure_ssl = bool(config.get_value(cfg, "insecure_ssl", False))
+    agent.state.update(
+        github_token=config.get_value(cfg, "github.token"),
+        insecure_ssl=bool(config.get_value(cfg, "insecure_ssl", False)),
+    )
 
     saved_groups = config.get_value(cfg, "tool_groups", None)
     if isinstance(saved_groups, list) and saved_groups:
-        agent.state.tool_groups = set(saved_groups)
+        # Ignore group names that no longer exist rather than silently sending
+        # the model an empty toolset from a stale config.
+        from .tools import TOOL_GROUPS
+        known = {g for g in saved_groups if g in TOOL_GROUPS}
+        if known:
+            agent.state.update(tool_groups=known)
 
     # Wire MCP manager onto state, but lazy-start servers
     if cfg.get("mcp", {}).get("servers"):

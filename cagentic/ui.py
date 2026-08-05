@@ -36,7 +36,28 @@ def _enable_windows_ansi() -> None:
         pass
 
 
+def _ensure_utf8_output() -> None:
+    """Make stdout/stderr able to carry the UI's glyphs (✦ ◦ ↳ ✓ ─ …).
+
+    Attached to a real console, Python encodes output as UTF-16 and everything
+    works. Redirected to a pipe or a file it falls back to the locale encoding
+    — cp1252 on most Windows installs — and the very first banner line dies
+    with UnicodeEncodeError. `cagentic -p "hi" > out.txt` crashed for that
+    reason alone. Re-encode as UTF-8, and never let an unmappable glyph raise.
+    """
+    for stream in (sys.stdout, sys.stderr):
+        reconfigure = getattr(stream, "reconfigure", None)
+        if reconfigure is None:  # not a TextIOWrapper (test capture, etc.)
+            continue
+        try:
+            reconfigure(encoding="utf-8", errors="replace")
+        except (ValueError, OSError):
+            # Already-detached or non-reconfigurable stream — leave it be.
+            pass
+
+
 _enable_windows_ansi()
+_ensure_utf8_output()
 
 
 # ANSI base

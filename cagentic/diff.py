@@ -35,17 +35,17 @@ def render(old: str, new: str, path: str, context: int = 3,
         if line.startswith("+++") or line.startswith("---"):
             out.append(ui.color(line, ui.BOLD))
         elif line.startswith("@@"):
-            out.append(ui.color(line, ui.CYAN))
+            out.append(ui.color(line, ui.DUSK))
         elif line.startswith("+"):
             out.append(ui.color(line, ui.GREEN))
         elif line.startswith("-"):
             out.append(ui.color(line, ui.RED))
         else:
-            out.append(ui.color(line, ui.GRAY))
+            out.append(ui.color(line, ui.SOFT))
 
     remaining = len(diff_lines) - len(shown)
     if remaining > 0:
-        out.append(ui.color(f"  … +{remaining} more diff line(s) (truncated)", ui.GRAY))
+        out.append(ui.color(f"  … +{remaining} more diff line(s) (truncated)", ui.SOFT))
     return "\n".join(out)
 
 
