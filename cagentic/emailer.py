@@ -11,6 +11,7 @@ Configure once in the CLI:
 For Gmail, create an app password at https://myaccount.google.com/apppasswords.
 Port 465 uses implicit SSL; anything else attempts STARTTLS.
 """
+
 from __future__ import annotations
 
 import smtplib
@@ -36,7 +37,10 @@ def send_verification(cfg: dict, to: str, code: str, name: str = "") -> str | No
     host = em.get("smtp_host")
     if not host:
         return NOT_CONFIGURED
-    port = int(em.get("smtp_port", 587))
+    try:
+        port = int(em.get("smtp_port", 587))
+    except (TypeError, ValueError):
+        return "email.smtp_port must be an integer"
     username = em.get("username") or ""
     password = em.get("password") or ""
     sender = em.get("from") or username or "cagentic@localhost"
@@ -58,6 +62,7 @@ def send_verification(cfg: dict, to: str, code: str, name: str = "") -> str | No
     )
 
     try:
+        server: smtplib.SMTP
         if port == 465:
             server = smtplib.SMTP_SSL(host, port, timeout=15)
         else:

@@ -9,8 +9,10 @@ turn token-by-token. HUD panels appear as draggable floating windows.
 Tools that need approval surface an Approve / Deny prompt right in the
 page. Bound to localhost only.
 """
+
 from __future__ import annotations
 
+import errno
 import json
 import logging
 import re
@@ -18,12 +20,35 @@ import secrets
 import threading
 import time
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
-from urllib.parse import urlparse, parse_qs
+from urllib.parse import parse_qs, urlparse
 
 from . import config as _config
-from . import sessions
-from . import projects
-from .providers import build_client as _build_client, parse_model as _parse_model, list_all_models as _all_models
+from . import (
+    capabilities,
+    inbox,
+    integrations,
+    personal_os,
+    proactive,
+    projects,
+    reminders,
+    routines,
+    sessions,
+)
+from .providers import (
+    build_client as _build_client,
+)
+from .providers import (
+    list_all_models as _all_models,
+)
+from .providers import (
+    parse_model as _parse_model,
+)
+from .providers import (
+    warm_model_cache as _warm_model_cache,
+)
+from .services.compact import SUMMARY_MARKER, auto_compact
+from .token_count import count_messages
+from .workspaces import WorkspaceError, WorkspacePolicy
 
 _log = logging.getLogger(__name__)
 
@@ -31,11 +56,16 @@ _log = logging.getLogger(__name__)
 _LOCAL_HOSTS = frozenset({"localhost", "127.0.0.1", "::1", ""})
 
 
+class _GatewayHTTPServer(ThreadingHTTPServer):
+    # Makes a quick stop/start reliable when the old listener is in TIME_WAIT.
+    allow_reuse_address = True
+
+
 class _ClientGone(Exception):
     """Raised when the browser hangs up mid-stream."""
 
 
-from .engine import _THINK_RX, _PLAN_RX
+from .engine import _PLAN_RX, _THINK_RX
 
 _STEP_RX = re.compile(r"<step\s+\d+(?:\s*/\s*\d+)?\s*>", re.IGNORECASE)
 
@@ -59,14 +89,14 @@ def _tool_details(tool_calls: list[dict], messages: list[dict], start: int) -> l
     from .engine import _summarize_args
 
     results: list[tuple[str, str]] = []  # (tool name, result text)
-    for m in messages[start:start + len(tool_calls) * 2]:
+    for m in messages[start : start + len(tool_calls) * 2]:
         role = m.get("role")
         content = m.get("content") or ""
         if role == "tool":
             results.append((m.get("name", "?"), content))
         elif role == "user" and content.startswith("Tool result for "):
             header, _, rest = content.partition("\n")
-            results.append((header[len("Tool result for "):].rstrip(":"), rest))
+            results.append((header[len("Tool result for ") :].rstrip(":"), rest))
         elif role == "system":
             continue  # loop-steering notes interleave with results
         else:
@@ -90,12 +120,14 @@ def _tool_details(tool_calls: list[dict], messages: list[dict], start: int) -> l
                 first_line = result.splitlines()[0][:120] if result else ""
                 results.pop(j)
                 break
-        details.append({
-            "name": name,
-            "summary": _summarize_args(name, args),
-            "ok": ok,
-            "first_line": first_line,
-        })
+        details.append(
+            {
+                "name": name,
+                "summary": _summarize_args(name, args),
+                "ok": ok,
+                "first_line": first_line,
+            }
+        )
     return details
 
 
@@ -155,29 +187,67 @@ class Gateway:
         self.agent = agent
         self.config = config
         self.port = port
+        self.requested_port = port
+        self.port_fallback = False
+        self.start_notice: str | None = None
         self._server: ThreadingHTTPServer | None = None
         self._thread: threading.Thread | None = None
         self.error: str | None = None
+        configured_model = str(config.get("model") or "").strip()
+        _, configured_name = _parse_model(configured_model)
+        self._model_spec = (
+            agent.state.active_model_spec
+            or (configured_model if configured_model and configured_name == agent.model else None)
+            or agent.model
+        )
+        _warm_model_cache(config)
 
         # Per-process secret required on every /api/* request. Bound to
         # localhost only, but this token defends against other local users
         # and (with the Host/Origin checks) against DNS-rebinding / CSRF.
-        self.token = secrets.token_urlsafe(32)
+        # A stable token can be pinned via config gateway.token so paired
+        # devices (the iOS app) survive gateway restarts.
+        gw_cfg = config.get("gateway") or {}
+        pinned = str(gw_cfg.get("token") or "").strip()
+        self.token = pinned or secrets.token_urlsafe(32)
+
+        # Opt-in LAN exposure (config gateway.lan=true): binds all interfaces
+        # so phones/tablets on the network can connect. Every /api/* request
+        # still requires the secret token — set gateway.token and enter it on
+        # the device. Off by default: loopback only.
+        self.lan = bool(gw_cfg.get("lan", False))
+
+        # Restore the persisted effort dial (set live via /api/effort).
+        effort = str(config.get("effort") or "").strip().lower()
+        if effort in ("low", "medium", "high"):
+            agent.state.update(effort=effort)
 
         # Simple in-memory rate limit for the email-verification endpoint:
         # list of monotonic timestamps of recent sends.
         self._email_send_times: list[float] = []
+        self._email_send_lock = threading.Lock()
 
         self._turn_lock = threading.Lock()
+        self._actors_lock = threading.Lock()
+        self._actors: dict[str, dict] = {}
+        self._thread_context = threading.local()
         self._active_emit = None
         self._active_source: str = "pc"  # "ios" or "pc" — who initiated this turn
+        self._default_workspace = agent.state.workspace.resolve()
+        self.workspace_policy = WorkspacePolicy.from_config(config, self._default_workspace)
+        self.proactive_monitor = proactive.ProactiveMonitor(
+            config,
+            browser_connected=self._browser_connected,
+            on_routine=self._run_proactive_routine,
+        )
 
         # Permission prompt bridge. Each prompt gets a unique id; the client
         # must echo that id back when answering, so a stale/duplicate answer
         # can't resolve a different prompt (avoids the old set-before-clear
         # race on a single process-global answer).
         self._perm_cv = threading.Condition()
-        self._perm_id: str | None = None      # id of the prompt currently awaiting an answer
+        self._perm_id: str | None = None  # id of the prompt currently awaiting an answer
+        self._perm_pending: set[str] = set()
         self._perm_answers: dict[str, str] = {}  # prompt_id -> answer
 
         # Computer control approval bridge (iOS client approves/denies PC actions)
@@ -191,6 +261,7 @@ class Gateway:
         # The gateway's own engine — a separate conversation, but the SAME
         # shared state (notes, reminders, browser bridge, MCP, workspace).
         from .engine import QueryEngine
+
         self.engine = QueryEngine(
             client=agent.client,
             state=agent.state,
@@ -211,7 +282,7 @@ class Gateway:
         # Wire up widget action callback — emits SSE widget events
         self._setup_widget_action()
         # The current chat is a session record (shared store with the REPL).
-        self.session = sessions.make(agent.model)
+        self.session = sessions.make(self._model_spec)
         self.engine.session_id = self.session["id"]
 
     # -- lifecycle ----------------------------------------------------------
@@ -219,21 +290,49 @@ class Gateway:
     def start(self) -> bool:
         if self._server is not None:
             return True
-        try:
-            # Bind to loopback only — the gateway exposes the full assistant
-            # (shell, files, browser, MCP) and must never be reachable off-host.
-            server = ThreadingHTTPServer(("127.0.0.1", self.port), _Handler)
-        except OSError as e:
-            self.error = f"could not bind 127.0.0.1:{self.port} ({e})"
+        # Loopback by default — the gateway exposes the full assistant
+        # (shell, files, browser, MCP). LAN binding is an explicit opt-in
+        # (config gateway.lan=true) and keeps the token requirement.
+        bind = "0.0.0.0" if self.lan else "127.0.0.1"
+        gw_cfg = self.config.get("gateway") or {}
+        auto_port = bool(gw_cfg.get("auto_port", True))
+        ports = [self.requested_port]
+        if auto_port:
+            ports.extend(range(self.requested_port + 1, min(65535, self.requested_port + 20) + 1))
+        server = None
+        last_error: OSError | None = None
+        for candidate in ports:
+            try:
+                server = _GatewayHTTPServer((bind, candidate), _Handler)
+                self.port = int(server.server_address[1])
+                break
+            except OSError as e:
+                last_error = e
+                if e.errno not in (errno.EADDRINUSE, 48, 98, 10048):
+                    break
+        if server is None:
+            detail = last_error or "no available port"
+            self.error = f"could not bind {bind}:{self.requested_port} ({detail})"
             return False
-        server.gateway = self            # type: ignore[attr-defined]
+        self.error = None
+        self.port_fallback = self.port != self.requested_port
+        if self.port_fallback:
+            self.start_notice = (
+                f"port {self.requested_port} was already in use; "
+                f"started on {self.port} instead"
+            )
+        else:
+            self.start_notice = None
+        server.gateway = self  # type: ignore[attr-defined]
         server.daemon_threads = True
         self._server = server
         self._thread = threading.Thread(target=server.serve_forever, daemon=True)
         self._thread.start()
+        self.proactive_monitor.start()
         return True
 
     def stop(self) -> None:
+        self.proactive_monitor.stop()
         if self._server is not None:
             try:
                 self._server.shutdown()
@@ -249,19 +348,32 @@ class Gateway:
     def url(self) -> str:
         return f"http://localhost:{self.port}"
 
+    def _browser_connected(self) -> bool:
+        browser = getattr(self.agent.state, "browser", None)
+        try:
+            return bool(browser and browser.is_connected())
+        except Exception:
+            return False
+
     # -- permission bridge --------------------------------------------------
 
     def _resolve(self, name: str, args: dict, state) -> str:
-        emit = self._active_emit
+        emit = getattr(self._thread_context, "emit", None) or self._active_emit
         if emit is None:
             return "no"
         import uuid
+
         from .engine import _summarize_args
+
         prompt_id = str(uuid.uuid4())
         with self._perm_cv:
             self._perm_answers.pop(prompt_id, None)
+            self._perm_pending.add(prompt_id)
             self._perm_id = prompt_id
-        emit("permission", {"id": prompt_id, "tool": name, "summary": _summarize_args(name, args)})
+        emit(
+            "permission",
+            {"id": prompt_id, "tool": name, "summary": _summarize_args(name, args)},
+        )
         try:
             with self._perm_cv:
                 deadline = time.monotonic() + 300
@@ -274,7 +386,8 @@ class Gateway:
         finally:
             with self._perm_cv:
                 if self._perm_id == prompt_id:
-                    self._perm_id = None
+                    self._perm_id = next(iter(self._perm_pending - {prompt_id}), None)
+                self._perm_pending.discard(prompt_id)
 
     def deliver_permission(self, answer: str, prompt_id: str | None = None) -> None:
         """Record an answer for a pending permission prompt.
@@ -288,7 +401,7 @@ class Gateway:
             target = prompt_id or self._perm_id
             if target is None:
                 return
-            if prompt_id is not None and prompt_id != self._perm_id:
+            if prompt_id is not None and prompt_id not in self._perm_pending:
                 _log.warning("ignoring permission answer for stale/unknown prompt id")
                 return
             self._perm_answers[target] = answer
@@ -302,7 +415,9 @@ class Gateway:
             self._comp_approvals[action_id] = approved
             self._comp_cv.notify_all()
 
-    def wait_computer_approval(self, action_id: str, emit, event_type: str, data: dict, timeout: float = 300) -> bool:
+    def wait_computer_approval(
+        self, action_id: str, emit, event_type: str, data: dict, timeout: float = 300
+    ) -> bool:
         """Emit a computer control SSE event and wait for the iOS client to approve.
         Returns True if approved, False if denied or timed out."""
         with self._comp_cv:
@@ -325,7 +440,19 @@ class Gateway:
             self._phone_results[action_id] = result
             self._phone_cv.notify_all()
 
-    def wait_phone_result(self, action_id: str, emit, event_type: str, data: dict, timeout: float = 120) -> dict | None:
+    def allow_email_verification(self) -> bool:
+        """Allow at most five verification emails per rolling ten minutes."""
+        now = time.monotonic()
+        with self._email_send_lock:
+            self._email_send_times = [t for t in self._email_send_times if now - t < 600]
+            if len(self._email_send_times) >= 5:
+                return False
+            self._email_send_times.append(now)
+            return True
+
+    def wait_phone_result(
+        self, action_id: str, emit, event_type: str, data: dict, timeout: float = 120
+    ) -> dict | None:
         """Emit a phone action SSE event and wait for the iOS client to execute it.
         Returns the result dict, or None on timeout."""
         with self._phone_cv:
@@ -374,14 +501,16 @@ IMPORTANT: When you use show_widget, do NOT repeat the widget title or type in y
 """
 
     _DEVICE_PROMPT_PC = ""
+
     def _inject_device_context(self, source: str) -> None:
         """Update the system prompt and tool groups based on who initiated the turn."""
         from .tools import DEFAULT_GROUPS
+
         suffix = self.engine.system_suffix or ""
         marker = "\n\n=== DEVICE CONTEXT ==="
         # Remove any previous device context injection
         if marker in suffix:
-            suffix = suffix[:suffix.index(marker)]
+            suffix = suffix[: suffix.index(marker)]
         if source == "ios":
             suffix += self._DEVICE_PROMPT_IOS
             # Enable phone tool group for iOS-originated turns
@@ -409,6 +538,9 @@ IMPORTANT: When you use show_widget, do NOT repeat the widget title or type in y
         if self._user_system_prompt:
             parts.append(self._user_system_prompt)
         parts.append(_HUD_INSTRUCTIONS)
+        parts.append(personal_os.system_context())
+        parts.append(inbox.system_context())
+        parts.append(routines.system_context())
         self.engine.system_suffix = "\n\n".join(parts)
         self.engine.refresh_system_prompt()
 
@@ -419,8 +551,9 @@ IMPORTANT: When you use show_widget, do NOT repeat the widget title or type in y
         def phone_action(action_type: str, payload: dict) -> dict | None:
             """Callback for phone control tools. Emits SSE event and waits for result."""
             import uuid
+
             action_id = str(uuid.uuid4())
-            emit = gw._active_emit
+            emit = getattr(gw._thread_context, "emit", None) or gw._active_emit
             if emit is None:
                 return {"success": False, "error": "no active connection"}
             event_type = f"phone_{action_type}"
@@ -435,7 +568,7 @@ IMPORTANT: When you use show_widget, do NOT repeat the widget title or type in y
 
         def widget_action(widget_type: str, title: str, data: dict) -> str | None:
             """Callback for show_widget tool. Emits SSE widget event."""
-            emit = gw._active_emit
+            emit = getattr(gw._thread_context, "emit", None) or gw._active_emit
             if emit is None:
                 return None  # No active stream — tool returns text fallback
             emit("widget", {"type": widget_type, "title": title, "data": data})
@@ -446,10 +579,14 @@ IMPORTANT: When you use show_widget, do NOT repeat the widget title or type in y
     # -- chats --------------------------------------------------------------
 
     def _save_current(self) -> None:
-        msgs = [m for m in self.engine.messages if m.get("role") != "system"]
+        msgs = [
+            m
+            for m in self.engine.messages
+            if m.get("role") != "system" or SUMMARY_MARKER in str(m.get("content") or "")
+        ]
         if not msgs:
             return  # don't persist empty chats
-        self.session["model"] = self.agent.model
+        self.session["model"] = self._model_spec
         self.session["messages"] = msgs
         sessions.save(self.session)
 
@@ -479,13 +616,16 @@ IMPORTANT: When you use show_widget, do NOT repeat the widget title or type in y
         self._save_current()
         out = []
         for s in sessions.list_all():
-            out.append({
-                "id": s["id"],
-                "title": s["title"] if s["title"] not in (None, "", "untitled") else "New chat",
-                "updated_at": s["updated_at"],
-                "turns": s["turns"],
-                "project_id": s.get("project_id", ""),
-            })
+            out.append(
+                {
+                    "id": s["id"],
+                    "title": s["title"] if s["title"] not in (None, "", "untitled") else "New chat",
+                    "updated_at": s["updated_at"],
+                    "turns": s["turns"],
+                    "project_id": s.get("project_id", ""),
+                    "project": s.get("project"),
+                }
+            )
         return out
 
     def render_messages(self, messages: list[dict]) -> list[dict]:
@@ -497,18 +637,21 @@ IMPORTANT: When you use show_widget, do NOT repeat the widget title or type in y
                 continue
             content = (m.get("content") or "").strip()
             if role == "user":
-                if content.startswith((
-                    "Tool result for ", "[background] ", "STOP. ", "You called ",
-                )):
+                if content.startswith(
+                    (
+                        "Tool result for ",
+                        "[background] ",
+                        "STOP. ",
+                        "You called ",
+                        "[older context, compacted]",
+                    )
+                ):
                     continue
                 if content:
                     out.append({"role": "user", "content": content})
             elif role == "assistant":
                 tool_calls = m.get("tool_calls") or []
-                tools = [
-                    (tc.get("function") or {}).get("name", "?")
-                    for tc in tool_calls
-                ]
+                tools = [(tc.get("function") or {}).get("name", "?") for tc in tool_calls]
                 cleaned = _clean(content)
                 if cleaned or tools:
                     msg = {"role": "assistant", "content": cleaned, "tools": tools}
@@ -520,30 +663,100 @@ IMPORTANT: When you use show_widget, do NOT repeat the widget title or type in y
         return out
 
     def current_chat(self) -> dict:
-        return {
+        current = {
             "id": self.session["id"],
             "title": self.session.get("title") or "New chat",
-            "model": self.agent.model,
+            "model": self._model_spec,
             "messages": self.render_messages(self.engine.messages),
         }
+        if self.session.get("project") is not None:
+            current["project"] = self.session["project"]
+        return current
 
-    def new_chat(self) -> dict:
+    def new_chat(self, project: dict | None = None) -> dict:
         locked = self._interrupt_turn()
         if not locked:
             return {"error": "Cagentic is still working on the previous message."}
         try:
-            return self._new_chat_unlocked()
+            return self._new_chat_unlocked(project)
         finally:
             self._turn_lock.release()
 
-    def _new_chat_unlocked(self) -> dict:
+    def _new_chat_unlocked(self, project: dict | None = None) -> dict:
         self._save_current()
-        self.session = sessions.make(self.agent.model)
+        if project is not None:
+            project = self.validate_project(project)
+        self.session = sessions.make(self._model_spec, project=project)
         self.engine.project_system_prompt = ""
         self.engine.project_context = ""
         self.engine.reset()
         self.engine.session_id = self.session["id"]
+        self._activate_session_project()
+        if project is not None:
+            sessions.save(self.session)
         return self.current_chat()
+
+    def validate_project(self, project) -> dict:
+        if not isinstance(project, dict):
+            raise WorkspaceError("project must be an object with kind and value")
+        kind, value = project.get("kind"), project.get("value")
+        if kind == "gatewayFolder":
+            return {"kind": kind, "value": str(self.workspace_policy.validate(value))}
+        if kind == "repository":
+            value = str(value or "").strip()
+            if not re.fullmatch(r"[A-Za-z0-9_.-]+/[A-Za-z0-9_.-]+", value):
+                raise WorkspaceError("repository project value must be owner/repository")
+            return {"kind": kind, "value": value}
+        raise WorkspaceError("project kind must be repository or gatewayFolder")
+
+    def pin_collama_project(self, project) -> dict:
+        """Validate and assign once; callers must hold the turn/switch lock."""
+        requested = self.validate_project(project)
+        existing = self.session.get("project")
+        if existing is not None and existing != requested:
+            raise WorkspaceError("session project is immutable", 409)
+        if existing is None:
+            self.session["project"] = requested
+            try:
+                self._activate_session_project()
+            except Exception:
+                self.session["project"] = None
+                raise
+            sessions.save(self.session)
+        else:
+            self._activate_session_project()
+        return requested
+
+    def _activate_session_project(self) -> None:
+        project = self.session.get("project")
+        workspace = self._default_workspace
+        repository = None
+        boundary = None
+        context_parts = []
+        pid = self.session.get("project_id")
+        if pid:
+            local_project = projects.load(pid)
+            if local_project and local_project.get("context"):
+                context_parts.append(local_project["context"])
+        if project and project.get("kind") == "gatewayFolder":
+            workspace = self.workspace_policy.validate(project.get("value"))
+            boundary = workspace
+            context_parts.append(
+                f"Pinned gateway folder project: {workspace}. Use it as the working directory."
+            )
+        elif project and project.get("kind") == "repository":
+            repository = project.get("value")
+            context_parts.append(
+                f"Pinned GitHub repository project: {repository}. Use it as the default repository for GitHub operations."
+            )
+        self.agent.state.update(
+            workspace=workspace,
+            default_repository=repository,
+            workspace_boundary=boundary,
+            worktree_stack=[],
+        )
+        self.engine.project_context = "\n\n".join(context_parts)
+        self.engine.refresh_system_prompt()
 
     def load_chat(self, chat_id: str) -> dict:
         locked = self._interrupt_turn()
@@ -556,12 +769,22 @@ IMPORTANT: When you use show_widget, do NOT repeat the widget title or type in y
 
     def _load_chat_unlocked(self, chat_id: str) -> dict:
         self._save_current()
+        with self._actors_lock:
+            actor = self._actors.get(chat_id)
+            if actor is not None and actor["lock"].locked():
+                return {"error": "chat is busy in another request"}
         data = sessions.load(chat_id)
         if not data:
             return {"error": f"chat {chat_id} not found"}
+        if data.get("project") is not None:
+            try:
+                data["project"] = self.validate_project(data["project"])
+            except WorkspaceError as exc:
+                return {"error": f"cannot load chat project: {exc}"}
+        model_error = self._activate_model(data.get("model") or self._model_spec)
+        if model_error:
+            return {"error": f"cannot load chat model: {model_error}"}
         self.session = data
-        self.agent.model = data.get("model") or self.agent.model
-        self.engine.model = self.agent.model
         self.engine.load_messages(data.get("messages", []))
         self.engine.session_id = self.session["id"]
         # Apply project config if chat belongs to a project
@@ -577,7 +800,7 @@ IMPORTANT: When you use show_widget, do NOT repeat the widget title or type in y
         else:
             self.engine.project_system_prompt = ""
             self.engine.project_context = ""
-        self.engine.refresh_system_prompt()
+        self._activate_session_project()
         return self.current_chat()
 
     def delete_chat(self, chat_id: str) -> dict:
@@ -585,6 +808,11 @@ IMPORTANT: When you use show_widget, do NOT repeat the widget title or type in y
         if not locked:
             return {"error": "Cagentic is still working on the previous message."}
         try:
+            with self._actors_lock:
+                actor = self._actors.get(chat_id)
+                if actor is not None and actor["lock"].locked():
+                    return {"error": "chat is busy in another request"}
+                self._actors.pop(chat_id, None)
             sessions.delete(chat_id)
             # Remove from any project
             for proj in projects.list_all():
@@ -592,33 +820,38 @@ IMPORTANT: When you use show_widget, do NOT repeat the widget title or type in y
                     projects.remove_chat(proj["id"], chat_id)
             if chat_id == self.session.get("id"):
                 self._new_chat_unlocked()
-            return {"chats": self.list_chats(), "current": self.current_chat(), "projects": self.list_projects()}
+            return {
+                "chats": self.list_chats(),
+                "current": self.current_chat(),
+                "projects": self.list_projects(),
+            }
         finally:
             self._turn_lock.release()
 
     def autotitle_chat(self) -> dict:
         """Ask the model itself for a short title for the current chat."""
-        msgs = [m for m in self.engine.messages
-                if m.get("role") in ("user", "assistant") and (m.get("content") or "").strip()]
+        msgs = [
+            m
+            for m in self.engine.messages
+            if m.get("role") in ("user", "assistant") and (m.get("content") or "").strip()
+        ]
         if not msgs:
             return {"title": self.session.get("title") or "New chat"}
 
-        convo = "\n".join(
-            f"{m['role']}: {_clean(m.get('content') or '')[:300]}" for m in msgs[:4]
-        )
-        ask = [{
-            "role": "user",
-            "content": (
-                "Give this conversation a short title: 3-6 plain words, no "
-                "quotes, no trailing punctuation. Reply with the title only.\n\n"
-                + convo
-            ),
-        }]
+        convo = "\n".join(f"{m['role']}: {_clean(m.get('content') or '')[:300]}" for m in msgs[:4])
+        ask = [
+            {
+                "role": "user",
+                "content": (
+                    "Give this conversation a short title: 3-6 plain words, no "
+                    "quotes, no trailing punctuation. Reply with the title only.\n\n" + convo
+                ),
+            }
+        ]
         title = ""
         try:
-            reply = self.agent.client.chat(self.agent.model, ask,
-                                           options={"temperature": 0.2})
-            lines = _clean(reply.get("content") or "").strip().strip('"\'').splitlines()
+            reply = self.agent.client.chat(self.agent.model, ask, options={"temperature": 0.2})
+            lines = _clean(reply.get("content") or "").strip().strip("\"'").splitlines()
             title = lines[0].strip()[:60] if lines else ""
         except Exception:
             _log.warning("autotitle: model call failed, falling back", exc_info=True)
@@ -672,7 +905,11 @@ IMPORTANT: When you use show_widget, do NOT repeat the widget title or type in y
                 self.engine.project_system_prompt = proj.get("system_prompt", "")
                 self.engine.project_context = proj.get("context", "")
             self.engine.refresh_system_prompt()
-        return {"project": proj, "projects": self.list_projects(), "chats": self.list_chats()}
+        return {
+            "project": proj,
+            "projects": self.list_projects(),
+            "chats": self.list_chats(),
+        }
 
     def remove_chat_from_project(self, project_id: str, chat_id: str) -> dict:
         proj = projects.remove_chat(project_id, chat_id)
@@ -685,7 +922,11 @@ IMPORTANT: When you use show_widget, do NOT repeat the widget title or type in y
             self.engine.project_system_prompt = ""
             self.engine.project_context = ""
             self.engine.refresh_system_prompt()
-        return {"project": proj, "projects": self.list_projects(), "chats": self.list_chats()}
+        return {
+            "project": proj,
+            "projects": self.list_projects(),
+            "chats": self.list_chats(),
+        }
 
     def update_project_config(self, project_id: str, system_prompt: str, context: str) -> dict:
         proj = projects.update_config(project_id, system_prompt, context)
@@ -696,17 +937,392 @@ IMPORTANT: When you use show_widget, do NOT repeat the widget title or type in y
             self.engine.refresh_system_prompt()
         return {"project": proj, "projects": self.list_projects()}
 
+    # -- personal OS --------------------------------------------------------
+
+    def personal_os_snapshot(self) -> dict:
+        data = personal_os.briefing(
+            self.config, browser_connected=self._browser_connected()
+        )
+        managed = integrations.list_connections() + inbox.list_email_connections()
+        if managed:
+            data["integrations"] = managed + list(data.get("integrations") or [])
+            data["stats"]["connected_services"] = len(
+                [item for item in data["integrations"] if item.get("connected")]
+            )
+        data["notifications"] = proactive.list_notifications()
+        data["unread_notifications"] = proactive.unread_count()
+        data["inbox"] = inbox.list_items()
+        data["unread_inbox"] = inbox.unread_count()
+        data["routines"] = routines.list_routines()
+        data["stats"]["unread_inbox"] = data["unread_inbox"]
+        data["stats"]["active_routines"] = len(
+            [item for item in data["routines"] if item.get("enabled")]
+        )
+        from .tools import DEFAULT_GROUPS, TOOL_GROUPS, _all_tools
+
+        groups = self.agent.state.tool_groups
+        active_groups = DEFAULT_GROUPS if groups is None else set(groups)
+        active_tools = {
+            name
+            for group in active_groups
+            for name in TOOL_GROUPS.get(group, ())
+        }
+        data["architecture"] = capabilities.build_architecture(
+            available_tools=_all_tools().keys(),
+            active_tools=active_tools,
+            routines=data["routines"],
+            integrations=data.get("integrations") or [],
+            installed_skills=[
+                path.stem
+                for path in (_config.config_dir() / "skills").glob("*")
+                if path.is_file()
+            ],
+            model=self._model_spec,
+        )
+        data["proactive_running"] = self.proactive_monitor.running
+        return data
+
+    def _run_proactive_routine(self, routine: dict) -> str:
+        """Run isolated proactive inference without touching chat history."""
+        if not self._turn_lock.acquire(blocking=False):
+            return routines.fallback_output(routine)
+        try:
+            result = self.agent.client.chat(
+                model=self.agent.model,
+                messages=[
+                    {
+                        "role": "system",
+                        "content": (
+                            "You are Cagentic's proactive personal-OS planner. "
+                            "Use only the supplied local context, be concise, and propose concrete actions."
+                        ),
+                    },
+                    {"role": "user", "content": routines.build_prompt(routine)},
+                ],
+                tools=None,
+                options={"temperature": 0.2},
+            )
+            return _clean(str(result.get("content") or "")) or routines.fallback_output(routine)
+        except Exception:
+            _log.warning("proactive routine model call failed; using fallback", exc_info=True)
+            return routines.fallback_output(routine)
+        finally:
+            self._turn_lock.release()
+
+    def create_integration(self, data: dict) -> dict:
+        connection = integrations.create_connection(
+            str(data.get("name", "")),
+            str(data.get("kind", "ical")),
+            str(data.get("url", "")),
+            username=str(data.get("username", "")),
+            password=str(data.get("password", "")),
+            direction=str(data["direction"]) if data.get("direction") else None,
+            auto_sync=bool(data.get("auto_sync", True)),
+            sync_interval=data.get("sync_interval", 900),
+            verify_ssl=bool(data.get("verify_ssl", True)),
+        )
+        return {"ok": True, "connection": connection, "os": self.personal_os_snapshot()}
+
+    def update_integration(self, data: dict) -> dict:
+        connection_id = str(data.get("id", ""))
+        changes = {
+            key: data[key]
+            for key in (
+                "name",
+                "url",
+                "username",
+                "password",
+                "direction",
+                "auto_sync",
+                "sync_interval",
+                "verify_ssl",
+            )
+            if key in data
+        }
+        connection = integrations.update_connection(connection_id, **changes)
+        return {
+            "ok": connection is not None,
+            "connection": connection,
+            "error": None if connection else "connection not found",
+            "os": self.personal_os_snapshot(),
+        }
+
+    def delete_integration(self, data: dict) -> dict:
+        deleted = integrations.delete_connection(
+            str(data.get("id", "")),
+            remove_imported_events=bool(data.get("remove_imported_events", False)),
+        )
+        return {
+            "ok": deleted,
+            "error": None if deleted else "connection not found",
+            "os": self.personal_os_snapshot(),
+        }
+
+    def sync_integration(self, connection_id: str) -> dict:
+        result = integrations.sync_connection(connection_id)
+        result["os"] = self.personal_os_snapshot()
+        return result
+
+    def notification_action(self, data: dict) -> dict:
+        action = str(data.get("action") or "read")
+        notification_id = str(data.get("id", ""))
+        if action == "read_all":
+            proactive.mark_all_read()
+            ok = True
+        elif action == "dismiss":
+            ok = proactive.dismiss(notification_id)
+        else:
+            ok = proactive.mark_read(notification_id, read=bool(data.get("read", True))) is not None
+        return {
+            "ok": ok,
+            "notifications": proactive.list_notifications(),
+            "unread_notifications": proactive.unread_count(),
+        }
+
+    def create_inbox_item(self, data: dict) -> dict:
+        item = inbox.create_item(
+            str(data.get("title", "")),
+            summary=str(data.get("summary", "")),
+            kind=str(data.get("kind", "capture")),
+            priority=data.get("priority", 0),
+            tags=[str(tag) for tag in (data.get("tags") or [])],
+        )
+        return {"ok": True, "item": item, "os": self.personal_os_snapshot()}
+
+    def update_inbox_item(self, data: dict) -> dict:
+        item_id = str(data.get("id", ""))
+        changes = {
+            key: data[key]
+            for key in ("title", "summary", "status", "priority", "tags", "snoozed_until")
+            if key in data
+        }
+        item = inbox.update_item(item_id, **changes)
+        return {
+            "ok": item is not None,
+            "item": item,
+            "error": None if item else "inbox item not found",
+            "os": self.personal_os_snapshot(),
+        }
+
+    def delete_inbox_item(self, item_id: str) -> dict:
+        deleted = inbox.delete_item(item_id)
+        return {
+            "ok": deleted,
+            "error": None if deleted else "inbox item not found",
+            "os": self.personal_os_snapshot(),
+        }
+
+    def create_email_connection(self, data: dict) -> dict:
+        connection = inbox.create_email_connection(
+            str(data.get("name", "")),
+            str(data.get("host", "")),
+            str(data.get("username", "")),
+            str(data.get("password", "")),
+            port=data.get("port", 993),
+            use_ssl=bool(data.get("use_ssl", True)),
+            folder=str(data.get("folder", "INBOX")),
+            auto_sync=bool(data.get("auto_sync", True)),
+            sync_interval=data.get("sync_interval", 900),
+            max_messages=data.get("max_messages", 50),
+        )
+        return {"ok": True, "connection": connection, "os": self.personal_os_snapshot()}
+
+    def sync_email_connection(self, connection_id: str) -> dict:
+        result = inbox.sync_email_connection(connection_id)
+        result["os"] = self.personal_os_snapshot()
+        return result
+
+    def delete_email_connection(self, data: dict) -> dict:
+        deleted = inbox.delete_email_connection(
+            str(data.get("id", "")), remove_items=bool(data.get("remove_items", False))
+        )
+        return {
+            "ok": deleted,
+            "error": None if deleted else "email connection not found",
+            "os": self.personal_os_snapshot(),
+        }
+
+    def create_routine(self, data: dict) -> dict:
+        routine = routines.create_routine(
+            str(data.get("name", "")),
+            kind=str(data.get("kind", "daily_plan")),
+            schedule_time=str(data.get("schedule_time", "08:00")),
+            days=data.get("days"),
+            prompt=str(data.get("prompt", "")),
+            enabled=bool(data.get("enabled", True)),
+        )
+        return {"ok": True, "routine": routine, "os": self.personal_os_snapshot()}
+
+    def update_routine(self, data: dict) -> dict:
+        routine_id = str(data.get("id", ""))
+        changes = {
+            key: data[key]
+            for key in ("name", "kind", "schedule_time", "days", "prompt", "enabled")
+            if key in data
+        }
+        routine = routines.update_routine(routine_id, **changes)
+        return {
+            "ok": routine is not None,
+            "routine": routine,
+            "error": None if routine else "routine not found",
+            "os": self.personal_os_snapshot(),
+        }
+
+    def delete_routine(self, routine_id: str) -> dict:
+        deleted = routines.delete_routine(routine_id)
+        return {
+            "ok": deleted,
+            "error": None if deleted else "routine not found",
+            "os": self.personal_os_snapshot(),
+        }
+
+    def run_routine(self, routine_id: str) -> dict:
+        routine = routines.get_routine(routine_id)
+        if routine is None:
+            return {"ok": False, "error": "routine not found", "os": self.personal_os_snapshot()}
+        output = self._run_proactive_routine(routine)
+        updated = routines.mark_run(routine_id, output=output)
+        proactive.create_notification(
+            str(routine.get("name") or "Proactive routine"),
+            output,
+            severity="info",
+            action_prompt="Help me act on this proactive briefing.",
+            fingerprint=f"routine:{routine_id}:{updated.get('last_run_key') if updated else time.time()}",
+            expires_at=time.time() + 7 * 86400,
+        )
+        return {"ok": True, "routine": updated, "output": output, "os": self.personal_os_snapshot()}
+
+    def create_goal(self, data: dict) -> dict:
+        goal = personal_os.create_goal(
+            str(data.get("title", "")),
+            description=str(data.get("description", "")),
+            target_at=data.get("target_at"),
+            category=str(data.get("category", "personal")),
+            progress=data.get("progress", 0),
+        )
+        return {"ok": True, "goal": goal, "os": self.personal_os_snapshot()}
+
+    def update_goal(self, data: dict) -> dict:
+        goal_id = str(data.get("id", ""))
+        changes = {
+            key: data[key]
+            for key in ("title", "description", "target_at", "category", "progress", "status")
+            if key in data
+        }
+        goal = personal_os.update_goal(goal_id, **changes)
+        return {
+            "ok": goal is not None,
+            "goal": goal,
+            "error": None if goal else "goal not found",
+            "os": self.personal_os_snapshot(),
+        }
+
+    def delete_goal(self, goal_id: str) -> dict:
+        deleted = personal_os.delete_goal(goal_id)
+        return {
+            "ok": deleted,
+            "error": None if deleted else "goal not found",
+            "os": self.personal_os_snapshot(),
+        }
+
+    def create_calendar_event(self, data: dict) -> dict:
+        event = personal_os.create_event(
+            str(data.get("title", "")),
+            start_at=data.get("start_at"),
+            end_at=data.get("end_at"),
+            description=str(data.get("description", "")),
+            location=str(data.get("location", "")),
+            all_day=bool(data.get("all_day", False)),
+            source=str(data.get("source", "cagentic")),
+            external_id=str(data.get("external_id", "")),
+            color=str(data.get("color", "#f0a87a")),
+        )
+        return {"ok": True, "event": event, "os": self.personal_os_snapshot()}
+
+    def update_calendar_event(self, data: dict) -> dict:
+        event_id = str(data.get("id", ""))
+        changes = {
+            key: data[key]
+            for key in (
+                "title",
+                "start_at",
+                "end_at",
+                "description",
+                "location",
+                "all_day",
+                "status",
+                "source",
+                "external_id",
+                "color",
+            )
+            if key in data
+        }
+        event = personal_os.update_event(event_id, **changes)
+        return {
+            "ok": event is not None,
+            "event": event,
+            "error": None if event else "event not found",
+            "os": self.personal_os_snapshot(),
+        }
+
+    def delete_calendar_event(self, event_id: str) -> dict:
+        deleted = personal_os.delete_event(event_id)
+        return {
+            "ok": deleted,
+            "error": None if deleted else "event not found",
+            "os": self.personal_os_snapshot(),
+        }
+
+    def create_deadline(self, data: dict) -> dict:
+        text = str(data.get("title") or data.get("text") or "").strip()
+        if not text:
+            raise ValueError("deadline title is required")
+        due_at = personal_os.parse_timestamp(data.get("due_at") or data.get("when"))
+        tags = [str(tag) for tag in (data.get("tags") or [])]
+        if "deadline" not in tags:
+            tags.append("deadline")
+        reminder = reminders.add(text, due_at=due_at, tags=tags)
+        return {"ok": True, "deadline": reminder.to_dict(), "os": self.personal_os_snapshot()}
+
+    def update_deadline(self, data: dict) -> dict:
+        reminder_id = str(data.get("id", ""))
+        changes = {}
+        if "title" in data or "text" in data:
+            changes["text"] = str(data.get("title") or data.get("text") or "").strip()
+        if "due_at" in data or "when" in data:
+            changes["due_at"] = personal_os.parse_timestamp(data.get("due_at") or data.get("when"))
+        if "status" in data:
+            changes["status"] = str(data["status"])
+        deadline = reminders.update(reminder_id, **changes)
+        return {
+            "ok": deadline is not None,
+            "deadline": deadline.to_dict() if deadline else None,
+            "error": None if deadline else "deadline not found",
+            "os": self.personal_os_snapshot(),
+        }
+
+    def delete_deadline(self, reminder_id: str) -> dict:
+        deleted = reminders.delete(reminder_id)
+        return {
+            "ok": deleted,
+            "error": None if deleted else "deadline not found",
+            "os": self.personal_os_snapshot(),
+        }
+
     # -- settings -----------------------------------------------------------
 
     def get_settings(self) -> dict:
         # Collect models from all configured providers, flattened to one list.
-        all_provider_models = _all_models(self.config)
+        all_provider_models = _all_models(self.config, cached_only=True)
         models: list[str] = []
         for provider, mlist in all_provider_models.items():
             models.extend(mlist)
+        if not models:
+            models = [self._model_spec]
         # Current model shown with provider prefix if cloud.
-        current = self.agent.model
+        current = self._model_spec
         gw_cfg = self.config.get("gateway") or {}
+        proactive_cfg = self.config.get("proactive") or {}
         return {
             "model": current,
             "models": models,
@@ -716,6 +1332,10 @@ IMPORTANT: When you use show_widget, do NOT repeat the widget title or type in y
             "yolo": self.agent.state.yolo,
             "gateway_port": int(gw_cfg.get("port", 8700)),
             "gateway_auto_start": bool(gw_cfg.get("auto_start", True)),
+            "proactive_enabled": bool(proactive_cfg.get("enabled", True)),
+            "desktop_notifications": bool(
+                proactive_cfg.get("desktop_notifications", True)
+            ),
             "system_prompt": self._user_system_prompt or "",
         }
 
@@ -729,9 +1349,10 @@ IMPORTANT: When you use show_widget, do NOT repeat the widget title or type in y
     def update_settings(self, data: dict) -> dict:
         cfg = self.config
         if data.get("model"):
-            self.agent.model = data["model"]
-            self.engine.model = data["model"]
-            cfg["model"] = data["model"]
+            error = self._activate_model(str(data["model"]))
+            if error:
+                return {**self.get_settings(), "error": error}
+            cfg["model"] = self._model_spec
         if "temperature" in data:
             try:
                 t = max(0.0, min(2.0, float(data["temperature"])))
@@ -759,6 +1380,18 @@ IMPORTANT: When you use show_widget, do NOT repeat the widget title or type in y
                 _log.warning("ignoring invalid gateway_port %r", data.get("gateway_port"))
         if "gateway_auto_start" in data:
             _config.set_value(cfg, "gateway.auto_start", bool(data["gateway_auto_start"]))
+        if "proactive_enabled" in data:
+            enabled = bool(data["proactive_enabled"])
+            _config.set_value(cfg, "proactive.enabled", enabled)
+            self.proactive_monitor.enabled = enabled
+            if enabled and self.running:
+                self.proactive_monitor.start()
+            elif not enabled:
+                self.proactive_monitor.stop()
+        if "desktop_notifications" in data:
+            enabled = bool(data["desktop_notifications"])
+            _config.set_value(cfg, "proactive.desktop_notifications", enabled)
+            self.proactive_monitor.desktop_notifications = enabled
         if "system_prompt" in data:
             self._user_system_prompt = str(data["system_prompt"]).strip()
             self._rebuild_suffix()
@@ -777,36 +1410,332 @@ IMPORTANT: When you use show_widget, do NOT repeat the widget title or type in y
         """
         model = (model or "").strip()
         if not model:
-            return {"model": self.agent.model}
-
-        provider, model_name = _parse_model(model)
-        if provider != "ollama":
-            try:
-                new_client = _build_client(self.config, provider)
-                self.agent.client = new_client
-                self.engine.client = new_client
-            except RuntimeError as e:
-                return {"error": str(e), "model": self.agent.model}
-
-        self.agent.model = model_name
-        self.engine.model = model_name
-        self.config["model"] = model  # persist provider:model
+            return {"model": self._model_spec}
+        error = self._activate_model(model)
+        if error:
+            return {"error": error, "model": self._model_spec}
+        self.config["model"] = self._model_spec
         try:
             _config.save(self.config)
         except Exception:
             _log.warning("failed to save config after model switch", exc_info=True)
-        return {"model": model}
+        return {"model": self._model_spec}
+
+    def _activate_model(self, model_spec: str) -> str | None:
+        """Switch model and provider clients as one atomic logical operation."""
+        model_spec = str(model_spec or "").strip()
+        provider, model_name = _parse_model(model_spec)
+        if not model_name:
+            return "model name is required"
+        try:
+            new_client = _build_client(self.config, provider)
+        except RuntimeError as exc:
+            return str(exc)
+        self.agent.client = new_client
+        self.agent.engine.client = new_client
+        self.engine.client = new_client
+        self.agent.model = model_name
+        self.engine.model = model_name
+        self._model_spec = model_spec if provider != "ollama" else model_name
+        self.agent.state.active_model_spec = self._model_spec
+        return None
 
     def bootstrap(self) -> dict:
+        settings = self.get_settings()
         return {
             "version": __import__("cagentic").__version__,
             "user_name": self.agent.state.user_name,
-            "model": self.agent.model,
+            "model": self._model_spec,
             "chats": self.list_chats(),
             "current": self.current_chat(),
-            "settings": self.get_settings(),
+            "settings": settings,
             "projects": self.list_projects(),
+            # Collama-compat keys — the iOS coding tab reads these directly.
+            "workspace": str(self.agent.state.workspace),
+            "effort": getattr(self.agent.state, "effort", "medium"),
+            "yolo": self.agent.state.yolo,
+            "models": settings.get("models") or [],
+            "os": self.personal_os_snapshot(),
         }
+
+    # -- Collama-compat surface (the iOS coding tab) -------------------------
+
+    def set_workspace(self, path: object) -> dict:
+        p = self.workspace_policy.validate(path)
+        self._default_workspace = p
+        self._activate_session_project()
+        try:
+            self.engine.refresh_system_prompt()
+        except Exception:
+            _log.warning("failed to refresh prompt after workspace switch", exc_info=True)
+        return {"ok": True, "workspace": str(p.resolve())}
+
+    def browse_workspace(self, path: str) -> dict:
+        return self.workspace_policy.browse(path)
+
+    def begin_collama_turn(self, project) -> None:
+        """Preflight a Collama turn while retaining the turn lock for streaming."""
+        if not self._turn_lock.acquire(blocking=False):
+            raise WorkspaceError("Cagentic is still working on the previous message.", 409)
+        try:
+            if project is None and self.session.get("project") is None:
+                raise WorkspaceError("a project is required for Collama requests")
+            if project is not None:
+                self.pin_collama_project(project)
+            else:
+                self._activate_session_project()
+        except Exception:
+            self._turn_lock.release()
+            raise
+
+    def compact_context(
+        self, session_id: str, project, threshold: object = 0.90
+    ) -> tuple[dict, int]:
+        """Atomically compact one pinned Collama session."""
+        if not self._turn_lock.acquire(blocking=False):
+            return {"error": "session is busy; try compaction again after the turn finishes"}, 409
+        actor_lock = None
+        actor_lock_acquired = False
+        try:
+            try:
+                if not isinstance(threshold, (str, int, float)):
+                    raise TypeError
+                threshold_value = float(threshold)
+            except (TypeError, ValueError):
+                return {"error": "threshold must be a number between 0 and 1"}, 400
+            if not 0 < threshold_value <= 1:
+                return {"error": "threshold must be greater than 0 and at most 1"}, 400
+            try:
+                requested_project = self.validate_project(project)
+            except WorkspaceError as exc:
+                return {"error": str(exc)}, 400 if exc.status == 404 else exc.status
+
+            is_current = session_id == self.session.get("id")
+            target: dict | None
+            if is_current:
+                target = dict(self.session)
+                working = [dict(message) for message in self.engine.messages]
+            else:
+                actor = self._session_actor(session_id)
+                if actor is None:
+                    # Reserve 404 for clients probing an unsupported endpoint.
+                    return {"error": f"session {session_id!r} does not exist"}, 400
+                actor_lock = actor["lock"]
+                if not actor_lock.acquire(blocking=False):
+                    return {"error": "session is busy"}, 409
+                actor_lock_acquired = True
+                target = actor["session"]
+                working = [dict(message) for message in actor["engine"].messages]
+
+            assert target is not None
+
+            pinned = target.get("project")
+            try:
+                pinned = self.validate_project(pinned) if pinned is not None else None
+            except WorkspaceError:
+                pinned = target.get("project")
+            if pinned != requested_project:
+                return {"error": "project does not match the session's pinned project"}, 409
+
+            try:
+                context_window = int((self.config.get("ollama") or {}).get("num_ctx", 8192))
+            except (TypeError, ValueError):
+                context_window = 8192
+            context_window = max(1, context_window)
+            max_tokens = max(1, int(context_window * threshold_value))
+            target_model = str(target.get("model") or self._model_spec)
+            before = count_messages(working, target_model)
+            report = auto_compact(
+                working,
+                max_tokens=max_tokens,
+                keep_recent=6,
+                summarize_with_model=lambda older: self._summarize_compaction(older, target_model),
+            )
+            after = count_messages(working, target_model) if report.triggered else before
+
+            if report.triggered:
+                persisted = [
+                    message
+                    for message in working
+                    if message.get("role") != "system"
+                    or SUMMARY_MARKER in str(message.get("content") or "")
+                ]
+                target["messages"] = persisted
+                target["project"] = requested_project
+                sessions.save(target)
+                if is_current:
+                    self.session = target
+                    self.engine.messages = working
+                else:
+                    actor["engine"].messages = working
+
+            return {
+                "id": target["id"],
+                "messages": self.render_messages(working),
+                "before": before,
+                "after": after,
+                "usage": {"input": after},
+                "project": requested_project,
+            }, 200
+        finally:
+            if actor_lock is not None and actor_lock_acquired:
+                actor_lock.release()
+            self._turn_lock.release()
+
+    def _summarize_compaction(self, older: list[dict], model_spec: str) -> str | None:
+        """Create a durable handoff summary using the session's provider."""
+        provider, model_name = _parse_model(model_spec)
+        client = (
+            self.engine.client
+            if model_spec == self._model_spec
+            else _build_client(self.config, provider)
+        )
+        transcript = json.dumps(older, ensure_ascii=False, default=str)
+        prompt = (
+            "Create a compact but complete hidden context summary of the conversation below. "
+            "Preserve requirements, decisions and rationale, changed files, exact identifiers, "
+            "tool outcomes, errors, attempted fixes, validation results, and unfinished work. "
+            "Do not invent facts. Organize it for another model to continue the work without "
+            "seeing the omitted messages.\n\n" + transcript
+        )
+        result = client.chat(
+            model=model_name,
+            messages=[{"role": "user", "content": prompt}],
+            tools=None,
+            options={"temperature": 0.0},
+        )
+        return str(result.get("content") or "").strip() or None
+
+    def set_effort(self, level: str) -> dict:
+        from .engine import EFFORT_LEVELS
+
+        level = (level or "").strip().lower()
+        if level not in EFFORT_LEVELS:
+            return {"error": f"effort must be one of {', '.join(EFFORT_LEVELS)}"}
+        self.agent.state.update(effort=level)
+        try:
+            self.engine.refresh_system_prompt()
+        except Exception:
+            _log.warning("failed to refresh prompt after effort switch", exc_info=True)
+        self.config["effort"] = level
+        try:
+            _config.save(self.config)
+        except Exception:
+            _log.warning("failed to save config after effort switch", exc_info=True)
+        return {"ok": True, "effort": level}
+
+    def list_sessions_compat(self) -> dict:
+        """Chats reshaped the way the iOS coding tab expects."""
+        return {
+            "sessions": [
+                {
+                    "id": c["id"],
+                    "title": c["title"],
+                    "createdAt": int(c.get("updated_at") or 0),
+                    "messages": int(c.get("turns") or 0),
+                    **({"project": c["project"]} if c.get("project") is not None else {}),
+                }
+                for c in self.list_chats()
+            ]
+        }
+
+    # GitHub proxy — lets the phone browse/edit GitHub with the PC's token.
+    def _github_ctx(self):
+        """Duck-typed ToolContext for cagentic.github._request: needs
+        .github_token and .insecure_ssl. Falls back to config github.token."""
+        import types
+
+        state = self.agent.state
+        token = state.github_token or ((self.config.get("github") or {}).get("token"))
+        return types.SimpleNamespace(
+            github_token=token,
+            insecure_ssl=bool(getattr(state, "insecure_ssl", False)),
+            default_repository=getattr(state, "default_repository", None),
+        )
+
+    def github_user(self) -> dict:
+        from .github import _request
+
+        status, body = _request("GET", "/user", self._github_ctx())
+        if status != 200 or not isinstance(body, dict):
+            return {"error": f"github user lookup failed (HTTP {status})"}
+        return {
+            "user": {
+                "login": body.get("login") or "",
+                "name": body.get("name"),
+                "avatar": body.get("avatar_url"),
+            }
+        }
+
+    def github_repos(self) -> dict:
+        from .github import _request
+
+        status, body = _request(
+            "GET",
+            "/user/repos",
+            self._github_ctx(),
+            params={"sort": "updated", "per_page": 100, "type": "all"},
+        )
+        if status != 200 or not isinstance(body, list):
+            return {"error": f"github repo listing failed (HTTP {status})"}
+        return {
+            "repos": [
+                {
+                    "name": r.get("full_name") or "",
+                    "private": bool(r.get("private")),
+                    "language": r.get("language"),
+                    "url": r.get("html_url"),
+                }
+                for r in body
+                if isinstance(r, dict)
+            ]
+        }
+
+    def github_file_get(self, repo: str, path: str, ref: str | None = None) -> dict:
+        import base64
+        from urllib.parse import quote
+
+        from .github import _request
+
+        repo = repo or self.agent.state.default_repository or ""
+        if not repo or not path:
+            return {"error": "repo and path are required"}
+        url_path = f"/repos/{repo}/contents/{quote(path)}"
+        params = {"ref": ref} if ref else None
+        status, body = _request("GET", url_path, self._github_ctx(), params=params)
+        if status != 200 or not isinstance(body, dict):
+            return {"error": f"github file read failed (HTTP {status})"}
+        try:
+            content = base64.b64decode(body.get("content") or "").decode("utf-8", errors="replace")
+        except Exception:
+            content = ""
+        return {"content": content, "sha": body.get("sha") or ""}
+
+    def github_file_put(self, data: dict) -> dict:
+        import base64
+        from urllib.parse import quote
+
+        from .github import _request
+
+        repo = str(data.get("repo") or self.agent.state.default_repository or "")
+        path = str(data.get("path") or "")
+        if not repo or not path:
+            return {"error": "repo and path are required"}
+        payload = {
+            "message": str(data.get("message") or f"Update {path}"),
+            "content": base64.b64encode(str(data.get("content") or "").encode("utf-8")).decode(
+                "ascii"
+            ),
+        }
+        if data.get("sha"):
+            payload["sha"] = str(data["sha"])
+        if data.get("branch"):
+            payload["branch"] = str(data["branch"])
+        url_path = f"/repos/{repo}/contents/{quote(path)}"
+        status, body = _request("PUT", url_path, self._github_ctx(), json=payload)
+        if status not in (200, 201):
+            return {"error": f"github file write failed (HTTP {status})"}
+        return {"ok": True}
 
     # -- a chat turn --------------------------------------------------------
 
@@ -829,6 +1758,7 @@ IMPORTANT: When you use show_widget, do NOT repeat the widget title or type in y
         # Truncate to before the target user message so submit_message adds it fresh
         self.engine.messages = self.engine.messages[:target]
         self._active_emit = emit
+        self._thread_context.emit = emit
         self.engine.model = self.agent.model
         try:
             for ev in self.engine.submit_message(message):
@@ -839,6 +1769,7 @@ IMPORTANT: When you use show_widget, do NOT repeat the widget title or type in y
             emit("error", {"text": f"{type(e).__name__}: {e}"})
         finally:
             self._active_emit = None
+            self._thread_context.emit = None
             try:
                 self._save_current()
             except Exception:
@@ -851,7 +1782,9 @@ IMPORTANT: When you use show_widget, do NOT repeat the widget title or type in y
         if not locked:
             return {"error": "Cagentic is still working on the previous message."}
         try:
-            user_indices = [i for i, m in enumerate(self.engine.messages) if m.get("role") == "user"]
+            user_indices = [
+                i for i, m in enumerate(self.engine.messages) if m.get("role") == "user"
+            ]
             if index < 0 or index >= len(user_indices):
                 return {"error": f"invalid message index {index}"}
             target = user_indices[index]
@@ -862,15 +1795,18 @@ IMPORTANT: When you use show_widget, do NOT repeat the widget title or type in y
         finally:
             self._turn_lock.release()
 
-    def run_turn(self, message: str, emit, source: str = "pc") -> None:
-        if not self._turn_lock.acquire(blocking=False):
+    def run_turn(self, message: str, emit, source: str = "pc", prelocked: bool = False) -> None:
+        if not prelocked and not self._turn_lock.acquire(blocking=False):
             emit("error", {"text": "Cagentic is still working on the previous message."})
             return
         self._active_emit = emit
+        self._thread_context.emit = emit
         self._active_source = source
         self.engine.model = self.agent.model
         try:
-            # Inject device context into system prompt
+            # Refresh the user's live goals/calendar context before every turn,
+            # then add the device-specific capabilities for this request.
+            self._rebuild_suffix()
             self._inject_device_context(source)
             for ev in self.engine.submit_message(message):
                 emit(ev.kind, ev.data)
@@ -880,6 +1816,7 @@ IMPORTANT: When you use show_widget, do NOT repeat the widget title or type in y
             emit("error", {"text": f"{type(e).__name__}: {e}"})
         finally:
             self._active_emit = None
+            self._thread_context.emit = None
             self._active_source = "pc"
             try:
                 self._save_current()
@@ -887,44 +1824,155 @@ IMPORTANT: When you use show_widget, do NOT repeat the widget title or type in y
                 _log.warning("failed to save chat after turn", exc_info=True)
             self._turn_lock.release()
 
+    def _session_actor(self, session_id: str) -> dict | None:
+        """Build an isolated engine/runtime for a saved-session API actor."""
+        with self._actors_lock:
+            cached = self._actors.get(session_id)
+            if cached is not None:
+                return cached
+            data = sessions.load(session_id)
+            if data is None:
+                return None
+            from .engine import QueryEngine
+            from .state import AppState
+
+            model_spec = str(data.get("model") or self._model_spec)
+            provider, model_name = _parse_model(model_spec)
+            try:
+                client = _build_client(self.config, provider)
+            except RuntimeError:
+                return None
+            shared = self.agent.state
+            state = AppState(
+                workspace=self._default_workspace,
+                home=shared.home,
+                user_name=shared.user_name,
+                github_token=shared.github_token,
+                yolo=shared.yolo,
+                insecure_ssl=shared.insecure_ssl,
+                tools_enabled=shared.tools_enabled,
+                effort=shared.effort,
+                tool_groups=set(shared.tool_groups) if shared.tool_groups else None,
+                mcp=shared.mcp,
+                browser=shared.browser,
+                active_model_spec=model_spec,
+            )
+            project = data.get("project")
+            context = ""
+            if project and project.get("kind") == "gatewayFolder":
+                folder = self.workspace_policy.validate(project.get("value"))
+                state.workspace = folder
+                state.workspace_boundary = folder
+                context = f"Pinned gateway folder project: {folder}."
+            elif project and project.get("kind") == "repository":
+                state.default_repository = project.get("value")
+                context = f"Pinned GitHub repository project: {project.get('value')}."
+            engine = QueryEngine(
+                client=client,
+                state=state,
+                model=model_name,
+                temperature=self.engine.temperature,
+                config=self.config,
+                permission_resolver=self._resolve,
+                stream=True,
+            )
+            engine.executor.phone_action = self.engine.executor.phone_action
+            engine.executor.widget_action = self.engine.executor.widget_action
+            engine.system_suffix = self.engine.system_suffix
+            engine.project_context = context
+            engine.load_messages(data.get("messages", []))
+            engine.session_id = session_id
+            actor = {
+                "lock": threading.Lock(),
+                "engine": engine,
+                "session": data,
+                "model_spec": model_spec,
+            }
+            self._actors[session_id] = actor
+            return actor
+
+    def validate_session_turn(self, session_id: str, project) -> tuple[dict, int]:
+        actor = self._session_actor(session_id)
+        if actor is None:
+            return {"error": f"session {session_id!r} does not exist"}, 400
+        try:
+            requested = self.validate_project(project)
+        except WorkspaceError as exc:
+            return {"error": str(exc)}, exc.status
+        if actor["session"].get("project") != requested:
+            return {"error": "project does not match the session's pinned project"}, 409
+        if actor["lock"].locked():
+            return {"error": "session is busy"}, 409
+        return {"ok": True}, 200
+
+    def run_session_turn(self, session_id: str, message: str, emit) -> None:
+        actor = self._session_actor(session_id)
+        if actor is None or not actor["lock"].acquire(blocking=False):
+            emit("error", {"text": "session is busy or unavailable"})
+            return
+        engine = actor["engine"]
+        self._thread_context.emit = emit
+        try:
+            for event in engine.submit_message(message):
+                emit(event.kind, event.data)
+        except _ClientGone:
+            raise
+        except Exception as exc:
+            emit("error", {"text": f"{type(exc).__name__}: {exc}"})
+        finally:
+            self._thread_context.emit = None
+            data = actor["session"]
+            data["model"] = actor["model_spec"]
+            data["messages"] = [
+                item
+                for item in engine.messages
+                if item.get("role") != "system" or SUMMARY_MARKER in str(item.get("content") or "")
+            ]
+            sessions.save(data)
+            actor["lock"].release()
+
     # -- slash command handler for web UI -----------------------------------
 
     def handle_cmd(self, cmd: str, arg1: str = "", arg2: str = "") -> dict:
         """Execute a slash command from the web UI and return a result dict.
 
         Supported commands mirror the CLI: /new, /clear, /model, /models,
-        /diag, /tools, /groups, /yolo, /help, /plan, /stream, /name, /host,
-        /retry, /undo, /save, /notes, /mcp, /config, /set.
+        /diag, /tools, /groups, /yolo, /help, /plan, /effort, /stream,
+        /name, /host, /retry, /undo, /save, /notes, /mcp, /config, /set.
         """
-        from .tools import DEFAULT_GROUPS, _all_tools
         from . import config as _cfg
+        from .tools import DEFAULT_GROUPS, _all_tools
 
         cmd = cmd.lstrip("/").lower()
         agent = self.agent
         cfg = self.config
 
         if cmd in ("help", "?"):
-            return {"ok": True, "text": (
-                "/new — start a new chat\n"
-                "/clear — clear the current chat\n"
-                "/model <name> — switch model\n"
-                "/models — list available models\n"
-                "/diag — show diagnostics\n"
-                "/tools — list active tools\n"
-                "/groups [enable|disable <name>] — show/change tool groups\n"
-                "/yolo [on|off] — toggle auto-approve\n"
-                "/plan [on|off] — toggle plan mode\n"
-                "/stream [on|off] — toggle streaming\n"
-                "/name <name> — set your name\n"
-                "/host <url> — change Ollama host\n"
-                "/save — save current chat\n"
-                "/notes — list notes\n"
-                "/mcp — list MCP servers\n"
-                "/config — show config\n"
-                "/set <key> <value> — set config value\n"
-                "/undo — undo last exchange\n"
-                "/retry — retry last turn\n"
-            )}
+            return {
+                "ok": True,
+                "text": (
+                    "/new — start a new chat\n"
+                    "/clear — clear the current chat\n"
+                    "/model <name> — switch model\n"
+                    "/models — list available models\n"
+                    "/diag — show diagnostics\n"
+                    "/tools — list active tools\n"
+                    "/groups [enable|disable <name>] — show/change tool groups\n"
+                    "/yolo [on|off] — toggle auto-approve\n"
+                    "/plan [on|off] — toggle plan mode\n"
+                    "/effort [low|medium|high] — how hard the model works\n"
+                    "/stream [on|off] — toggle streaming\n"
+                    "/name <name> — set your name\n"
+                    "/host <url> — change Ollama host\n"
+                    "/save — save current chat\n"
+                    "/notes — list notes\n"
+                    "/mcp — list MCP servers\n"
+                    "/config — show config\n"
+                    "/set <key> <value> — set config value\n"
+                    "/undo — undo last exchange\n"
+                    "/retry — retry last turn\n"
+                ),
+            }
 
         if cmd == "new":
             cur = self.new_chat()
@@ -932,7 +1980,10 @@ IMPORTANT: When you use show_widget, do NOT repeat the widget title or type in y
 
         if cmd == "clear":
             if not self._interrupt_turn():
-                return {"ok": False, "text": "Cagentic is still working on the previous message."}
+                return {
+                    "ok": False,
+                    "text": "Cagentic is still working on the previous message.",
+                }
             try:
                 self.engine.messages.clear()
                 self._save_current()
@@ -946,21 +1997,33 @@ IMPORTANT: When you use show_widget, do NOT repeat the widget title or type in y
             result = self.set_model(arg1)
             if "error" in result:
                 return {"ok": False, "text": result["error"]}
-            return {"ok": True, "text": f"model → {result['model']}", "model": result["model"]}
+            return {
+                "ok": True,
+                "text": f"model → {result['model']}",
+                "model": result["model"],
+            }
 
         if cmd == "models":
             try:
                 models = agent.client.list_models()
             except Exception as e:
                 return {"ok": False, "text": f"could not list models: {e}"}
-            return {"ok": True, "text": "available models:\n" + "\n".join(f"  {m}" for m in models), "models": models}
+            return {
+                "ok": True,
+                "text": "available models:\n" + "\n".join(f"  {m}" for m in models),
+                "models": models,
+            }
 
         if cmd == "diag":
-            groups = agent.state.tool_groups if agent.state.tool_groups is not None else DEFAULT_GROUPS
+            groups = (
+                agent.state.tool_groups if agent.state.tool_groups is not None else DEFAULT_GROUPS
+            )
             lines = [f"model:    {agent.model}"]
             lines.append(f"name:     {agent.state.user_name or '(not set)'}")
             lines.append(f"workspace: {agent.state.workspace}")
-            lines.append(f"tools:    {'native' if agent.tools_enabled else 'text-protocol fallback'}")
+            lines.append(
+                f"tools:    {'native' if agent.tools_enabled else 'text-protocol fallback'}"
+            )
             lines.append(f"groups:   {', '.join(sorted(groups))}")
             lines.append(f"stream:   {'on' if agent.engine.stream else 'off'}")
             try:
@@ -968,17 +2031,23 @@ IMPORTANT: When you use show_widget, do NOT repeat the widget title or type in y
                 if status is None:
                     lines.append("vram:     model not currently loaded")
                 elif status["fully_gpu"]:
-                    lines.append(f"vram:     {status['size_vram'] / (1024**3):.1f} GB · fully on GPU ✓")
+                    lines.append(
+                        f"vram:     {status['size_vram'] / (1024**3):.1f} GB · fully on GPU ✓"
+                    )
                 else:
                     size_gb = status["size"] / (1024**3)
                     cpu_gb = status["cpu_bytes"] / (1024**3)
                     pct = status["cpu_percent"]
-                    lines.append(f"vram:     {cpu_gb:.1f}/{size_gb:.1f} GB on CPU ({pct:.0f}% offloaded — slow)")
+                    lines.append(
+                        f"vram:     {cpu_gb:.1f}/{size_gb:.1f} GB on CPU ({pct:.0f}% offloaded — slow)"
+                    )
             except Exception:
                 _log.warning("could not read VRAM status", exc_info=True)
                 lines.append("vram:     (not available)")
             mcp_servers = list(((cfg.get("mcp") or {}).get("servers") or {}).keys())
-            lines.append(f"mcp:      {len(mcp_servers)} configured ({', '.join(mcp_servers) or 'none'})")
+            lines.append(
+                f"mcp:      {len(mcp_servers)} configured ({', '.join(mcp_servers) or 'none'})"
+            )
             return {"ok": True, "text": "\n".join(lines)}
 
         if cmd == "tools":
@@ -990,9 +2059,12 @@ IMPORTANT: When you use show_widget, do NOT repeat the widget title or type in y
             return {"ok": True, "text": "\n".join(lines)}
 
         if cmd == "groups":
-            active = agent.state.tool_groups if agent.state.tool_groups is not None else DEFAULT_GROUPS
+            active = (
+                agent.state.tool_groups if agent.state.tool_groups is not None else DEFAULT_GROUPS
+            )
             if not arg1:
                 from .tools import TOOL_GROUPS
+
                 lines = ["tool groups (✓ = sent to the model):"]
                 for g, names in sorted(TOOL_GROUPS.items()):
                     mark = "✓" if g in active else "✗"
@@ -1005,7 +2077,10 @@ IMPORTANT: When you use show_widget, do NOT repeat the widget title or type in y
                 _cfg.set_value(cfg, "tool_groups", sorted(groups))
                 _cfg.save(cfg)
                 self.engine.refresh_system_prompt()
-                return {"ok": True, "text": f"enabled '{arg2}' — {len(groups)} group(s) active"}
+                return {
+                    "ok": True,
+                    "text": f"enabled '{arg2}' — {len(groups)} group(s) active",
+                }
             if arg1 == "disable" and arg2:
                 groups = set(active)
                 groups.discard(arg2)
@@ -1013,8 +2088,14 @@ IMPORTANT: When you use show_widget, do NOT repeat the widget title or type in y
                 _cfg.set_value(cfg, "tool_groups", sorted(groups))
                 _cfg.save(cfg)
                 self.engine.refresh_system_prompt()
-                return {"ok": True, "text": f"disabled '{arg2}' — {len(groups)} group(s) active"}
-            return {"ok": False, "text": "usage: /groups  |  /groups enable <name>  |  /groups disable <name>"}
+                return {
+                    "ok": True,
+                    "text": f"disabled '{arg2}' — {len(groups)} group(s) active",
+                }
+            return {
+                "ok": False,
+                "text": "usage: /groups  |  /groups enable <name>  |  /groups disable <name>",
+            }
 
         if cmd == "yolo":
             want = arg1.lower() if arg1 else ("off" if agent.state.yolo else "on")
@@ -1023,7 +2104,23 @@ IMPORTANT: When you use show_widget, do NOT repeat the widget title or type in y
             agent.state.update(yolo=(want == "on"))
             cfg["yolo"] = agent.state.yolo
             _cfg.save(cfg)
-            return {"ok": True, "text": f"yolo mode: {'ON (auto-approve)' if agent.state.yolo else 'OFF (ask every time)'}"}
+            return {
+                "ok": True,
+                "text": f"yolo mode: {'ON (auto-approve)' if agent.state.yolo else 'OFF (ask every time)'}",
+            }
+
+        if cmd == "effort":
+            from .engine import EFFORT_LEVELS
+
+            if not arg1:
+                return {
+                    "ok": True,
+                    "text": f"effort: {getattr(agent.state, 'effort', 'medium')}",
+                }
+            res = self.set_effort(arg1)
+            if res.get("error"):
+                return {"ok": False, "text": res["error"]}
+            return {"ok": True, "text": f"effort: {res['effort']}"}
 
         if cmd == "plan":
             want = arg1.lower() if arg1 else ("off" if agent.state.plan_mode else "on")
@@ -1031,20 +2128,29 @@ IMPORTANT: When you use show_widget, do NOT repeat the widget title or type in y
                 return {"ok": False, "text": "usage: /plan on|off"}
             agent.state.update(plan_mode=(want == "on"))
             self.engine.refresh_system_prompt()
-            return {"ok": True, "text": f"plan mode: {'ON (read-only)' if agent.state.plan_mode else 'OFF'}"}
+            return {
+                "ok": True,
+                "text": f"plan mode: {'ON (read-only)' if agent.state.plan_mode else 'OFF'}",
+            }
 
         if cmd == "stream":
             want = arg1.lower() if arg1 else ("off" if agent.engine.stream else "on")
             if want not in ("on", "off"):
                 return {"ok": False, "text": "usage: /stream on|off"}
-            agent.engine.stream = (want == "on")
+            agent.engine.stream = want == "on"
             _cfg.set_value(cfg, "ollama.stream", agent.engine.stream)
             _cfg.save(cfg)
-            return {"ok": True, "text": f"streaming: {'on' if agent.engine.stream else 'off'} (saved)"}
+            return {
+                "ok": True,
+                "text": f"streaming: {'on' if agent.engine.stream else 'off'} (saved)",
+            }
 
         if cmd == "name":
             if not arg1:
-                return {"ok": True, "text": f"your name: {agent.state.user_name or '(not set)'}"}
+                return {
+                    "ok": True,
+                    "text": f"your name: {agent.state.user_name or '(not set)'}",
+                }
             agent.state.update(user_name=arg1)
             self.engine.refresh_system_prompt()
             _cfg.set_value(cfg, "user_name", arg1)
@@ -1068,6 +2174,7 @@ IMPORTANT: When you use show_widget, do NOT repeat the widget title or type in y
 
         if cmd == "notes":
             from .notes import _notes
+
             all_notes = _notes.list_all()
             if not all_notes:
                 return {"ok": True, "text": "no notes"}
@@ -1078,7 +2185,10 @@ IMPORTANT: When you use show_widget, do NOT repeat the widget title or type in y
             mcp_servers = list(((cfg.get("mcp") or {}).get("servers") or {}).keys())
             if not mcp_servers:
                 return {"ok": True, "text": "no MCP servers configured"}
-            return {"ok": True, "text": "MCP servers:\n" + "\n".join(f"  {s}" for s in mcp_servers)}
+            return {
+                "ok": True,
+                "text": "MCP servers:\n" + "\n".join(f"  {s}" for s in mcp_servers),
+            }
 
         if cmd == "config":
             # Redact ALL secret-bearing values (github token, provider api_keys,
@@ -1097,7 +2207,10 @@ IMPORTANT: When you use show_widget, do NOT repeat the widget title or type in y
             # Remove last user + assistant messages. Must hold the turn lock —
             # a streaming turn appends to this list concurrently.
             if not self._interrupt_turn():
-                return {"ok": False, "text": "Cagentic is still working on the previous message."}
+                return {
+                    "ok": False,
+                    "text": "Cagentic is still working on the previous message.",
+                }
             try:
                 msgs = self.engine.messages
                 while msgs and msgs[-1].get("role") != "user":
@@ -1113,20 +2226,30 @@ IMPORTANT: When you use show_widget, do NOT repeat the widget title or type in y
             # Remove last assistant message so the engine re-generates. Same
             # turn-lock requirement as /undo.
             if not self._interrupt_turn():
-                return {"ok": False, "text": "Cagentic is still working on the previous message."}
+                return {
+                    "ok": False,
+                    "text": "Cagentic is still working on the previous message.",
+                }
             try:
                 msgs = self.engine.messages
                 while msgs and msgs[-1].get("role") == "assistant":
                     msgs.pop()
                 self._save_current()
-                return {"ok": True, "text": "removed last reply — send a message to retry"}
+                return {
+                    "ok": True,
+                    "text": "removed last reply — send a message to retry",
+                }
             finally:
                 self._turn_lock.release()
 
-        return {"ok": False, "text": f"unknown command: /{cmd}. Type /help for available commands."}
+        return {
+            "ok": False,
+            "text": f"unknown command: /{cmd}. Type /help for available commands.",
+        }
 
 
 # ---------------------------------------------------------------- handler ---
+
 
 class _Handler(BaseHTTPRequestHandler):
     protocol_version = "HTTP/1.1"
@@ -1148,7 +2271,7 @@ class _Handler(BaseHTTPRequestHandler):
     # load plugins, or frame us.
     _CSP = (
         "default-src 'self'; "
-        "script-src 'self' 'unsafe-inline'; "
+        "script-src 'self'; "
         "style-src 'self' 'unsafe-inline'; "
         "img-src 'self' data: https:; "
         "connect-src 'self'; "
@@ -1192,7 +2315,10 @@ class _Handler(BaseHTTPRequestHandler):
     def _authorized(self) -> bool:
         """Gate every /api/* request against DNS-rebinding, cross-origin
         (CSRF), and the per-process secret token. Returns True if allowed."""
-        if not self._host_is_local():
+        # In LAN mode (explicit opt-in) the Host header is the PC's LAN
+        # address, so the loopback-Host check can't apply — the secret token
+        # below is the gate. Loopback mode keeps the anti-rebinding check.
+        if not self._gw().lan and not self._host_is_local():
             _log.warning("rejected request with non-local Host header")
             return False
         if not self._origin_ok():
@@ -1200,8 +2326,10 @@ class _Handler(BaseHTTPRequestHandler):
             return False
         expected = self._gw().token
         # fetch() calls send the token via header; the SSE/EventSource stream
-        # (which can't set headers) sends it via ?token= query param.
-        supplied = self.headers.get("X-Cagentic-Token")
+        # (which can't set headers) sends it via ?token= query param. The iOS
+        # app sends its stored gateway token as X-Cagentic-Link — accept it
+        # as an alias so one saved credential works for the whole app.
+        supplied = self.headers.get("X-Cagentic-Token") or self.headers.get("X-Cagentic-Link")
         if not supplied:
             qs = parse_qs(urlparse(self.path).query)
             vals = qs.get("token")
@@ -1264,10 +2392,63 @@ class _Handler(BaseHTTPRequestHandler):
                 return
         if path == "/api/bootstrap":
             self._json(self._gw().bootstrap())
+        elif path == "/api/os":
+            self._json(self._gw().personal_os_snapshot())
+        elif path == "/api/os/integrations":
+            self._json(
+                {
+                    "connections": integrations.list_connections()
+                    + inbox.list_email_connections()
+                }
+            )
+        elif path == "/api/os/inbox":
+            self._json(
+                {
+                    "items": inbox.list_items(),
+                    "unread_inbox": inbox.unread_count(),
+                    "email_connections": inbox.list_email_connections(),
+                }
+            )
+        elif path == "/api/os/routines":
+            self._json({"routines": routines.list_routines()})
+        elif path == "/api/os/notifications":
+            self._json(
+                {
+                    "notifications": proactive.list_notifications(),
+                    "unread_notifications": proactive.unread_count(),
+                }
+            )
+        elif path == "/api/os/calendar/export.ics":
+            self._send(
+                integrations.export_calendar().encode("utf-8"),
+                "text/calendar; charset=utf-8",
+            )
         elif path == "/api/settings":
             self._json(self._gw().get_settings())
         elif path == "/api/projects":
             self._json(self._gw().list_projects())
+        elif path == "/api/sessions":
+            # Collama-compat: the iOS coding tab's session list.
+            self._json(self._gw().list_sessions_compat())
+        elif path == "/api/workspace/browse":
+            qs = parse_qs(urlparse(self.path).query, keep_blank_values=True)
+            try:
+                self._json(self._gw().browse_workspace((qs.get("path") or [""])[0]))
+            except WorkspaceError as exc:
+                self._json({"error": str(exc)}, status=exc.status)
+        elif path == "/api/github/user":
+            self._json(self._gw().github_user())
+        elif path == "/api/github/repos":
+            self._json(self._gw().github_repos())
+        elif path == "/api/github/file":
+            qs = parse_qs(urlparse(self.path).query)
+            self._json(
+                self._gw().github_file_get(
+                    (qs.get("repo") or [""])[0],
+                    (qs.get("path") or [""])[0],
+                    (qs.get("ref") or [None])[0],
+                )
+            )
         else:
             self._send(b"not found", "text/plain", status=404)
 
@@ -1280,14 +2461,109 @@ class _Handler(BaseHTTPRequestHandler):
             self._deny()
             return
         gw = self._gw()
+        if path.startswith("/api/os/"):
+            body = self._body()
+            try:
+                if path == "/api/os/goals/create":
+                    result = gw.create_goal(body)
+                elif path == "/api/os/goals/update":
+                    result = gw.update_goal(body)
+                elif path == "/api/os/goals/delete":
+                    result = gw.delete_goal(str(body.get("id", "")))
+                elif path == "/api/os/events/create":
+                    result = gw.create_calendar_event(body)
+                elif path == "/api/os/events/update":
+                    result = gw.update_calendar_event(body)
+                elif path == "/api/os/events/delete":
+                    result = gw.delete_calendar_event(str(body.get("id", "")))
+                elif path == "/api/os/deadlines/create":
+                    result = gw.create_deadline(body)
+                elif path == "/api/os/deadlines/update":
+                    result = gw.update_deadline(body)
+                elif path == "/api/os/deadlines/delete":
+                    result = gw.delete_deadline(str(body.get("id", "")))
+                elif path == "/api/os/integrations/create":
+                    result = gw.create_integration(body)
+                elif path == "/api/os/integrations/update":
+                    result = gw.update_integration(body)
+                elif path == "/api/os/integrations/delete":
+                    result = gw.delete_integration(body)
+                elif path == "/api/os/integrations/sync":
+                    result = gw.sync_integration(str(body.get("id", "")))
+                elif path == "/api/os/notifications/action":
+                    result = gw.notification_action(body)
+                elif path == "/api/os/inbox/create":
+                    result = gw.create_inbox_item(body)
+                elif path == "/api/os/inbox/update":
+                    result = gw.update_inbox_item(body)
+                elif path == "/api/os/inbox/delete":
+                    result = gw.delete_inbox_item(str(body.get("id", "")))
+                elif path == "/api/os/email/create":
+                    result = gw.create_email_connection(body)
+                elif path == "/api/os/email/sync":
+                    result = gw.sync_email_connection(str(body.get("id", "")))
+                elif path == "/api/os/email/delete":
+                    result = gw.delete_email_connection(body)
+                elif path == "/api/os/routines/create":
+                    result = gw.create_routine(body)
+                elif path == "/api/os/routines/update":
+                    result = gw.update_routine(body)
+                elif path == "/api/os/routines/delete":
+                    result = gw.delete_routine(str(body.get("id", "")))
+                elif path == "/api/os/routines/run":
+                    result = gw.run_routine(str(body.get("id", "")))
+                else:
+                    self._send(b"not found", "text/plain", status=404)
+                    return
+            except (TypeError, ValueError) as exc:
+                self._json({"ok": False, "error": str(exc)}, status=400)
+                return
+            status = 200 if result.get("ok", False) or path.endswith("/sync") else 404
+            self._json(result, status=status)
+            return
         if path == "/api/abort":
             gw.abort_generation()
             self._json({"ok": True})
             return
+        if path == "/api/context/compact":
+            b = self._body()
+            if b.get("client") != "collama":
+                self._json({"error": "client must be collama"}, status=400)
+                return
+            result, status = gw.compact_context(
+                str(b.get("id") or ""),
+                b.get("project"),
+                b.get("threshold", 0.90),
+            )
+            self._json(result, status=status)
+            return
         if path == "/api/chat":
             b = self._body()
             source = str(b.get("source", "pc"))
-            self._stream_chat(str(b.get("message", "")).strip(), source=source)
+            # "message" is the web UI's key; "prompt" is what the iOS coding
+            # tab sends (Collama-compat). Accept either.
+            message = str(b.get("message") or b.get("prompt") or "").strip()
+            prelocked = False
+            session_id = str(b.get("id") or "")
+            if b.get("client") == "collama":
+                if session_id and session_id != gw.session.get("id"):
+                    result, status = gw.validate_session_turn(session_id, b.get("project"))
+                    if status != 200:
+                        self._json(result, status=status)
+                        return
+                else:
+                    try:
+                        gw.begin_collama_turn(b.get("project"))
+                        prelocked = True
+                    except WorkspaceError as exc:
+                        self._json({"error": str(exc)}, status=exc.status)
+                        return
+            self._stream_chat(
+                message,
+                source=source,
+                prelocked=prelocked,
+                session_id=session_id or None,
+            )
             return
         if path == "/api/chat/edit":
             b = self._body()
@@ -1298,7 +2574,11 @@ class _Handler(BaseHTTPRequestHandler):
             self._json(self._gw().delete_message(int(b.get("index", 0))))
             return
         if path == "/api/permission":
-            gw.deliver_permission(str(self._body().get("answer", "no")))
+            b = self._body()
+            gw.deliver_permission(
+                str(b.get("answer", "no")),
+                str(b["id"]) if b.get("id") else None,
+            )
             self._json({"ok": True})
             return
         if path == "/api/computer/approve":
@@ -1315,8 +2595,67 @@ class _Handler(BaseHTTPRequestHandler):
             gw.deliver_phone_result(action_id, result)
             self._json({"ok": True})
             return
+        # Collama-compat session routes (the iOS coding tab) — same chats,
+        # different paths and response shapes.
+        if path == "/api/session/new":
+            b = self._body()
+            try:
+                project = (
+                    gw.validate_project(b.get("project")) if b.get("client") == "collama" else None
+                )
+            except WorkspaceError as exc:
+                self._json({"error": str(exc)}, status=exc.status)
+                return
+            if b.get("client") == "collama" and project is None:
+                self._json({"error": "a project is required for Collama requests"}, status=400)
+                return
+            current = gw.new_chat(project)
+            self._json(
+                {
+                    "ok": True,
+                    "id": gw.session["id"],
+                    "session": current,
+                    "current": current,
+                }
+            )
+            return
+        if path == "/api/session/load":
+            b = self._body()
+            self._json(gw.load_chat(str(b.get("id", ""))))
+            return
+        if path == "/api/session/delete":
+            b = self._body()
+            gw.delete_chat(str(b.get("id", "")))
+            self._json({"ok": True})
+            return
+        if path == "/api/workspace":
+            b = self._body()
+            try:
+                self._json(gw.set_workspace(b.get("path")))
+            except WorkspaceError as exc:
+                self._json({"error": str(exc)}, status=exc.status)
+            return
+        if path == "/api/effort":
+            b = self._body()
+            res = gw.set_effort(str(b.get("effort", "")))
+            self._json(res, status=200 if res.get("ok") else 400)
+            return
+        if path == "/api/github/file":
+            self._json(gw.github_file_put(self._body()))
+            return
         if path == "/api/chats/new":
-            self._json({"current": gw.new_chat(), "chats": gw.list_chats()})
+            b = self._body()
+            try:
+                project = (
+                    gw.validate_project(b.get("project")) if b.get("client") == "collama" else None
+                )
+            except WorkspaceError as exc:
+                self._json({"error": str(exc)}, status=exc.status)
+                return
+            if b.get("client") == "collama" and project is None:
+                self._json({"error": "a project is required for Collama requests"}, status=400)
+                return
+            self._json({"current": gw.new_chat(project), "chats": gw.list_chats()})
             return
         if path == "/api/chats/load":
             cur = gw.load_chat(str(self._body().get("id", "")))
@@ -1351,22 +2690,48 @@ class _Handler(BaseHTTPRequestHandler):
             return
         if path == "/api/projects/add_chat":
             b = self._body()
-            self._json(gw.add_chat_to_project(str(b.get("project_id", "")), str(b.get("chat_id", ""))))
+            self._json(
+                gw.add_chat_to_project(str(b.get("project_id", "")), str(b.get("chat_id", "")))
+            )
             return
         if path == "/api/projects/remove_chat":
             b = self._body()
-            self._json(gw.remove_chat_from_project(str(b.get("project_id", "")), str(b.get("chat_id", ""))))
+            self._json(
+                gw.remove_chat_from_project(str(b.get("project_id", "")), str(b.get("chat_id", "")))
+            )
             return
         if path == "/api/projects/config":
             b = self._body()
-            self._json(gw.update_project_config(str(b.get("id", "")), b.get("system_prompt", ""), b.get("context", "")))
+            self._json(
+                gw.update_project_config(
+                    str(b.get("id", "")),
+                    b.get("system_prompt", ""),
+                    b.get("context", ""),
+                )
+            )
             return
         if path == "/api/cmd":
             b = self._body()
-            self._json(gw.handle_cmd(str(b.get("cmd", "")), str(b.get("arg1", "")), str(b.get("arg2", ""))))
+            self._json(
+                gw.handle_cmd(
+                    str(b.get("cmd", "")),
+                    str(b.get("arg1", "")),
+                    str(b.get("arg2", "")),
+                )
+            )
             return
         if path == "/api/email/verification":
             from . import emailer
+
+            if not gw.allow_email_verification():
+                self._json(
+                    {
+                        "ok": False,
+                        "error": "too many verification emails; try again later",
+                    },
+                    status=429,
+                )
+                return
             b = self._body()
             err = emailer.send_verification(
                 gw.config,
@@ -1393,18 +2758,30 @@ class _Handler(BaseHTTPRequestHandler):
                 self.wfile.flush()
             except OSError:
                 raise _ClientGone()
+
         return emit
 
-    def _stream_chat(self, message: str, source: str = "pc") -> None:
+    def _stream_chat(
+        self,
+        message: str,
+        source: str = "pc",
+        prelocked: bool = False,
+        session_id: str | None = None,
+    ) -> None:
         emit = self._begin_sse()
         if not message:
             try:
                 emit("error", {"text": "empty message"})
             except _ClientGone:
                 pass
+            if prelocked:
+                self._gw()._turn_lock.release()
             return
         try:
-            self._gw().run_turn(message, emit, source=source)
+            if session_id and session_id != self._gw().session.get("id"):
+                self._gw().run_session_turn(session_id, message, emit)
+            else:
+                self._gw().run_turn(message, emit, source=source, prelocked=prelocked)
             emit("end", {})
         except _ClientGone:
             return
@@ -1427,3497 +2804,13 @@ class _Handler(BaseHTTPRequestHandler):
 # ---------------------------------------------------------------- the page --
 # Cagentic — AI Assistant
 # Full HUD interface for Cagentic.
-_HTML = """<!doctype html>
-<html lang="en">
-<head>
-<meta charset="utf-8" />
-<meta name="viewport" content="width=device-width, initial-scale=1" />
-<title>Cagentic</title>
-<link rel="stylesheet" href="/app.css" />
-</head>
-<body>
-<div id="app">
-  <div class="scanlines"></div>
-  <div class="vignette"></div>
+def _asset_text(name: str) -> str:
+    """Load packaged gateway assets once; package-data keeps wheel installs working."""
+    from importlib.resources import files
 
-  <header class="hud-header">
-    <div class="hdr-left">
-        <span class="jl">C</span><span class="jd">&middot;</span><span class="jl">A</span><span class="jd">&middot;</span><span class="jl">G</span><span class="jd">&middot;</span><span class="jl">E</span><span class="jd">&middot;</span><span class="jl">N</span><span class="jd">&middot;</span><span class="jl">T</span><span class="jd">&middot;</span><span class="jl">I</span><span class="jd">&middot;</span><span class="jl">C</span>
-      <span class="j-sub">COGNITIVE AGENT NETWORK FOR INTELLIGENT COMPUTING</span>
-    </div>
-    <div class="hdr-right">
-      <span class="badge b-on">&#9679; Connected</span>
-      <div class="model-switch" id="modelSwitch" title="Switch model">
-        <span class="ms-dot">&#9679;</span>
-        <span class="ms-name" id="msName">---</span>
-        <span class="ms-caret">&#9662;</span>
-        <div class="model-menu hidden" id="modelMenu"></div>
-      </div>
-      <div class="j-clock" id="jClock">00:00:00</div>
-      <div class="j-date"  id="jDate">---</div>
-    </div>
-  </header>
+    return files("cagentic.gateway_assets").joinpath(name).read_text(encoding="utf-8")
 
-  <div class="nav-bar">
-    <button class="nav-btn" id="logsBtn">[ Chats ]</button>
-    <button class="nav-btn" id="newMissionBtn">[ + New Chat ]</button>
-    <div class="nav-divider"></div>
-    <span class="nav-meta">SESSION <span id="jSession">--------</span></span>
-    <div class="nav-spacer"></div>
-    <button class="nav-btn toggle-btn" id="voiceOutBtn" title="Read replies aloud">[ &#128264; Voice: OFF ]</button>
-  
-    <div class="nav-divider"></div>
-    <button class="nav-btn" id="configBtn">[ CONFIG ]</button>
-  </div>
 
-  <div class="main-area">
-    <div class="center-stack" id="centerStack">
-      <div class="orb-zone" id="orbZone">
-        <canvas id="orbCanvas"></canvas>
-        <div class="orb-rings">
-          <div class="ring r1"></div><div class="ring r2"></div>
-          <div class="ring r3"></div><div class="ring r4"></div>
-        </div>
-        <div class="orb-label" id="orbLabel">New Chat</div>
-      </div>
-      <div id="log" class="chat-log"></div>
-    </div>
-  </div>
-
-  <div id="windowLayer"></div>
-  <div id="restorePill" class="restore-pill" style="display:none">
-    <span class="restore-pill-icon">↩</span><span class="restore-pill-count">0</span> panels
-    <div class="restore-dropdown" id="restoreDropdown"></div>
-  </div>
-
-  <div class="cmd-area">
-    <div class="cmd-box" id="cmdBox">
-      <span class="cmd-prompt">&gt;_</span>
-      <textarea id="input" rows="1" placeholder="Type a message&#8230;"></textarea>
-      <button id="micBtn" class="mic-btn" title="Voice input">&#127908;</button>
-      <button id="send" class="exec-btn">EXECUTE</button>
-      <button id="stopBtn" class="exec-btn stop-btn hidden">&#9632; STOP</button>
-    </div>
-    <div class="cmd-footer">
-      <span>CAGENTIC v<span id="versionSpan">--</span></span>
-      <span id="hintText">Enter to send &bull; Shift+Enter for newline &bull; Ctrl+K New Chat &bull; Ctrl+S Settings</span>
-      <span id="busyLabel" class="busy-label hidden">&#9679; Thinking&#8230;</span>
-      <span id="tokenStats" class="token-stats hidden"></span>
-    </div>
-  </div>
-</div>
-
-<!-- Sessions drawer -->
-<div id="sessionsPanel" class="sessions-panel">
-  <div class="sessions-head">
-    <span class="panel-hdr">&#123; Sessions &#125;</span>
-    <button id="closeSessionsBtn" class="icon-btn">&#10005;</button>
-  </div>
-  <div id="sessionList" class="session-list"></div>
-</div>
-
-<div id="backdrop" class="backdrop hidden"></div>
-
-<!-- Settings modal -->
-<div id="settingsModal" class="modal hidden">
-  <div class="modal-card">
-    <div class="modal-head">
-      <span class="panel-hdr">&#123; Settings &#125;</span>
-      <button id="closeSettings" class="icon-btn">&#10005;</button>
-    </div>
-    <div class="modal-body">
-      <div class="field">
-        <span class="field-label">MODEL</span>
-        <select id="setModel"></select>
-      </div>
-      <div class="field">
-        <span class="field-label">OPERATOR NAME</span>
-        <input id="setName" type="text" placeholder="Your name" />
-      </div>
-      <div class="field">
-        <span class="field-label">TEMPERATURE &nbsp;<em id="tempVal">0.40</em></span>
-        <input id="setTemp" type="range" min="0" max="1.5" step="0.05" />
-      </div>
-      <div class="field">
-        <span class="field-label">Voice (TTS)</span>
-        <select id="setVoice"></select>
-      </div>
-      <div class="field row">
-        <span class="field-label">Stream responses</span>
-        <label class="toggle"><input id="setStream" type="checkbox" /><span></span></label>
-      </div>
-      <div class="field row">
-        <span class="field-label">Auto-approve tools</span>
-        <label class="toggle"><input id="setYolo" type="checkbox" /><span></span></label>
-      </div>
-      <hr class="settings-divider" />
-      <div class="section-label">GATEWAY</div>
-      <div class="field">
-        <span class="field-label">PORT</span>
-        <input id="setGwPort" type="number" min="1" max="65535" placeholder="8700" />
-      </div>
-      <div class="field row">
-        <span class="field-label">Auto-start on launch</span>
-        <label class="toggle"><input id="setGwAuto" type="checkbox" /><span></span></label>
-      </div>
-      <div class="field-hint">Port takes effect next launch. Auto-start can be toggled anytime.</div>
-      <hr class="settings-divider" />
-      <div class="section-label">SYSTEM PROMPT</div>
-      <div class="field">
-        <span class="field-label">Custom instructions</span>
-        <textarea id="setSysPrompt" rows="4" placeholder="Additional instructions appended to the system prompt&#8230;"></textarea>
-      </div>
-    </div>
-    <div class="modal-foot">
-      <button id="cancelSettings" class="btn-ghost">Cancel</button>
-      <button id="saveSettings"   class="btn-primary">Save</button>
-    </div>
-  </div>
-</div>
-<!-- Confirm modal -->
-<div id="confirmModal" class="modal hidden">
-  <div class="modal-card sm">
-    <div class="modal-head">
-      <span id="confirmTitle" class="modal-title">Confirm</span>
-      <button id="confirmClose" class="icon-btn">&#10005;</button>
-    </div>
-    <div class="modal-body">
-      <p id="confirmMsg" class="modal-msg"></p>
-    </div>
-    <div class="modal-foot">
-      <button id="confirmCancel" class="btn-ghost">Cancel</button>
-      <button id="confirmOk" class="btn-primary">Delete</button>
-    </div>
-  </div>
-</div>
-
-<!-- Rename modal -->
-<div id="renameModal" class="modal hidden">
-  <div class="modal-card md">
-    <div class="modal-head">
-      <span class="modal-title">Rename</span>
-      <button id="renameClose" class="icon-btn">&#10005;</button>
-    </div>
-    <div class="modal-body">
-      <input id="renameInput" type="text" class="modal-input" />
-    </div>
-    <div class="modal-foot">
-      <button id="renameCancel" class="btn-ghost">Cancel</button>
-      <button id="renameOk" class="btn-primary">Rename</button>
-    </div>
-  </div>
-</div>
-
-<!-- New project modal -->
-<div id="newProjectModal" class="modal hidden">
-  <div class="modal-card md">
-    <div class="modal-head">
-      <span class="modal-title">New Project</span>
-      <button id="newProjectModalClose" class="icon-btn">&#10005;</button>
-    </div>
-    <div class="modal-body">
-      <input id="newProjectInput" type="text" placeholder="Project name" class="modal-input" />
-    </div>
-    <div class="modal-foot">
-      <button id="newProjectCancel" class="btn-ghost">Cancel</button>
-      <button id="newProjectOk" class="btn-primary">Create</button>
-    </div>
-  </div>
-</div>
-
-<!-- Add to project modal -->
-<div id="projectModal" class="modal hidden">
-  <div class="modal-card md">
-    <div class="modal-head">
-      <span class="modal-title">Add to Project</span>
-      <button id="projectModalClose" class="icon-btn">&#10005;</button>
-    </div>
-    <div class="modal-body" id="projectModalBody">
-    </div>
-    <div class="modal-foot">
-      <button id="projectModalNewBtn" class="btn-ghost">+ New Project</button>
-      <button id="projectModalCancel" class="btn-ghost">Cancel</button>
-    </div>
-  </div>
-</div>
-
-<!-- Project config modal -->
-<div id="projConfigModal" class="modal hidden">
-  <div class="modal-card lg">
-    <div class="modal-head">
-      <span class="modal-title">Project Config</span>
-      <button id="projConfigClose" class="icon-btn">&#10005;</button>
-    </div>
-    <div class="modal-body">
-      <div class="field">
-        <span class="field-label">SYSTEM PROMPT</span>
-        <textarea id="projConfigPrompt" rows="5" class="modal-textarea" placeholder="Custom instructions for this project's chats&#10;(appended after the base system prompt)"></textarea>
-      </div>
-      <div class="field">
-        <span class="field-label">CONTEXT / NOTES</span>
-        <textarea id="projConfigContext" rows="5" class="modal-textarea" placeholder="Reference material always included in this project's chats&#10;(e.g. coding standards, project background, key contacts)"></textarea>
-      </div>
-    </div>
-    <div class="modal-foot">
-      <button id="projConfigCancel" class="btn-ghost">Cancel</button>
-      <button id="projConfigSave" class="btn-primary">Save</button>
-    </div>
-  </div>
-</div>
-
-<!-- Context menu (floating) -->
-<div id="ctxMenu" class="ctx-menu hidden">
-  <div class="ctx-item" data-action="rename">&#9998; Rename</div>
-  <div class="ctx-item" data-action="project">&#128193; Add to Project</div>
-  <div class="ctx-sep"></div>
-  <div class="ctx-item ctx-danger" data-action="delete">&#128465; Delete</div>
-</div>
-
-<script src="/app.js"></script>
-</body>
-</html>
-"""
-
-_CSS = """
-/* ===== Cagentic ===================================== */
-:root {
-  --bg:       #161118;
-  --accent:   #f0a87a;
-  --accent-dim:rgba(240,168,122,.1);
-  --accent-glow:rgba(240,168,122,.35);
-  --text:     #ece7f0;
-  --text-2:   #b0a6ba;
-  --text-dim: #7d7388;
-  --ok:       #8ecf95;
-  --warn:     #e6c073;
-  --hot:      #e5928f;
-  --border:   rgba(236,231,240,.08);
-  --border-h: rgba(236,231,240,.14);
-  --panel-bg: rgba(34,27,42,.88);
-  --grid:     rgba(240,168,122,.03);
-  --mono: "Courier New", Consolas, monospace;
-  --ease: cubic-bezier(.22,.61,.36,1);
-  --ease-out: cubic-bezier(.16,1,.3,1);
-}
-@media (prefers-reduced-motion: reduce) {
-  *, *::before, *::after { animation-duration: .001ms !important; animation-iteration-count: 1 !important; transition-duration: .001ms !important; }
-}
-* { box-sizing: border-box; margin: 0; padding: 0; }
-html, body { height: 100%; overflow: hidden; }
-body {
-  background: var(--bg); color: var(--text);
-  font-family: var(--mono); font-size: 12px;
-  background-image:
-    linear-gradient(var(--grid) 1px, transparent 1px),
-    linear-gradient(90deg, var(--grid) 1px, transparent 1px);
-  background-size: 44px 44px;
-}
-::selection { background: rgba(240,168,122,.22); }
-.hidden { display: none !important; }
-
-.scanlines {
-  position: fixed; inset: 0; pointer-events: none; z-index: 9999;
-  background: repeating-linear-gradient(
-    0deg, transparent, transparent 2px, rgba(0,0,0,.045) 2px, rgba(0,0,0,.045) 4px);
-}
-.vignette {
-  position: fixed; inset: 0; pointer-events: none; z-index: 9998;
-  background: radial-gradient(ellipse at center, transparent 50%, rgba(22,17,24,.8) 100%);
-}
-#app { display: flex; flex-direction: column; height: 100vh; height: 100dvh; }
-
-/* ---- HEADER ---------------------------------------------------------------- */
-.hud-header {
-  display: flex; align-items: center; justify-content: space-between;
-  padding: 8px 20px 7px; border-bottom: 1px solid var(--border);
-  background: rgba(22,17,24,.75); flex-shrink: 0; gap: 16px;
-}
-.hdr-left { display: flex; align-items: baseline; gap: 0; flex-shrink: 0; }
-.jl { font-size: 20px; color: #fff; text-shadow: 0 0 16px var(--accent); letter-spacing: .18em; }
-.jd { font-size: 20px; color: var(--accent); letter-spacing: .18em; }
-.j-sub {
-  font-size: 8px; color: var(--text-2); letter-spacing: .14em;
-  margin-left: 18px; align-self: flex-end; padding-bottom: 3px; text-transform: uppercase;
-}
-.badge {
-  font-size: 9px; padding: 3px 9px; border: 1px solid;
-  letter-spacing: .1em; text-transform: uppercase; white-space: nowrap;
-}
-.b-on  { color: var(--ok);  border-color: rgba(142,207,149,.35); background: rgba(142,207,149,.05); }
-
-/* model switcher */
-.model-switch {
-  position: relative; display: flex; align-items: center; gap: 6px;
-  font-size: 9px; padding: 3px 10px; cursor: pointer;
-  border: 1px solid rgba(255,170,0,.4); background: rgba(255,170,0,.05);
-  color: var(--warn); letter-spacing: .1em; text-transform: uppercase;
-  transition: background .15s;
-}
-.model-switch:hover { background: rgba(255,170,0,.14); }
-.ms-dot { font-size: 8px; }
-.ms-caret { font-size: 8px; opacity: .7; }
-.model-menu {
-  position: absolute; top: 100%; left: 0; margin-top: 4px; z-index: 400;
-  min-width: 200px; max-height: 320px; overflow-y: auto;
-  background: #1e1728; border: 1px solid var(--border-h);
-  box-shadow: 0 0 30px rgba(240,168,122,.18);
-}
-.mm-item {
-  padding: 8px 11px; font-size: 10px; color: var(--text-2);
-  cursor: pointer; letter-spacing: .05em; border-bottom: 1px solid rgba(240,168,122,.06);
-  white-space: nowrap; display: flex; align-items: center; gap: 7px;
-}
-.mm-item:hover  { background: rgba(240,168,122,.08); color: var(--text); }
-.mm-item.active { color: var(--accent); }
-.mm-item .mm-tick { color: var(--accent); width: 8px; }
-
-.hdr-right { display: flex; align-items: center; gap: 10px; flex-shrink: 0; }
-.j-clock { font-size: 22px; color: #fff; letter-spacing: .12em; text-shadow: 0 0 18px var(--accent-glow); }
-.j-date { font-size: 9px; color: var(--text-2); letter-spacing: .1em; margin-top: 2px; }
-
-/* ---- NAV BAR --------------------------------------------------------------- */
-.nav-bar {
-  display: flex; align-items: center; gap: 10px; padding: 5px 20px;
-  border-bottom: 1px solid var(--border); background: rgba(22,17,24,.6); flex-shrink: 0;
-}
-.nav-btn {
-  background: var(--accent-dim); border: 1px solid var(--border);
-  color: var(--accent); font: 9px var(--mono); cursor: pointer;
-  padding: 4px 11px; letter-spacing: .12em; text-transform: uppercase;
-  transition: background .15s var(--ease), border-color .15s var(--ease), transform .1s var(--ease); white-space: nowrap;
-}
-.nav-btn:hover { background: rgba(240,168,122,.22); border-color: var(--border-h); }
-.nav-btn:active { transform: scale(.95); }
-.nav-btn.active { background: rgba(240,168,122,.28); border-color: var(--accent); color: #fff; }
-.nav-divider { width: 1px; height: 16px; background: var(--border); }
-.nav-spacer { flex: 1; }
-.nav-meta { font-size: 9px; color: var(--text-dim); letter-spacing: .08em; white-space: nowrap; }
-
-/* ---- MAIN AREA ------------------------------------------------------------- */
-.main-area { flex: 1; display: flex; min-height: 0; overflow: hidden; }
-.center-stack { flex: 1; display: flex; flex-direction: column; min-height: 0; min-width: 0; }
-
-/* ---- ORB ZONE -------------------------------------------------------------- */
-.orb-zone {
-  position: relative; flex-shrink: 0; height: 300px;
-  display: flex; align-items: center; justify-content: center;
-  background: radial-gradient(ellipse 70% 80% at 50% 55%,
-    rgba(120,60,40,.35) 0%, rgba(40,20,30,.15) 60%, transparent 100%);
-  border-bottom: 1px solid var(--border); overflow: hidden;
-  transition: height .3s ease;
-}
-.orb-zone.compact { height: 150px; }
-#orbCanvas { position: absolute; inset: 0; width: 100%; height: 100%; }
-.orb-rings { position: absolute; top: 50%; left: 50%; pointer-events: none; }
-.ring { position: absolute; border-radius: 50%; border: 1px solid; }
-.r1 { width: 320px; height: 320px; margin: -160px 0 0 -160px; border-color: rgba(240,168,122,.1);  animation: spin1 28s linear infinite; }
-.r2 { width: 250px; height: 250px; margin: -125px 0 0 -125px; border-color: rgba(240,168,122,.18); border-style: dashed; animation: spin2 18s linear infinite; }
-.r3 { width: 185px; height: 185px; margin: -92px  0 0 -92px;  border-color: rgba(240,168,122,.28); animation: spin1 13s linear infinite; }
-.r4 { width: 120px; height: 120px; margin: -60px  0 0 -60px;  border-color: rgba(240,168,122,.42); animation: spin2 8s  linear infinite; }
-@keyframes spin1 { to { transform: rotate(360deg);  } }
-@keyframes spin2 { to { transform: rotate(-360deg); } }
-.orb-label {
-  position: absolute; bottom: 12px; left: 50%; transform: translateX(-50%);
-  font-size: 9px; color: var(--text-dim); letter-spacing: .18em;
-  text-transform: uppercase; white-space: nowrap; pointer-events: none;
-}
-.orb-zone.listening .orb-label { color: var(--ok); }
-.orb-zone.speaking  .orb-label { color: var(--accent); }
-
-/* ---- CHAT LOG -------------------------------------------------------------- */
-.chat-log { flex: 1; overflow-y: auto; padding: 16px 0; min-height: 0; }
-.j-thread { max-width: 820px; margin: 0 auto; padding: 0 24px; }
-.j-empty { max-width: 820px; margin: 0 auto; padding: 24px 24px 0; }
-.j-empty-title {
-  font-size: 11px; color: var(--text-2); letter-spacing: .2em;
-  text-transform: uppercase; margin-bottom: 20px; text-align: center;
-}
-.quick-cards { display: grid; grid-template-columns: repeat(3, 1fr); gap: 10px; }
-.qcard {
-  position: relative; overflow: hidden;
-  padding: 14px 16px; border: 1px solid var(--border);
-  background: rgba(240,168,122,.03); cursor: pointer;
-  transition: background .2s var(--ease), border-color .2s var(--ease), transform .2s var(--ease), box-shadow .2s var(--ease);
-  text-align: left;
-  opacity: 0; animation: cardIn .4s var(--ease-out) forwards; animation-delay: calc(var(--i, 0) * 45ms);
-}
-.qcard::after {
-  content: ''; position: absolute; left: 0; top: 0; height: 100%; width: 2px;
-  background: var(--accent); opacity: 0; transform: scaleY(.3);
-  transition: opacity .2s var(--ease), transform .25s var(--ease);
-}
-.qcard:hover { background: rgba(240,168,122,.08); border-color: var(--border-h); transform: translateY(-3px); box-shadow: 0 6px 22px rgba(0,0,0,.35); }
-.qcard:hover::after { opacity: 1; transform: scaleY(1); }
-.qcard:active { transform: translateY(-1px) scale(.99); }
-@keyframes cardIn { from { opacity: 0; transform: translateY(10px); } to { opacity: 1; transform: translateY(0); } }
-.qcard-icon { font-size: 18px; margin-bottom: 7px; display: block; transition: transform .2s var(--ease); }
-.qcard:hover .qcard-icon { transform: scale(1.12); }
-.qcard-title { font-size: 11px; color: #d8c8e0; letter-spacing: .05em; display: block; margin-bottom: 3px; }
-.qcard-sub   { font-size: 9px;  color: var(--text-2); letter-spacing: .04em; line-height: 1.5; display: block; }
-
-/* messages */
-.msg-row { margin: 10px 0; animation: messageIn .32s var(--ease-out) both; animation-delay: calc(var(--i, 0) * 60ms); }
-.msg-row.user { --slide-x: 30px; }
-.msg-row.assistant { --slide-x: -30px; }
-@keyframes messageIn { from { opacity: 0; transform: translate(var(--slide-x, 0), 12px); } to { opacity: 1; transform: translate(0, 0); } }
-.msg-row.user .bubble { transition: background .2s var(--ease), border-color .2s var(--ease); }
-.msg-row.user { display: flex; flex-direction: column; align-items: flex-end; }
-.msg-row.user .bubble {
-  background: rgba(142,100,120,.28); border: 1px solid rgba(240,168,122,.3);
-  padding: 9px 14px; max-width: 78%; font-size: 12px; color: #d8c8e0;
-  line-height: 1.55; letter-spacing: .02em;
-}
-.msg-row.user .bubble::before { content: "> "; color: var(--accent); }
-.msg-actions { display: flex; gap: 6px; padding: 2px 0 0; }
-.msg-act-btn {
-  background: transparent; border: 0; color: var(--text-dim);
-  padding: 0; font: 9px/1.4 var(--mono); letter-spacing: .06em; cursor: pointer;
-  transition: color .15s;
-}
-.msg-act-btn:hover { color: var(--accent); }
-.msg-act-btn.del-btn:hover { color: var(--hot); }
-.msg-row.user.editing .bubble { background: rgba(142,100,120,.18); }
-.edit-area {
-  width: 100%; min-height: 40px; background: rgba(22,17,24,.6); border: 1px solid var(--accent);
-  color: var(--text); font: 12px/1.55 var(--mono); padding: 6px 8px; resize: vertical;
-  outline: none; box-sizing: border-box;
-}
-.edit-save { color: #8ecf95 !important; border-color: #8ecf95 !important; }
-.edit-save:hover { background: rgba(142,207,149,.12) !important; }
-.edit-cancel { color: #e5928f !important; border-color: #e5928f !important; }
-.edit-cancel:hover { background: rgba(229,146,143,.12) !important; }
-.msg-row.assistant { display: flex; gap: 12px; align-items: flex-start; }
-.j-avatar {
-  width: 26px; height: 26px; flex-shrink: 0; margin-top: 1px;
-  border: 1px solid var(--accent); display: flex; align-items: center;
-  justify-content: center; color: var(--accent); font-size: 11px;
-  box-shadow: 0 0 10px var(--accent-glow); background: rgba(240,168,122,.05);
-  font-weight: bold; animation: avatarGlow 4s ease-in-out infinite;
-}
-@keyframes avatarGlow { 0%,100% { box-shadow: 0 0 8px var(--accent-glow); } 50% { box-shadow: 0 0 16px var(--accent-glow); } }
-.msg-body { flex: 1; min-width: 0; font-size: 12px; color: var(--text); line-height: 1.65; }
-.msg-body p { margin: 0 0 9px; }
-.msg-body p:last-child { margin: 0; }
-.msg-body h3 { font-size: 13px; color: #fff; margin: 12px 0 5px; }
-.msg-body code { color: var(--accent); background: rgba(240,168,122,.07); padding: 1px 5px; font-size: 11px; }
-.msg-body strong { color: #fff; }
-.msg-body a { color: var(--accent); text-decoration: none; }
-.msg-body a:hover { text-decoration: underline; }
-.msg-body ul { padding-left: 18px; margin: 6px 0; }
-.msg-body li::marker { color: var(--accent); }
-.cursor::after { content: '\2588'; color: var(--accent); animation: blink .9s steps(2) infinite; }
-/* code blocks */
-.codeblock { margin: 9px 0; border: 1px solid var(--border); background: rgba(22,17,24,.95); border-left: 2px solid var(--accent); }
-.cb-head { display: flex; justify-content: space-between; padding: 5px 10px; background: rgba(240,168,122,.05); border-bottom: 1px solid var(--border); }
-.cb-lang { font-size: 9px; color: var(--accent); letter-spacing: .1em; text-transform: uppercase; }
-.cb-copy { background: transparent; border: 0; color: var(--text-2); cursor: pointer; font: 9px var(--mono); letter-spacing: .1em; transition: color .15s; }
-.cb-copy:hover { color: var(--accent); }
-.codeblock pre { margin: 0; padding: 10px 12px; overflow-x: auto; }
-.codeblock code { font: 11.5px/1.6 var(--mono); color: #c9b8d4; background: none; }
-
-/* tool rows */
-.tool-row {
-  display: flex; align-items: center; gap: 8px; padding: 7px 12px;
-  margin: 6px 0; font-size: 11px; border: 1px solid var(--border);
-  background: rgba(34,27,42,.85); letter-spacing: .04em;
-  border-left: 2px solid var(--text-dim);
-  transition: border-color .25s var(--ease), background .25s var(--ease);
-  animation: messageIn .3s var(--ease-out) both;
-  animation-delay: calc(var(--i, 0) * 60ms);
-}
-.tool-row .tool-icon { transition: transform .2s var(--ease); }
-.tool-row.ok .tool-icon, .tool-row.bad .tool-icon { transform: scale(1.05); }
-.tool-row .tname { color: #d8c8e0; font-weight: 600; }
-.tool-row .tsum  { color: var(--text-2); flex: 1; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; font-family: var(--mono); font-size: 10px; }
-.tool-row .tres  { margin-left: auto; }
-.tool-row.ok  .tres { color: var(--ok); }
-.tool-row.ok  { border-left-color: var(--ok); }
-.tool-row.bad .tres { color: var(--hot); }
-.tool-row.bad { border-left-color: var(--hot); }
-.tool-row.pending .tres { color: var(--warn); animation: pulse 1s ease infinite; }
-.tool-row.pending { border-color: rgba(255,170,0,.3); border-left-color: var(--warn); background: rgba(255,170,0,.04); }
-@keyframes pulse { 50% { opacity: .3; } }
-
-/* thinking */
-.thinking-row { display: flex; align-items: center; gap: 10px; padding: 5px 0; font-size: 10px; color: var(--text-dim); letter-spacing: .14em; }
-.thinking-dots { display: flex; gap: 5px; }
-.thinking-dots span { width: 6px; height: 6px; background: var(--accent); border-radius: 50%; animation: bob 1s ease-in-out infinite; }
-.thinking-dots span:nth-child(2) { animation-delay: .18s; }
-.thinking-dots span:nth-child(3) { animation-delay: .36s; }
-.thinking-timer { color: var(--text-dim); font-variant-numeric: tabular-nums; }
-@keyframes bob { 0%,100%{opacity:.15;transform:translateY(0)} 50%{opacity:1;transform:translateY(-4px)} }
-/* done stats */
-.done-stats { padding: 2px 0 4px 38px; font-size: 9px; color: var(--text-dim); letter-spacing: .06em; opacity: .7; }
-.done-stats .ds-sep { margin: 0 4px; }
-.token-stats { font-size: 9px; color: var(--text-dim); letter-spacing: .06em; }
-
-/* plan / note / error / permission */
-.plan-box { margin: 9px 0; padding: 11px 14px; border: 1px solid rgba(255,170,0,.3); background: rgba(255,170,0,.03); }
-.plan-box .ph { color: var(--warn); font-size: 10px; letter-spacing: .1em; margin-bottom: 7px; }
-.plan-box ol { padding-left: 16px; color: var(--text-2); font-size: 11px; }
-.plan-box li { margin: 3px 0; }
-.note-row { font-size: 10px; color: var(--text-dim); padding: 3px 0; }
-.note-row.err { color: var(--hot); }
-.perm-box { margin: 9px 0; padding: 11px 14px; border: 1px solid rgba(255,170,0,.4); border-left: 2px solid var(--warn); background: rgba(255,170,0,.03); }
-.perm-box .pq { font-size: 11px; color: var(--text); margin-bottom: 9px; }
-.perm-box code { color: var(--warn); background: rgba(255,170,0,.08); padding: 1px 5px; }
-.perm-btns { display: flex; gap: 8px; }
-.perm-btns button { border: 1px solid; padding: 6px 12px; cursor: pointer; font: 9px var(--mono); letter-spacing: .1em; text-transform: uppercase; }
-.perm-btns .yes    { background: rgba(142,207,149,.07);  color: var(--ok);  border-color: rgba(142,207,149,.4); }
-.perm-btns .yes:hover { background: rgba(142,207,149,.18); }
-.perm-btns .always { background: rgba(255,170,0,.07);  color: var(--warn); border-color: rgba(255,170,0,.4); }
-.perm-btns .no     { background: transparent; color: var(--text-2); border-color: var(--border); }
-.perm-decided      { font-size: 10px; color: var(--text-dim); }
-
-/* ---- FLOATING HUD WINDOWS -------------------------------------------------- */
-#windowLayer {
-  position: fixed; inset: 0; z-index: 170; pointer-events: none;
-}
-.restore-pill {
-  position: fixed; bottom: 20px; right: 20px; z-index: 200;
-  background: rgba(22,17,24,.92); border: 1px solid var(--border-h);
-  box-shadow: 0 4px 20px rgba(0,0,0,.5), 0 0 12px rgba(240,168,122,.08);
-  backdrop-filter: blur(6px);
-  padding: 8px 14px; border-radius: 20px;
-  color: var(--accent); font-size: 11px; letter-spacing: .06em;
-  cursor: pointer; user-select: none;
-  transition: transform .2s var(--ease), box-shadow .2s var(--ease);
-  pointer-events: auto;
-}
-.restore-pill:hover { transform: translateY(-2px); box-shadow: 0 6px 24px rgba(0,0,0,.6), 0 0 16px rgba(240,168,122,.12); }
-.restore-pill-icon { margin-right: 4px; }
-.restore-pill-count { font-weight: 700; }
-.restore-dropdown {
-  display: none; position: absolute; bottom: calc(100% + 8px); right: 0;
-  background: rgba(22,17,24,.96); border: 1px solid var(--border-h);
-  box-shadow: 0 8px 30px rgba(0,0,0,.6);
-  backdrop-filter: blur(8px);
-  border-radius: 10px; min-width: 180px; max-width: 260px;
-  padding: 6px 0; overflow: hidden;
-}
-.restore-pill.open .restore-dropdown { display: block; }
-.restore-item {
-  padding: 8px 14px; font-size: 11px; color: #d8c8e0; cursor: pointer;
-  transition: background .15s;
-  white-space: nowrap; overflow: hidden; text-overflow: ellipsis;
-}
-.restore-item:hover { background: rgba(240,168,122,.1); color: var(--accent); }
-.hud-window {
-  position: absolute; pointer-events: auto;
-  min-width: 220px; min-height: 100px;
-  background: rgba(22,17,24,.92); border: 1px solid var(--border-h);
-  box-shadow: 0 4px 30px rgba(0,0,0,.55), 0 0 20px rgba(240,168,122,.06);
-  display: flex; flex-direction: column;
-  animation: hudWinIn .4s var(--ease-out) both;
-  animation-delay: calc(var(--i, 0) * 80ms);
-  backdrop-filter: blur(6px);
-  transition: box-shadow .25s var(--ease);
-}
-.hud-win-resize {
-  position: absolute; bottom: 0; right: 0;
-  width: 16px; height: 16px;
-  cursor: nwse-resize;
-  z-index: 2;
-}
-.hud-win-resize::before {
-  content: '';
-  position: absolute; bottom: 4px; right: 4px;
-  width: 8px; height: 8px;
-  border-right: 2px solid var(--text-dim);
-  border-bottom: 2px solid var(--text-dim);
-  opacity: 0.4;
-}
-.hud-window.resizing { opacity: .9; box-shadow: 0 8px 40px rgba(0,0,0,.7), 0 0 30px rgba(240,168,122,.12); }
-@keyframes hudWinIn { from { opacity: 0; transform: scale(.88) translateY(18px); } to { opacity: 1; transform: scale(1) translateY(0); } }
-.hud-win-head {
-  display: flex; align-items: center; justify-content: space-between;
-  padding: 7px 12px; border-bottom: 1px solid var(--border);
-  cursor: grab; user-select: none; flex-shrink: 0;
-}
-.hud-win-head:active { cursor: grabbing; }
-.hud-win-title { font-size: 9px; color: var(--accent); letter-spacing: .14em; text-transform: uppercase; text-shadow: 0 0 8px var(--accent-glow); }
-.hud-win-close { background: transparent; border: 0; color: var(--text-dim); cursor: pointer; font: 14px var(--mono); padding: 0 4px; line-height: 1; }
-.hud-win-close:hover { color: var(--accent); }
-.hud-window::before { content: ''; position: absolute; top: -1px; left: 12px; right: 12px; height: 1px; background: linear-gradient(90deg, transparent, var(--accent), transparent); }
-.hud-win-body { overflow-y: auto; padding: 12px; display: flex; flex-direction: column; gap: 8px; flex: 1; }
-.hud-window.dragging { opacity: .85; box-shadow: 0 8px 40px rgba(0,0,0,.7), 0 0 30px rgba(240,168,122,.12); }
-
-/* viewport panels (rendered by model directives) */
-.vpanel {
-  position: relative;
-}
-
-.vpanel-title { font-size: 9px; color: var(--accent); letter-spacing: .14em; text-transform: uppercase; margin-bottom: 9px; text-shadow: 0 0 8px var(--accent-glow); }
-.vp-stat-row { display: flex; justify-content: space-between; align-items: center; padding: 4px 0; border-bottom: 1px solid rgba(240,168,122,.06); font-size: 10px; }
-.vp-stat-row .l { color: var(--text-2); letter-spacing: .05em; }
-.vp-stat-row .v { color: #fff; }
-.vp-stat-row .v.ok { color: var(--ok); } .vp-stat-row .v.warn { color: var(--warn); } .vp-stat-row .v.hot { color: var(--hot); }
-.vp-metric { text-align: center; padding: 6px 0; }
-.vp-metric .big { font-size: 38px; color: #fff; text-shadow: 0 0 22px var(--accent-glow); line-height: 1; }
-.vp-metric .big .unit { font-size: 16px; color: var(--accent); margin-left: 3px; }
-.vp-metric .sub { font-size: 9px; color: var(--text-2); margin-top: 6px; letter-spacing: .08em; }
-.vp-metric .trend { font-size: 11px; margin-top: 4px; }
-.vp-metric .trend.up { color: var(--ok); } .vp-metric .trend.down { color: var(--hot); } .vp-metric .trend.flat { color: var(--text-2); }
-.vp-list { list-style: none; }
-.vp-list li { font-size: 10px; color: var(--text); padding: 4px 0 4px 14px; position: relative; border-bottom: 1px solid rgba(240,168,122,.05); line-height: 1.5; }
-.vp-list li::before { content: '\25B8'; color: var(--accent); position: absolute; left: 0; }
-.vp-table { width: 100%; border-collapse: collapse; font-size: 9.5px; }
-.vp-table th { color: var(--accent); text-align: left; padding: 4px 6px; border-bottom: 1px solid var(--border); letter-spacing: .05em; text-transform: uppercase; }
-.vp-table td { color: var(--text); padding: 4px 6px; border-bottom: 1px solid rgba(240,168,122,.05); }
-.vp-image img { width: 100%; border: 1px solid var(--border); display: block; }
-.vp-image .cap { font-size: 9px; color: var(--text-2); margin-top: 6px; letter-spacing: .04em; }
-.vp-web-item { padding: 7px 0; border-bottom: 1px solid rgba(240,168,122,.06); }
-.vp-web-item a { color: var(--accent); font-size: 10px; text-decoration: none; display: block; letter-spacing: .03em; }
-.vp-web-item a:hover { text-decoration: underline; }
-.vp-web-item .url { font-size: 8.5px; color: var(--ok); margin: 2px 0; word-break: break-all; }
-.vp-web-item .snip { font-size: 9px; color: var(--text-2); line-height: 1.5; }
-.vp-alert { padding: 10px 12px; border-left: 2px solid; }
-.vp-alert.info { border-color: var(--accent); background: rgba(240,168,122,.05); }
-.vp-alert.warn { border-color: var(--warn); background: rgba(255,170,0,.05); }
-.vp-alert.critical { border-color: var(--hot); background: rgba(255,68,34,.07); }
-.vp-alert .at { font-size: 10px; color: #fff; margin-bottom: 4px; letter-spacing: .06em; }
-.vp-alert .ax { font-size: 9.5px; color: var(--text-2); line-height: 1.5; }
-.vp-prog-row { margin: 7px 0; }
-.vp-prog-row .pl { display: flex; justify-content: space-between; font-size: 9px; color: var(--text-2); margin-bottom: 3px; }
-.vp-prog-bar { height: 6px; background: rgba(240,168,122,.07); border: 1px solid rgba(240,168,122,.15); }
-.vp-prog-fill { height: 100%; background: var(--accent); box-shadow: 0 0 6px var(--accent-glow); transition: width .6s ease; }
-.vp-map { position: relative; height: 150px; border: 1px solid var(--border); overflow: hidden; background:
-  radial-gradient(circle at 50% 50%, rgba(240,168,122,.08), transparent 70%); }
-.vp-map .crosshair { position: absolute; top: 50%; left: 50%; width: 16px; height: 16px; margin: -8px 0 0 -8px; }
-.vp-map .crosshair::before, .vp-map .crosshair::after { content: ''; position: absolute; background: var(--ok); box-shadow: 0 0 8px var(--ok); }
-.vp-map .crosshair::before { left: 7px; top: 0; width: 2px; height: 16px; }
-.vp-map .crosshair::after { top: 7px; left: 0; height: 2px; width: 16px; }
-.vp-map .mgrid { position: absolute; inset: 0; background-image:
-  linear-gradient(rgba(240,168,122,.08) 1px, transparent 1px),
-  linear-gradient(90deg, rgba(240,168,122,.08) 1px, transparent 1px); background-size: 22px 22px; }
-.vp-map .mlabel { position: absolute; bottom: 6px; left: 8px; font-size: 8.5px; color: var(--ok); letter-spacing: .06em; }
-
-/* ---- INTERACTIVE PANELS (inline, clickable) ------------------------------- */
-.ix-panel {
-  margin: 10px 0 12px; padding: 13px 15px;
-  border: 1px solid var(--border-h); border-left: 2px solid var(--accent);
-  background: linear-gradient(180deg, rgba(240,168,122,.05), rgba(34,27,42,.55));
-  position: relative; animation: messageIn .32s var(--ease-out) both;
-}
-.ix-panel::before {
-  content: ''; position: absolute; top: -1px; left: 0; width: 40px; height: 1px;
-  background: linear-gradient(90deg, var(--accent), transparent);
-}
-.ix-title {
-  font-size: 9px; color: var(--accent); letter-spacing: .14em; text-transform: uppercase;
-  margin-bottom: 11px; text-shadow: 0 0 8px var(--accent-glow);
-}
-.ix-panel.ix-used { opacity: .62; border-left-color: var(--text-dim); }
-.ix-panel.ix-used::before { background: linear-gradient(90deg, var(--ok), transparent); }
-
-/* action buttons */
-.ix-actions-row { display: flex; flex-wrap: wrap; gap: 9px; }
-.ix-btn {
-  flex: 0 1 auto; padding: 9px 16px; cursor: pointer;
-  border: 1px solid var(--accent); background: rgba(240,168,122,.1);
-  color: var(--accent); font: 10px var(--mono); letter-spacing: .08em;
-  text-transform: uppercase; position: relative; overflow: hidden;
-  transition: background .18s var(--ease), box-shadow .2s var(--ease), transform .1s var(--ease), color .18s var(--ease);
-}
-.ix-btn:hover { background: rgba(240,168,122,.24); box-shadow: 0 4px 18px rgba(240,168,122,.22); transform: translateY(-1px); }
-.ix-btn:active { transform: translateY(0) scale(.97); }
-.ix-btn.ix-active { background: var(--accent); color: #161118; border-color: var(--accent); }
-.ix-btn:disabled { cursor: default; opacity: .5; box-shadow: none; transform: none; }
-.ix-btn:disabled:hover { background: rgba(240,168,122,.1); box-shadow: none; transform: none; }
-
-/* choices list */
-.ix-choices-list { display: flex; flex-direction: column; gap: 6px; }
-.ix-choice {
-  display: flex; align-items: center; gap: 9px; text-align: left; width: 100%;
-  padding: 9px 13px; cursor: pointer; color: var(--text);
-  border: 1px solid var(--border); background: rgba(240,168,122,.03);
-  font: 11px var(--mono); letter-spacing: .03em;
-  transition: background .18s var(--ease), border-color .18s var(--ease), padding-left .18s var(--ease), color .18s var(--ease);
-}
-.ix-choice .ix-choice-mark { color: var(--accent); transition: transform .18s var(--ease); }
-.ix-choice:hover { background: rgba(240,168,122,.1); border-color: var(--border-h); padding-left: 18px; color: #fff; }
-.ix-choice:hover .ix-choice-mark { transform: translateX(2px); }
-.ix-choice:active { background: rgba(240,168,122,.18); }
-.ix-choice.ix-active { border-color: var(--accent); background: rgba(240,168,122,.16); color: var(--accent); }
-.ix-choice:disabled { cursor: default; opacity: .55; }
-.ix-choice:disabled:hover { background: rgba(240,168,122,.03); padding-left: 13px; color: var(--text); }
-
-/* form */
-.ix-form-fields { display: flex; flex-direction: column; gap: 10px; margin-bottom: 11px; }
-.ix-field { display: flex; flex-direction: column; gap: 4px; }
-.ix-flabel { font-size: 9px; color: var(--text-2); letter-spacing: .1em; text-transform: uppercase; }
-.ix-input {
-  width: 100%; background: rgba(22,17,24,.7); border: 1px solid var(--border-h);
-  color: var(--text); padding: 8px 10px; font: 12px var(--mono); letter-spacing: .03em;
-  transition: border-color .18s var(--ease), box-shadow .18s var(--ease);
-}
-.ix-input:focus { outline: 0; border-color: var(--accent); box-shadow: 0 0 14px rgba(240,168,122,.15); }
-.ix-input:disabled { opacity: .55; }
-.ix-submit {
-  padding: 9px 20px; cursor: pointer; border: 1px solid var(--accent);
-  background: rgba(240,168,122,.12); color: var(--accent); font: 10px var(--mono);
-  letter-spacing: .14em; text-transform: uppercase;
-  transition: background .18s var(--ease), box-shadow .2s var(--ease), transform .1s var(--ease);
-}
-.ix-submit:hover { background: rgba(240,168,122,.26); box-shadow: 0 4px 18px rgba(240,168,122,.22); }
-.ix-submit:active { transform: scale(.97); }
-.ix-submit:disabled { cursor: default; opacity: .5; box-shadow: none; transform: none; }
-
-/* checklist */
-.ix-checklist-list { display: flex; flex-direction: column; gap: 3px; }
-.ix-check { display: flex; align-items: center; gap: 10px; padding: 6px 4px; cursor: pointer; user-select: none; font: 11px var(--mono); color: var(--text-2); transition: color .18s var(--ease); }
-.ix-check:hover { color: var(--text); }
-.ix-check input { position: absolute; opacity: 0; width: 0; height: 0; }
-.ix-box { width: 15px; height: 15px; flex-shrink: 0; border: 1px solid var(--border-h); background: rgba(240,168,122,.04); position: relative; transition: background .18s var(--ease), border-color .18s var(--ease); }
-.ix-box::after { content: '\2713'; position: absolute; inset: 0; display: flex; align-items: center; justify-content: center; font-size: 11px; color: #161118; opacity: 0; transform: scale(.4); transition: opacity .18s var(--ease), transform .18s var(--ease); }
-.ix-check.checked .ix-box { background: var(--accent); border-color: var(--accent); box-shadow: 0 0 10px var(--accent-glow); }
-.ix-check.checked .ix-box::after { opacity: 1; transform: scale(1); }
-.ix-check.checked .ix-clabel { color: var(--text-dim); text-decoration: line-through; text-decoration-color: var(--text-dim); }
-.ix-clabel { transition: color .18s var(--ease); }
-
-/* ---- CMD AREA -------------------------------------------------------------- */
-.cmd-area { flex-shrink: 0; padding: 10px 20px 12px; border-top: 1px solid var(--border); background: rgba(22,17,24,.7); }
-.cmd-box {
-  display: flex; align-items: center; gap: 10px;
-  border: 1px solid var(--border-h); padding: 9px 12px; background: rgba(34,27,42,.8);
-  box-shadow: 0 0 30px rgba(240,168,122,.07), inset 0 0 25px rgba(0,0,0,.5);
-  max-width: 1000px; margin: 0 auto;
-}
-.cmd-box:focus-within { border-color: var(--accent); box-shadow: 0 0 40px rgba(240,168,122,.18), inset 0 0 25px rgba(0,0,0,.5); }
-.cmd-box.listening { border-color: var(--ok); box-shadow: 0 0 40px rgba(142,207,149,.25), inset 0 0 25px rgba(0,0,0,.5); }
-.cmd-prompt { color: var(--accent); font-size: 15px; flex-shrink: 0; padding-bottom: 1px; }
-.cmd-box textarea { flex: 1; background: transparent; border: 0; outline: 0; color: #ece7f0; font: 13px/1.55 var(--mono); resize: none; max-height: 130px; letter-spacing: .03em; }
-.cmd-box textarea::placeholder { color: var(--text-dim); }
-.mic-btn {
-  flex-shrink: 0; width: 28px; height: 24px; border: 1px solid var(--border);
-  background: var(--accent-dim); color: var(--accent); font-size: 13px; cursor: pointer;
-  transition: background .15s, border-color .15s; line-height: 24px; padding: 0;
-}
-.mic-btn:hover { background: rgba(240,168,122,.22); }
-.mic-btn.listening { border-color: var(--ok); color: var(--ok); background: rgba(142,207,149,.12); animation: micPulse 1.1s ease infinite; }
-@keyframes micPulse { 50% { box-shadow: 0 0 14px rgba(142,207,149,.5); } }
-.exec-btn {
-  flex-shrink: 0; padding: 7px 18px; border: 1px solid var(--accent);
-  background: rgba(240,168,122,.1); color: var(--accent); font: 10px var(--mono);
-  cursor: pointer; letter-spacing: .16em; text-transform: uppercase;
-  transition: background .15s var(--ease), box-shadow .2s var(--ease), transform .1s var(--ease);
-}
-.exec-btn:hover    { background: rgba(240,168,122,.24); box-shadow: 0 0 18px rgba(240,168,122,.25); }
-.exec-btn:active   { transform: scale(.96); }
-.exec-btn:disabled { opacity: .28; cursor: default; box-shadow: none; transform: none; }
-.stop-btn { background: rgba(220,60,60,.18); color: #e06060; border-color: rgba(220,60,60,.4); }
-.stop-btn:hover { background: rgba(220,60,60,.32); box-shadow: 0 0 18px rgba(220,60,60,.25); }
-.cmd-footer { display: flex; justify-content: space-between; align-items: center; max-width: 1000px; margin: 5px auto 0; font-size: 9px; color: var(--text-dim); letter-spacing: .08em; }
-.busy-label { color: var(--ok); animation: pulse 1.2s ease infinite; }
-
-/* ---- SESSIONS DRAWER ------------------------------------------------------- */
-.sessions-panel {
-  position: fixed; top: 0; left: 0; bottom: 0; width: 270px;
-  background: rgba(22,17,24,.97); border-right: 1px solid var(--border-h);
-  z-index: 200; padding: 14px; display: flex; flex-direction: column;
-  transform: translateX(-100%); transition: transform .22s ease;
-}
-.sessions-panel.open { transform: translateX(0); box-shadow: 0 0 50px rgba(240,168,122,.12); }
-.sessions-head { display: flex; align-items: center; justify-content: space-between; padding-bottom: 10px; border-bottom: 1px solid var(--border); margin-bottom: 10px; }
-.panel-hdr { font-size: 9px; color: var(--accent); letter-spacing: .16em; text-transform: uppercase; }
-.icon-btn { background: transparent; border: 0; color: var(--text-dim); cursor: pointer; font: 14px var(--mono); padding: 2px 5px; }
-.icon-btn:hover { color: var(--accent); }
-.session-list { flex: 1; overflow-y: auto; }
-.sess-group { border-bottom: 1px solid var(--border); }
-.sess-group-head { display: flex; align-items: center; padding: 7px 8px; cursor: pointer; color: var(--text-2); font-size: 10px; letter-spacing: .05em; gap: 6px; user-select: none; }
-.sess-group-head:hover { background: rgba(240,168,122,.05); color: var(--text); }
-.sess-group-head.active { color: var(--accent); }
-.sess-group-head .sg-caret { font-size: 8px; transition: transform .15s; width: 10px; text-align: center; }
-.sess-group-head.open .sg-caret { transform: rotate(90deg); }
-.sess-group-head .sg-dot { width: 8px; height: 8px; border-radius: 50%; flex-shrink: 0; }
-.sess-group-head .sg-name { flex: 1; min-width: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
-.sess-group-head .sg-count { color: var(--text-dim); font-size: 9px; }
-.sess-group-head .sg-menu { background: transparent; border: 0; color: var(--text-dim); cursor: pointer; font-size: 12px; padding: 0 3px; line-height: 1; }
-.sess-group-head .sg-menu:hover { color: var(--accent); }
-.sess-group-head .sg-add { background: transparent; border: 0; color: var(--text-dim); cursor: pointer; font-size: 13px; padding: 0 3px; line-height: 1; font-weight: bold; }
-.sess-group-head .sg-add:hover { color: var(--accent); }
-.sess-group-chats { display: none; }
-.sess-group-chats.open { display: block; }
-.chat-item-j { display: flex; align-items: center; padding: 6px 8px 6px 22px; cursor: pointer; color: var(--text-2); border-bottom: 1px solid rgba(240,168,122,.04); font-size: 10px; letter-spacing: .05em; gap: 6px; transition: background .15s, color .15s; }
-.chat-item-j:hover  { background: rgba(240,168,122,.05); color: var(--text); }
-.chat-item-j.active { background: rgba(240,168,122,.08); color: var(--accent); }
-.chat-item-j .ci-title { flex: 1; min-width: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
-.chat-item-j.no-indent { padding-left: 8px; }
-.ci-del-j { background: transparent; border: 0; color: var(--text-dim); cursor: pointer; font-size: 14px; padding: 0 3px; }
-.ci-del-j:hover { color: var(--hot); }
-.ci-menu-btn { background: transparent; border: 0; color: var(--text-dim); cursor: pointer; font-size: 14px; padding: 0 3px; line-height: 1; }
-.ci-menu-btn:hover { color: var(--accent); }
-
-/* ---- CONTEXT MENU ---- */
-.ctx-menu { position: fixed; z-index: 400; background: #1e1828; border: 1px solid var(--border-h); box-shadow: 0 4px 20px rgba(0,0,0,.5); min-width: 160px; }
-.ctx-menu.hidden { display: none; }
-.ctx-item { padding: 8px 14px; font-size: 12px; color: var(--text-2); cursor: pointer; }
-.ctx-item:hover { background: rgba(240,168,122,.08); color: var(--text); }
-.ctx-item.ctx-danger:hover { color: var(--hot); }
-.ctx-sep { border-top: 1px solid var(--border); margin: 4px 0; }
-
-/* ---- PROJECT PICKER MODAL ITEMS ---- */
-.proj-item-j { display: flex; align-items: center; padding: 6px 8px; cursor: pointer; color: var(--text-2); font-size: 10px; letter-spacing: .05em; gap: 6px; }
-.proj-item-j:hover { background: rgba(240,168,122,.05); color: var(--text); }
-.proj-dot { width: 8px; height: 8px; border-radius: 50%; flex-shrink: 0; }
-.proj-name { flex: 1; min-width: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
-
-/* ---- SESSION LIST (projects + chats) ---- */
-
-/* ---- SETTINGS MODAL -------------------------------------------------------- */
-.modal { position: fixed; inset: 0; background: rgba(22,17,24,.82); display: flex; align-items: center; justify-content: center; z-index: 300; }
-.modal-card { background: #161118; border: 1px solid var(--border-h); width: 440px; max-width: calc(100vw - 28px); box-shadow: 0 0 60px rgba(240,168,122,.15); animation: modalIn .2s ease; }
-@keyframes modalIn { from { opacity: 0; transform: scale(.96) translateY(8px); } }
-.modal-card.sm { width: 340px; }
-.modal-card.md { width: 380px; }
-.modal-card.lg { width: 480px; }
-.modal-input { width: 100%; background: rgba(34,27,42,.8); border: 1px solid var(--border-h); color: var(--text); padding: 8px 10px; font-size: 13px; font-family: var(--mono); }
-.modal-input:focus { outline: 0; border-color: var(--accent); }
-.modal-textarea { width: 100%; background: rgba(34,27,42,.9); border: 1px solid var(--border); color: var(--text); padding: 8px 11px; font: 11.5px var(--mono); letter-spacing: .04em; resize: vertical; box-sizing: border-box; }
-.modal-textarea:focus { outline: 0; border-color: var(--accent); }
-.modal-title { font-size: 13px; color: var(--text); }
-.modal-msg { color: var(--text-2); font-size: 13px; margin: 0; }
-.empty-hint { color: var(--text-dim); font-size: 9px; padding: 6px 22px; }
-.empty-hint.md { font-size: 12px; padding: 8px; }
-.tool-icon { font-size: 13px; }
-.ci-arrow { color: var(--accent); font-size: 10px; }
-.modal-head { display: flex; align-items: center; justify-content: space-between; padding: 13px 17px; border-bottom: 1px solid var(--border); }
-.modal-body { padding: 16px 17px; display: flex; flex-direction: column; gap: 15px; max-height: 70vh; overflow-y: auto; }
-.field { display: flex; flex-direction: column; gap: 6px; }
-.field.row { flex-direction: row; align-items: center; justify-content: space-between; }
-.field-label { font-size: 9px; color: var(--text-2); letter-spacing: .1em; text-transform: uppercase; }
-.field-label em { color: var(--text-dim); font-style: normal; }
-.settings-divider { border: none; border-top: 1px solid var(--border); margin: 4px 0; }
-.section-label { font-size: 9px; color: var(--accent); letter-spacing: .14em; text-transform: uppercase; font-weight: 600; }
-.field-hint { font-size: 10px; color: var(--text-dim); line-height: 1.4; }
-.field input[type=number] { background: rgba(34,27,42,.9); border: 1px solid var(--border); color: var(--text); padding: 8px 11px; font: 11.5px var(--mono); letter-spacing: .04em; width: 100%; }
-.field input[type=number]:focus { outline: 0; border-color: var(--accent); }
-#setSysPrompt { background: rgba(34,27,42,.9); border: 1px solid var(--border); color: var(--text); padding: 8px 11px; font: 11.5px var(--mono); letter-spacing: .04em; width: 100%; resize: vertical; min-height: 60px; }
-#setSysPrompt:focus { outline: 0; border-color: var(--accent); }
-.field select, .field input[type=text] { background: rgba(34,27,42,.9); border: 1px solid var(--border); color: var(--text); padding: 8px 11px; font: 11.5px var(--mono); letter-spacing: .04em; }
-.field select:focus, .field input[type=text]:focus { outline: 0; border-color: var(--accent); }
-.field input[type=range] { accent-color: var(--accent); width: 100%; }
-.toggle { position: relative; width: 38px; height: 20px; flex-shrink: 0; }
-.toggle input { position: absolute; opacity: 0; }
-.toggle span { position: absolute; inset: 0; cursor: pointer; background: rgba(240,168,122,.07); border: 1px solid var(--border); transition: background .15s; }
-.toggle span::after { content: ''; position: absolute; width: 14px; height: 14px; background: var(--text-dim); top: 2px; left: 2px; transition: transform .15s; }
-.toggle input:checked + span { background: rgba(240,168,122,.22); border-color: var(--accent); }
-.toggle input:checked + span::after { transform: translateX(18px); background: var(--accent); }
-.modal-foot { padding: 12px 17px; border-top: 1px solid var(--border); display: flex; justify-content: flex-end; gap: 8px; }
-.btn-primary { background: rgba(240,168,122,.14); color: var(--accent); border: 1px solid var(--accent); padding: 7px 16px; font: 9px var(--mono); cursor: pointer; letter-spacing: .14em; text-transform: uppercase; }
-.btn-primary:hover { background: rgba(240,168,122,.28); }
-.btn-ghost { background: transparent; color: var(--text-2); border: 1px solid var(--border); padding: 7px 14px; font: 9px var(--mono); cursor: pointer; letter-spacing: .1em; text-transform: uppercase; }
-.btn-ghost:hover { border-color: var(--text-2); }
-/* ---- BACKDROP + SCROLLBARS ------------------------------------------------- */
-.backdrop { position: fixed; inset: 0; z-index: 150; background: rgba(22,17,24,.6); backdrop-filter: blur(2px); }
-::-webkit-scrollbar { width: 8px; height: 8px; }
-::-webkit-scrollbar-track { background: transparent; }
-::-webkit-scrollbar-thumb { background: rgba(240,168,122,.22); border-radius: 4px; border: 2px solid transparent; background-clip: padding-box; }
-::-webkit-scrollbar-thumb:hover { background: rgba(240,168,122,.42); background-clip: padding-box; border: 2px solid transparent; }
-::-webkit-scrollbar-corner { background: transparent; }
-/* Firefox scrollbar */
-* { scrollbar-width: thin; scrollbar-color: rgba(240,168,122,.28) transparent; }
-@media (max-width: 900px) {
-  .hud-window { max-width: 90vw; }
-  .j-sub { display: none; }
-  .quick-cards { grid-template-columns: 1fr 1fr; }
-}
-
-/* ===== Specialty widget cards (stocks, weather, crypto, sports, calendar) ===== */
-/* Shared shell */
-.sw-window { min-width: 280px; }
-.sw-window .hud-win-body { padding: 0; gap: 0; }
-.sw-card { padding: 12px 14px; font-family: var(--mono); }
-.sw-card .sw-spark, .sw-card .sw-sub, .sw-card .sw-watch { margin-top: 10px; }
-
-/* ---- Stocks / Crypto ---- */
-.sw-stocks, .sw-crypto {
-  display: flex; flex-direction: column;
-}
-.sw-stocks .sw-hero, .sw-crypto .sw-hero {
-  display: flex; align-items: flex-start; justify-content: space-between;
-  gap: 12px;
-}
-.sw-stocks .sw-sym, .sw-crypto .sw-sym {
-  font-size: 22px; color: #fff; letter-spacing: .04em; font-weight: 700;
-  text-shadow: 0 0 14px var(--accent-glow); line-height: 1;
-}
-.sw-stocks .sw-name, .sw-crypto .sw-name {
-  font-size: 10px; color: var(--text-2); margin-top: 4px; letter-spacing: .04em;
-  max-width: 160px; overflow: hidden; text-overflow: ellipsis; white-space: nowrap;
-}
-.sw-stocks .sw-price, .sw-crypto .sw-price {
-  font-size: 26px; color: #fff; line-height: 1; text-align: right;
-  text-shadow: 0 0 16px var(--accent-glow); letter-spacing: .02em;
-}
-.sw-stocks .sw-chg, .sw-crypto .sw-chg {
-  font-size: 11px; margin-top: 5px; text-align: right; letter-spacing: .03em;
-}
-.sw-stocks .sw-chg.ok, .sw-crypto .sw-chg.ok { color: var(--ok); }
-.sw-stocks .sw-chg.hot, .sw-crypto .sw-chg.hot { color: var(--hot); }
-.sw-stocks .sw-chg-pct, .sw-crypto .sw-chg-pct { opacity: .85; font-weight: 600; }
-.sw-stocks .sw-spark, .sw-crypto .sw-spark {
-  background: linear-gradient(180deg, rgba(240,168,122,.04), transparent);
-  border-top: 1px solid var(--border); border-bottom: 1px solid var(--border);
-  padding: 6px 0; margin: 8px 0 0;
-}
-.sw-stocks .sw-spark svg, .sw-crypto .sw-spark svg { width: 100%; height: 60px; display: block; }
-.sw-stocks .sw-sub, .sw-crypto .sw-sub {
-  display: grid; grid-template-columns: repeat(4, 1fr); gap: 0;
-  border-top: 1px solid var(--border); padding-top: 8px;
-}
-.sw-stocks .sw-subcell, .sw-crypto .sw-subcell {
-  display: flex; flex-direction: column; align-items: flex-start;
-}
-.sw-stocks .sw-subl, .sw-crypto .sw-subl {
-  font-size: 8px; color: var(--text-dim); letter-spacing: .12em; text-transform: uppercase;
-}
-.sw-stocks .sw-subv, .sw-crypto .sw-subv {
-  font-size: 11px; color: var(--text); margin-top: 2px;
-}
-.sw-stocks .sw-watch, .sw-crypto .sw-watch {
-  display: flex; flex-direction: column; gap: 0;
-  border-top: 1px solid var(--border); padding-top: 6px;
-}
-.sw-stocks .sw-watch-row, .sw-crypto .sw-watch-row {
-  display: grid; grid-template-columns: 60px 1fr 70px 56px;
-  align-items: center; gap: 8px; padding: 5px 0;
-  font-size: 10px; border-bottom: 1px solid rgba(240,168,122,.04);
-}
-.sw-stocks .sw-watch-row:last-child, .sw-crypto .sw-watch-row:last-child { border-bottom: 0; }
-.sw-stocks .sw-watch-sym, .sw-crypto .sw-watch-sym {
-  color: var(--accent); letter-spacing: .04em; font-weight: 600;
-}
-.sw-stocks .sw-watch-name, .sw-crypto .sw-watch-name {
-  color: var(--text-2); overflow: hidden; text-overflow: ellipsis; white-space: nowrap;
-}
-.sw-stocks .sw-watch-price, .sw-crypto .sw-watch-price {
-  color: var(--text); text-align: right;
-}
-.sw-stocks .sw-watch-chg, .sw-crypto .sw-watch-chg {
-  text-align: right; font-weight: 600;
-}
-.sw-stocks .sw-watch-chg.ok, .sw-crypto .sw-watch-chg.ok { color: var(--ok); }
-.sw-stocks .sw-watch-chg.hot, .sw-crypto .sw-watch-chg.hot { color: var(--hot); }
-
-/* ---- Weather ---- */
-.sw-weather { padding: 0; }
-.sw-weather .ww-hero {
-  display: flex; align-items: center; gap: 16px;
-  padding: 16px 16px 12px;
-  background: linear-gradient(135deg, rgba(240,168,122,.10), rgba(240,168,122,0) 70%);
-  border-bottom: 1px solid var(--border);
-}
-.sw-weather .ww-ic {
-  font-size: 56px; line-height: 1; color: var(--accent);
-  text-shadow: 0 0 18px var(--accent-glow); flex-shrink: 0;
-}
-.sw-weather .ww-hero-r { flex: 1; min-width: 0; }
-.sw-weather .ww-loc {
-  font-size: 11px; color: var(--accent); letter-spacing: .14em;
-  text-transform: uppercase; text-shadow: 0 0 8px var(--accent-glow);
-  overflow: hidden; text-overflow: ellipsis; white-space: nowrap;
-}
-.sw-weather .ww-temp {
-  font-size: 42px; color: #fff; line-height: 1; margin-top: 4px;
-  text-shadow: 0 0 22px var(--accent-glow); letter-spacing: .02em;
-}
-.sw-weather .ww-cond {
-  font-size: 11px; color: var(--text); margin-top: 4px; letter-spacing: .04em;
-}
-.sw-weather .ww-meta {
-  display: grid; grid-template-columns: repeat(auto-fit, minmax(70px, 1fr));
-  gap: 0; padding: 10px 14px;
-  border-bottom: 1px solid var(--border);
-}
-.sw-weather .ww-metacell { padding: 0 6px; border-left: 1px solid var(--border); }
-.sw-weather .ww-metacell:first-child { border-left: 0; padding-left: 0; }
-.sw-weather .ww-metal {
-  font-size: 8px; color: var(--text-dim); letter-spacing: .12em; text-transform: uppercase;
-}
-.sw-weather .ww-metav { font-size: 12px; color: var(--text); margin-top: 2px; }
-.sw-weather .ww-fc {
-  display: grid; grid-auto-flow: column; grid-auto-columns: 1fr;
-  padding: 10px 6px 12px;
-}
-.sw-weather .ww-fcday {
-  display: flex; flex-direction: column; align-items: center; gap: 4px;
-  padding: 6px 2px; border-radius: 3px;
-  transition: background .2s var(--ease);
-}
-.sw-weather .ww-fcday:hover { background: rgba(240,168,122,.06); }
-.sw-weather .ww-fcd {
-  font-size: 9px; color: var(--text-dim); letter-spacing: .12em; text-transform: uppercase;
-}
-.sw-weather .ww-fci { font-size: 18px; color: var(--accent); line-height: 1; }
-.sw-weather .ww-fch { font-size: 11px; color: var(--text); font-weight: 600; }
-.sw-weather .ww-fcl { font-size: 10px; color: var(--text-dim); }
-
-/* ---- Sports ---- */
-.sw-sports { display: flex; flex-direction: column; }
-.sw-sports .sx-row {
-  display: grid; grid-template-columns: 1fr auto 1fr;
-  align-items: center; gap: 12px; padding: 11px 4px;
-  border-bottom: 1px solid var(--border);
-}
-.sw-sports .sx-row:last-child { border-bottom: 0; }
-.sw-sports .sx-side { min-width: 0; }
-.sw-sports .sx-side.win .sx-name { color: var(--accent); text-shadow: 0 0 8px var(--accent-glow); }
-.sw-sports .sx-home { text-align: right; }
-.sw-sports .sx-name {
-  font-size: 12px; color: var(--text); font-weight: 600; letter-spacing: .03em;
-  overflow: hidden; text-overflow: ellipsis; white-space: nowrap;
-}
-.sw-sports .sx-rec { font-size: 9px; color: var(--text-dim); margin-top: 2px; letter-spacing: .04em; }
-.sw-sports .sx-mid { display: flex; flex-direction: column; align-items: center; gap: 3px; min-width: 60px; }
-.sw-sports .sx-score {
-  font-size: 18px; color: var(--text-dim); letter-spacing: .04em; line-height: 1;
-  display: flex; align-items: center; gap: 6px;
-}
-.sw-sports .sx-score .win { color: #fff; font-weight: 700; text-shadow: 0 0 8px var(--accent-glow); }
-.sw-sports .sx-dash { color: var(--text-dim); }
-.sw-sports .sx-status {
-  font-size: 9px; color: var(--text-2); letter-spacing: .12em; text-transform: uppercase;
-  display: flex; align-items: center; gap: 5px;
-}
-.sw-sports .sx-status.live { color: var(--hot); }
-.sw-sports .sx-status.final { color: var(--ok); }
-.sw-sports .sx-status .sx-dot {
-  width: 6px; height: 6px; border-radius: 50%; background: var(--hot);
-  box-shadow: 0 0 6px var(--hot); animation: pulse 1.2s ease infinite;
-}
-.sw-sports .sx-note {
-  font-size: 9px; color: var(--text-dim); margin-top: 2px; max-width: 140px;
-  text-align: center; line-height: 1.3;
-}
-
-/* ---- Calendar ---- */
-.sw-cal { display: flex; flex-direction: column; }
-.sw-cal .cx-row {
-  display: grid; grid-template-columns: 80px 1fr; gap: 12px;
-  padding: 9px 4px; border-bottom: 1px solid var(--border);
-  border-left: 2px solid var(--cx-color, var(--accent));
-  padding-left: 10px; margin-left: -2px;
-}
-.sw-cal .cx-row:last-child { border-bottom: 0; }
-.sw-cal .cx-time { display: flex; flex-direction: column; align-items: flex-start; }
-.sw-cal .cx-time-t { font-size: 13px; color: var(--accent); font-weight: 600; letter-spacing: .02em; }
-.sw-cal .cx-time-d { font-size: 9px; color: var(--text-dim); margin-top: 2px; letter-spacing: .04em; }
-.sw-cal .cx-body { min-width: 0; }
-.sw-cal .cx-title { font-size: 12px; color: var(--text); font-weight: 600; letter-spacing: .02em; }
-.sw-cal .cx-loc { font-size: 10px; color: var(--text-2); margin-top: 3px; letter-spacing: .03em; }
-.sw-cal .cx-note { font-size: 10px; color: var(--text-dim); margin-top: 4px; line-height: 1.4; }
-
-/* =========================================================================
-   v2 SPECIALTY WIDGETS — Robinhood / Apple-Weather / ESPN / Calendar look
-   ========================================================================= */
-
-/* shared */
-.sw-card .st-tab,
-.sw-card .st-chip,
-.sw-card .sx-status-lbl,
-.sw-card .sx-dot,
-.sw-card .ww-fcbar-fill,
-.sw-card .st-range-fill { font-family: var(--mono); }
-
-/* ---- STOCKS / CRYPTO ---- */
-.sw-stocks { padding: 0; }
-.sw-stocks .st-head {
-  display: flex; align-items: flex-start; justify-content: space-between;
-  gap: 14px; padding: 14px 16px 12px;
-  background: linear-gradient(180deg, rgba(240,168,122,.07), rgba(240,168,122,0) 80%);
-  border-bottom: 1px solid var(--border);
-}
-.sw-stocks .st-head-l { min-width: 0; flex: 1; }
-.sw-stocks .st-sym {
-  font-size: 26px; color: #fff; letter-spacing: .04em; font-weight: 700;
-  text-shadow: 0 0 16px var(--accent-glow); line-height: 1; font-family: var(--mono);
-}
-.sw-stocks .st-name {
-  font-size: 10.5px; color: var(--text-2); margin-top: 4px; letter-spacing: .03em;
-  overflow: hidden; text-overflow: ellipsis; white-space: nowrap;
-}
-.sw-stocks .st-chips { display: flex; gap: 5px; margin-top: 8px; flex-wrap: wrap; }
-.sw-stocks .st-chip {
-  font-size: 8.5px; padding: 2px 7px; letter-spacing: .1em; text-transform: uppercase;
-  border: 1px solid; line-height: 1.5;
-}
-.sw-stocks .st-chip.st-ex { color: var(--text-2); border-color: var(--border-h); background: rgba(240,168,122,.04); }
-.sw-stocks .st-chip.st-ms-open   { color: var(--ok);  border-color: rgba(142,207,149,.35); background: rgba(142,207,149,.06); }
-.sw-stocks .st-chip.st-ms-closed { color: var(--text-2); border-color: var(--border); background: rgba(255,255,255,.02); }
-.sw-stocks .st-head-r { text-align: right; flex-shrink: 0; }
-.sw-stocks .st-price {
-  font-size: 30px; color: #fff; line-height: 1; letter-spacing: .01em;
-  text-shadow: 0 0 18px var(--accent-glow); font-variant-numeric: tabular-nums;
-  font-family: var(--mono); font-weight: 600;
-}
-.sw-stocks .st-chg {
-  font-size: 11px; margin-top: 6px; letter-spacing: .04em; font-family: var(--mono);
-  display: inline-flex; align-items: baseline; gap: 8px;
-}
-.sw-stocks .st-chg.ok  { color: var(--ok); }
-.sw-stocks .st-chg.hot { color: var(--hot); }
-.sw-stocks .st-chg.flat{ color: var(--text-2); }
-.sw-stocks .st-chg-pct { font-weight: 700; opacity: .92; }
-
-/* chart panel */
-.sw-stocks .st-chart { padding: 8px 12px 0; border-bottom: 1px solid var(--border); }
-.sw-stocks .st-tabs {
-  display: flex; gap: 0; margin: 0 0 6px;
-  border-bottom: 1px solid rgba(240,168,122,.08);
-}
-.sw-stocks .st-tab {
-  padding: 5px 11px; font-size: 9.5px; color: var(--text-2);
-  letter-spacing: .1em; text-transform: uppercase; cursor: default;
-  border-bottom: 1px solid transparent; margin-bottom: -1px;
-  transition: color .15s var(--ease), border-color .15s var(--ease);
-}
-.sw-stocks .st-tab:hover { color: var(--text); }
-.sw-stocks .st-tab.st-tab-active {
-  color: var(--accent); border-bottom-color: var(--accent);
-  text-shadow: 0 0 8px var(--accent-glow);
-}
-.sw-stocks .st-chart-svg { width: 100%; height: 160px; display: block; }
-
-/* stats grid */
-.sw-stocks .st-stats {
-  display: grid; grid-template-columns: 1fr 1fr; gap: 0;
-  border-bottom: 1px solid var(--border);
-}
-.sw-stocks .st-stat {
-  display: flex; flex-direction: column; gap: 3px;
-  padding: 9px 14px;
-  border-right: 1px solid var(--border);
-  border-bottom: 1px solid rgba(240,168,122,.04);
-}
-.sw-stocks .st-stat:nth-child(2n)  { border-right: 0; }
-.sw-stocks .st-stat:nth-last-child(-n+2) { border-bottom: 0; }
-.sw-stocks .st-stat-l {
-  font-size: 8.5px; color: var(--text-dim); letter-spacing: .12em; text-transform: uppercase;
-}
-.sw-stocks .st-stat-v {
-  font-size: 12.5px; color: #fff; font-weight: 600; letter-spacing: .02em;
-  font-family: var(--mono); font-variant-numeric: tabular-nums;
-}
-.sw-stocks .st-stat-r { display: flex; flex-direction: column; gap: 4px; }
-.sw-stocks .st-range {
-  position: relative; height: 6px; margin-top: 4px;
-}
-.sw-stocks .st-range-track {
-  position: absolute; inset: 0;
-  background: linear-gradient(90deg, rgba(229,146,143,.35), rgba(230,192,115,.4), rgba(142,207,149,.35));
-  border-radius: 1px; opacity: .6;
-}
-.sw-stocks .st-range-fill {
-  position: absolute; top: 0; bottom: 0; left: 0;
-  background: rgba(240,168,122,.18);
-}
-.sw-stocks .st-range-tick {
-  position: absolute; top: -3px; width: 2px; height: 12px; background: var(--accent);
-  box-shadow: 0 0 6px var(--accent-glow);
-  transform: translateX(-1px);
-}
-.sw-stocks .st-range-vals {
-  display: flex; justify-content: space-between;
-  font-size: 9.5px; color: var(--text-2); font-family: var(--mono);
-  font-variant-numeric: tabular-nums;
-}
-
-/* watchlist */
-.sw-stocks .st-watch {
-  display: flex; flex-direction: column; gap: 0;
-  border-bottom: 1px solid var(--border);
-}
-.sw-stocks .st-watch-row {
-  display: grid; grid-template-columns: 60px 64px 1fr 64px 60px;
-  align-items: center; gap: 10px; padding: 7px 14px;
-  font-size: 10.5px; border-bottom: 1px solid rgba(240,168,122,.05);
-  transition: background .15s var(--ease);
-}
-.sw-stocks .st-watch-row:last-child { border-bottom: 0; }
-.sw-stocks .st-watch-row:hover { background: rgba(240,168,122,.04); }
-.sw-stocks .st-watch-sym {
-  color: var(--accent); letter-spacing: .04em; font-weight: 700; font-family: var(--mono);
-  text-shadow: 0 0 6px var(--accent-glow);
-}
-.sw-stocks .st-watch-spk { display: flex; align-items: center; height: 18px; }
-.sw-stocks .st-watch-spk svg { width: 100%; height: 18px; }
-.sw-stocks .st-watch-name {
-  color: var(--text-2); overflow: hidden; text-overflow: ellipsis; white-space: nowrap;
-  font-size: 10px;
-}
-.sw-stocks .st-watch-price {
-  color: var(--text); text-align: right; font-family: var(--mono);
-  font-variant-numeric: tabular-nums;
-}
-.sw-stocks .st-watch-chg {
-  text-align: right; font-weight: 700; font-family: var(--mono);
-  font-variant-numeric: tabular-nums;
-}
-.sw-stocks .st-watch-chg.ok  { color: var(--ok); }
-.sw-stocks .st-watch-chg.hot { color: var(--hot); }
-
-/* news */
-.sw-stocks .st-news { padding: 8px 14px 12px; }
-.sw-stocks .st-news-row {
-  display: flex; gap: 9px; padding: 6px 0; align-items: flex-start;
-  border-bottom: 1px solid rgba(240,168,122,.05);
-}
-.sw-stocks .st-news-row:last-child { border-bottom: 0; }
-.sw-stocks .st-news-dot {
-  width: 6px; height: 6px; border-radius: 50%; background: var(--accent);
-  margin-top: 5px; flex-shrink: 0; box-shadow: 0 0 6px var(--accent-glow);
-}
-.sw-stocks .st-news-body { min-width: 0; flex: 1; }
-.sw-stocks .st-news-title { font-size: 10.5px; color: var(--text); line-height: 1.4; letter-spacing: .02em; }
-.sw-stocks .st-news-meta {
-  display: flex; gap: 5px; margin-top: 3px;
-  font-size: 8.5px; color: var(--text-dim); letter-spacing: .08em; text-transform: uppercase;
-}
-.sw-stocks .st-news-sep { opacity: .6; }
-
-/* crypto variant — same chassis, slight tint */
-.sw-stocks.sw-crypto { background: linear-gradient(180deg, rgba(142,100,120,.04), transparent 30%); }
-.sw-stocks.sw-crypto .st-head { background: linear-gradient(180deg, rgba(229,146,143,.08), rgba(229,146,143,0) 80%); }
-
-/* ---- WEATHER ---- */
-.sw-weather { padding: 0; position: relative; overflow: hidden; }
-.sw-weather .ww-hero {
-  position: relative;
-  display: flex; align-items: center; justify-content: space-between; gap: 16px;
-  padding: 18px 18px 16px; border-bottom: 1px solid var(--border);
-  isolation: isolate;
-}
-.sw-weather .ww-hero::before {
-  content: ''; position: absolute; inset: 0; z-index: -1; opacity: .9;
-  background: linear-gradient(135deg, rgba(240,168,122,.18), rgba(240,168,122,0) 70%);
-  transition: background .6s var(--ease);
-}
-.sw-weather.ww-tone-day .ww-hero::before   { background: linear-gradient(135deg, rgba(240,168,122,.22), rgba(230,144,115,.04) 70%); }
-.sw-weather.ww-tone-cloud .ww-hero::before { background: linear-gradient(135deg, rgba(176,166,186,.22), rgba(120,110,130,.05) 70%); }
-.sw-weather.ww-tone-rain .ww-hero::before  { background: linear-gradient(135deg, rgba(110,140,180,.28), rgba(70,90,130,.08) 70%); }
-.sw-weather.ww-tone-snow .ww-hero::before  { background: linear-gradient(135deg, rgba(220,225,235,.25), rgba(180,190,210,.06) 70%); }
-.sw-weather.ww-tone-fog .ww-hero::before   { background: linear-gradient(135deg, rgba(160,155,170,.22), rgba(110,105,120,.06) 70%); }
-.sw-weather.ww-tone-night .ww-hero::before { background: linear-gradient(135deg, rgba(80,70,120,.30), rgba(40,30,70,.10) 70%); }
-
-.sw-weather .ww-hero-l { min-width: 0; flex: 1; }
-.sw-weather .ww-loc {
-  font-size: 11px; color: var(--accent); letter-spacing: .16em; text-transform: uppercase;
-  text-shadow: 0 0 8px var(--accent-glow); font-weight: 600;
-  overflow: hidden; text-overflow: ellipsis; white-space: nowrap;
-}
-.sw-weather .ww-upd {
-  font-size: 8.5px; color: var(--text-dim); margin-top: 2px; letter-spacing: .08em; text-transform: uppercase;
-}
-.sw-weather .ww-temp {
-  font-size: 64px; color: #fff; line-height: .95; margin-top: 6px; font-weight: 200;
-  text-shadow: 0 0 28px var(--accent-glow); letter-spacing: -.02em;
-  font-variant-numeric: tabular-nums;
-}
-.sw-weather .ww-temp-u {
-  font-size: 36px; color: var(--accent); vertical-align: top; line-height: 1; margin-left: 2px;
-  font-weight: 300;
-}
-.sw-weather .ww-cond {
-  font-size: 12px; color: var(--text); margin-top: 4px; letter-spacing: .04em; font-weight: 500;
-}
-.sw-weather .ww-hl {
-  font-size: 11px; color: var(--text-2); margin-top: 6px; letter-spacing: .04em;
-  display: flex; gap: 6px; align-items: baseline; font-family: var(--mono);
-}
-.sw-weather .ww-hl-sep { color: var(--text-dim); }
-
-.sw-weather .ww-ic {
-  font-size: 84px; line-height: 1; flex-shrink: 0;
-  text-shadow: 0 0 22px var(--accent-glow);
-  animation: wwIcBob 6s ease-in-out infinite;
-}
-@keyframes wwIcBob { 0%,100% { transform: translateY(0); } 50% { transform: translateY(-3px); } }
-
-.sw-weather .ww-hourly {
-  padding: 12px 6px 6px; border-bottom: 1px solid var(--border);
-  background: linear-gradient(180deg, rgba(240,168,122,.03), transparent);
-}
-.sw-weather .ww-hourly-svg { width: 100%; height: 92px; display: block; }
-
-.sw-weather .ww-meta {
-  display: grid; grid-template-columns: repeat(4, 1fr); gap: 0;
-  border-bottom: 1px solid var(--border);
-  background: rgba(34,27,42,.4);
-}
-.sw-weather .ww-metacell {
-  display: flex; flex-direction: column; gap: 3px;
-  padding: 10px 12px; border-left: 1px solid var(--border);
-}
-.sw-weather .ww-metacell:first-child { border-left: 0; }
-.sw-weather .ww-metal {
-  font-size: 8.5px; color: var(--text-dim); letter-spacing: .12em; text-transform: uppercase;
-}
-.sw-weather .ww-metav {
-  font-size: 12.5px; color: #fff; font-weight: 600; font-family: var(--mono);
-  font-variant-numeric: tabular-nums;
-}
-
-.sw-weather .ww-fc {
-  display: grid; grid-auto-flow: column; grid-auto-columns: 1fr; gap: 0;
-  padding: 10px 4px 12px;
-}
-.sw-weather .ww-fcday {
-  display: flex; flex-direction: column; align-items: center; gap: 4px;
-  padding: 8px 4px; border-radius: 4px;
-  transition: background .2s var(--ease);
-}
-.sw-weather .ww-fcday:hover { background: rgba(240,168,122,.06); }
-.sw-weather .ww-fcd {
-  font-size: 9px; color: var(--text-2); letter-spacing: .12em; text-transform: uppercase; font-weight: 600;
-}
-.sw-weather .ww-fci { font-size: 20px; color: var(--accent); line-height: 1; margin: 2px 0; }
-.sw-weather .ww-fch { font-size: 12px; color: #fff; font-weight: 600; font-family: var(--mono); }
-.sw-weather .ww-fcl { font-size: 10.5px; color: var(--text-dim); font-family: var(--mono); }
-.sw-weather .ww-fcbar {
-  width: 70%; height: 4px; background: rgba(240,168,122,.08);
-  position: relative; border-radius: 1px; margin: 2px 0 0; overflow: visible;
-}
-.sw-weather .ww-fcbar-fill {
-  position: absolute; top: 0; bottom: 0;
-  background: linear-gradient(90deg, #8ecf95, #f0a87a 50%, #e5928f);
-  border-radius: 1px;
-}
-.sw-weather .ww-fcp {
-  font-size: 8.5px; color: var(--text-2); letter-spacing: .04em; font-family: var(--mono);
-  margin-top: 2px;
-}
-.sw-weather .ww-fcp:empty, .sw-weather .ww-fcday:not(:has(.ww-fcp)) .ww-fcp { display: none; }
-
-.sw-weather .ww-sun {
-  padding: 8px 14px 12px; border-top: 1px solid var(--border);
-  background: linear-gradient(180deg, rgba(230,192,115,.04), transparent);
-}
-.sw-weather .ww-sun-svg { width: 100%; height: 58px; display: block; }
-
-/* ---- SPORTS ---- */
-.sw-sports { padding: 0; display: flex; flex-direction: column; }
-.sw-sports .sx-league {
-  padding: 7px 16px; font-size: 9px; color: var(--accent); letter-spacing: .16em; text-transform: uppercase;
-  background: rgba(240,168,122,.06); border-bottom: 1px solid var(--border); font-weight: 600;
-  text-shadow: 0 0 6px var(--accent-glow);
-}
-.sw-sports .sx-row {
-  padding: 12px 16px; border-bottom: 1px solid var(--border);
-  position: relative;
-}
-.sw-sports .sx-row:last-child { border-bottom: 0; }
-.sw-sports .sx-status-row {
-  display: flex; align-items: center; gap: 7px; margin-bottom: 9px;
-  font-size: 9px; letter-spacing: .14em; text-transform: uppercase;
-}
-.sw-sports .sx-status-lbl {
-  padding: 2px 7px; font-weight: 700; line-height: 1.4;
-}
-.sw-sports .sx-live   { color: #fff; background: var(--hot); box-shadow: 0 0 8px rgba(229,146,143,.4); }
-.sw-sports .sx-final  { color: var(--text-2); background: rgba(255,255,255,.04); border: 1px solid var(--border); padding: 1px 6px; }
-.sw-sports .sx-sched  { color: var(--text-2); }
-.sw-sports .sx-time   { color: var(--text-2); font-size: 9px; margin-left: auto; font-family: var(--mono); letter-spacing: .04em; }
-.sw-sports .sx-dot {
-  width: 7px; height: 7px; border-radius: 50%; background: var(--hot);
-  box-shadow: 0 0 8px var(--hot); animation: sxPulse 1.2s ease infinite;
-  flex-shrink: 0;
-}
-@keyframes sxPulse { 50% { opacity: .35; transform: scale(.8); } }
-
-.sw-sports .sx-game { display: flex; flex-direction: column; gap: 7px; }
-.sw-sports .sx-team {
-  display: grid; grid-template-columns: 32px 1fr auto;
-  align-items: center; gap: 12px;
-  padding: 4px 0;
-  transition: opacity .2s var(--ease);
-}
-.sw-sports .sx-team.sx-win { /* winner */ }
-.sw-sports .sx-team:not(.sx-win) { opacity: .7; }
-
-.sw-sports .sx-logo {
-  width: 30px; height: 30px; border-radius: 6px;
-  display: flex; align-items: center; justify-content: center;
-  font-size: 11px; font-weight: 700; color: #fff;
-  border: 1px solid; font-family: var(--mono);
-  letter-spacing: .02em;
-  text-shadow: 0 1px 2px rgba(0,0,0,.4);
-}
-.sw-sports .sx-team-info { min-width: 0; }
-.sw-sports .sx-name {
-  font-size: 13px; color: var(--text); font-weight: 600; letter-spacing: .02em;
-  overflow: hidden; text-overflow: ellipsis; white-space: nowrap;
-  line-height: 1.2;
-}
-.sw-sports .sx-team.sx-win .sx-name { color: #fff; text-shadow: 0 0 8px var(--accent-glow); }
-.sw-sports .sx-rec { font-size: 9px; color: var(--text-dim); margin-top: 1px; letter-spacing: .04em; font-family: var(--mono); }
-.sw-sports .sx-score {
-  font-size: 22px; color: var(--text-dim); letter-spacing: .04em; line-height: 1;
-  font-family: var(--mono); font-variant-numeric: tabular-nums; font-weight: 600;
-  min-width: 36px; text-align: right;
-}
-.sw-sports .sx-score.sx-score-win {
-  color: #fff; text-shadow: 0 0 10px var(--accent-glow);
-}
-.sw-sports .sx-note {
-  font-size: 9.5px; color: var(--text-dim); margin-top: 7px; line-height: 1.4;
-  padding-left: 44px; font-style: italic;
-}
-
-/* ---- CALENDAR ---- */
-.sw-cal { padding: 0; display: flex; flex-direction: column; }
-.sw-cal .cx-date {
-  padding: 12px 16px 10px; border-bottom: 1px solid var(--border);
-  display: flex; align-items: baseline; gap: 10px;
-  background: linear-gradient(180deg, rgba(240,168,122,.06), transparent);
-}
-.sw-cal .cx-date::before { content: ''; }
-.sw-cal .cx-date-num {
-  font-size: 22px; color: #fff; font-weight: 200; letter-spacing: -.01em;
-  text-shadow: 0 0 14px var(--accent-glow);
-  font-variant-numeric: tabular-nums;
-}
-.sw-cal .cx-allday {
-  display: flex; flex-wrap: wrap; gap: 5px; padding: 8px 16px;
-  border-bottom: 1px solid var(--border); background: rgba(34,27,42,.3);
-}
-.sw-cal .cx-allday-pill {
-  font-size: 10px; color: var(--text); padding: 3px 9px;
-  background: color-mix(in srgb, var(--cx-color, var(--accent)) 12%, transparent);
-  border: 1px solid color-mix(in srgb, var(--cx-color, var(--accent)) 35%, transparent);
-  border-left: 2px solid var(--cx-color, var(--accent));
-  border-radius: 2px; letter-spacing: .02em;
-}
-
-.sw-cal .cx-timeline {
-  display: grid; grid-template-columns: 48px 1fr;
-  position: relative; min-height: 220px;
-}
-.sw-cal .cx-hours { position: relative; padding: 4px 0; }
-.sw-cal .cx-hour {
-  display: flex; align-items: flex-start; gap: 6px;
-  height: 50px; padding: 0 6px 0 0;
-  border-bottom: 1px dashed rgba(240,168,122,.06);
-}
-.sw-cal .cx-hour:last-child { border-bottom: 0; }
-.sw-cal .cx-hour-lbl {
-  font-size: 8.5px; color: var(--text-dim); letter-spacing: .04em;
-  font-family: var(--mono); text-align: right; flex-shrink: 0;
-  width: 30px; padding-top: 1px;
-}
-.sw-cal .cx-track {
-  position: relative; border-left: 1px solid var(--border); padding: 4px 0;
-  min-height: 100%;
-}
-.sw-cal .cx-ev {
-  position: absolute; left: 8px; right: 10px;
-  display: flex; gap: 8px; padding: 5px 8px 5px 10px;
-  background: color-mix(in srgb, var(--cx-color, var(--accent)) 14%, transparent);
-  border: 1px solid color-mix(in srgb, var(--cx-color, var(--accent)) 30%, transparent);
-  border-left: 2px solid var(--cx-color, var(--accent));
-  border-radius: 2px; overflow: hidden;
-  transition: transform .15s var(--ease), box-shadow .15s var(--ease);
-}
-.sw-cal .cx-ev:hover {
-  transform: translateX(1px);
-  box-shadow: 0 4px 14px rgba(0,0,0,.4);
-}
-.sw-cal .cx-ev-bar { display: none; }
-.sw-cal .cx-ev-body { min-width: 0; flex: 1; }
-.sw-cal .cx-ev-time {
-  font-size: 8.5px; color: var(--text-2); letter-spacing: .06em; text-transform: uppercase;
-  font-family: var(--mono);
-}
-.sw-cal .cx-ev-title {
-  font-size: 11px; color: #fff; font-weight: 600; letter-spacing: .02em;
-  line-height: 1.25; margin-top: 1px;
-  overflow: hidden; text-overflow: ellipsis; white-space: nowrap;
-}
-.sw-cal .cx-ev-loc {
-  font-size: 9px; color: var(--text-2); margin-top: 2px; letter-spacing: .03em;
-  overflow: hidden; text-overflow: ellipsis; white-space: nowrap;
-}
-.sw-cal .cx-now {
-  position: absolute; left: 0; right: 0; height: 0;
-  display: flex; align-items: center; pointer-events: none;
-  z-index: 2;
-}
-.sw-cal .cx-now-dot {
-  width: 8px; height: 8px; border-radius: 50%; background: var(--hot);
-  box-shadow: 0 0 8px var(--hot); margin-left: -4px; flex-shrink: 0;
-  position: relative; z-index: 1;
-}
-.sw-cal .cx-now-line {
-  flex: 1; height: 1px; background: var(--hot);
-  box-shadow: 0 0 4px var(--hot);
-}
-"""
-
-_JS = r"""
-// Cagentic
-const $ = s => document.querySelector(s);
-const log = $('#log'), input = $('#input'), sendBtn = $('#send');
-let state = {
-  chats: [], currentId: null, settings: {}, busy: false,
-  voiceOut: false, voiceName: '', renderedPanels: new Set(), closedWindows: [],
-  projects: [], activeProjectId: null,
-  _openProjects: new Set(), _openUnaffiliated: true, _openProjectsRoot: true,
-};
-
-// ---- CLOCK ------------------------------------------------------------------
-function updateClock() {
-  const n = new Date(), pad = v => String(v).padStart(2,'0');
-  $('#jClock').textContent = pad(n.getHours())+':'+pad(n.getMinutes())+':'+pad(n.getSeconds());
-  const days=['SUN','MON','TUE','WED','THU','FRI','SAT'];
-  const months=['JAN','FEB','MAR','APR','MAY','JUN','JUL','AUG','SEP','OCT','NOV','DEC'];
-  $('#jDate').textContent = days[n.getDay()]+' '+n.getDate()+' '+months[n.getMonth()]+' '+n.getFullYear();
-}
-setInterval(updateClock, 1000); updateClock();
-
-// ---- ORB --------------------------------------------------------------------
-(function initOrb() {
-  const canvas = $('#orbCanvas'); if (!canvas) return;
-  const ctx = canvas.getContext('2d');
-  let W, H, cx, cy, particles = [], t = 0;
-  function resize() {
-    const p = canvas.parentElement;
-    W = canvas.width = p.clientWidth || 600;
-    H = canvas.height = p.clientHeight || 300;
-    cx = W/2; cy = H/2;
-  }
-  function mkPart() {
-    const th = Math.random()*Math.PI*2, ph = Math.random()*Math.PI, r = 45+Math.random()*40;
-    return { x:cx+r*Math.sin(ph)*Math.cos(th), y:cy+r*Math.sin(ph)*Math.sin(th)*0.4, z:Math.cos(ph),
-      vx:(Math.random()-.5)*0.3, vy:(Math.random()-.5)*0.3, life:Math.random(),
-      decay:0.007+Math.random()*0.016, size:0.7+Math.random()*2.2, alpha:0.4+Math.random()*0.6 };
-  }
-  function resetPart(p) {
-    const th=Math.random()*Math.PI*2, ph=Math.random()*Math.PI, r=43+Math.random()*42;
-    p.x=cx+r*Math.sin(ph)*Math.cos(th); p.y=cy+r*Math.sin(ph)*Math.sin(th)*0.4; p.z=Math.cos(ph); p.life=1;
-  }
-  function initParts(){ particles=[]; for(let i=0;i<220;i++) particles.push(mkPart()); }
-  const ORBS=[{r:105,s:0.65,sz:3.5,ph:0},{r:105,s:0.65,sz:3.5,ph:Math.PI},
-    {r:82,s:-1.05,sz:2.5,ph:Math.PI/2},{r:125,s:0.45,sz:2,ph:Math.PI/3},{r:82,s:-1.05,sz:2.5,ph:Math.PI*1.5}];
-  function draw() {
-    ctx.clearRect(0,0,W,H);
-    // speed reacts to state: faster when busy/listening/speaking
-    const sp = state.busy ? 0.03 : (window.__jSpeak ? 0.022 : 0.011);
-    t += sp;
-    for(let r=120;r>=12;r-=18) {
-      const g=ctx.createRadialGradient(cx,cy,r*0.4,cx,cy,r);
-      g.addColorStop(0,`rgba(200,120,60,${0.022+(120-r)*0.0006})`); g.addColorStop(1,'rgba(0,0,0,0)');
-      ctx.beginPath(); ctx.arc(cx,cy,r,0,Math.PI*2); ctx.fillStyle=g; ctx.fill();
-    }
-    const mg=ctx.createRadialGradient(cx,cy,0,cx,cy,65);
-    mg.addColorStop(0,'rgba(255,220,190,0.88)'); mg.addColorStop(0.22,'rgba(240,168,122,0.58)');
-    mg.addColorStop(0.6,'rgba(160,80,60,0.22)'); mg.addColorStop(1,'rgba(0,0,0,0)');
-    ctx.beginPath(); ctx.arc(cx,cy,65,0,Math.PI*2); ctx.fillStyle=mg; ctx.fill();
-    const ic=ctx.createRadialGradient(cx,cy,0,cx,cy,20);
-    ic.addColorStop(0,'rgba(255,255,255,1)'); ic.addColorStop(0.5,'rgba(255,200,170,0.75)'); ic.addColorStop(1,'rgba(240,168,122,0)');
-    ctx.beginPath(); ctx.arc(cx,cy,20,0,Math.PI*2); ctx.fillStyle=ic; ctx.fill();
-    particles.forEach(p=>{
-      p.x+=p.vx; p.y+=p.vy; p.life-=p.decay; if(p.life<=0) resetPart(p);
-      const a=Math.max(0,p.life)*p.alpha, br=0.5+p.z*0.5;
-      ctx.beginPath(); ctx.arc(p.x,p.y,p.size,0,Math.PI*2);
-      ctx.fillStyle=`rgba(${Math.round(200+br*55)},${Math.round(120+br*48)},${Math.round(60+br*62)},${a})`; ctx.fill();
-    });
-    ORBS.forEach(o=>{
-      const a=t*o.s+o.ph, ox=cx+o.r*Math.cos(a), oy=cy+o.r*0.38*Math.sin(a);
-      ctx.beginPath(); ctx.arc(ox,oy,o.sz,0,Math.PI*2);
-      ctx.fillStyle='rgba(240,168,122,0.9)'; ctx.shadowColor='#f0a87a'; ctx.shadowBlur=12; ctx.fill(); ctx.shadowBlur=0;
-    });
-    requestAnimationFrame(draw);
-  }
-  window.addEventListener('resize',()=>{resize();initParts();});
-  resize(); initParts(); draw();
-})();
-
-// ---- HELPERS ----------------------------------------------------------------
-function esc(s){ return (s||'').replace(/[&<>"']/g,c=>({'&':'&amp;','<':'&lt;','>':'&gt;','"':'&quot;',"'":'&#39;'}[c])); }
-// Allow only http(s) (and data:image for <img>) URLs into href/src attributes;
-// anything else (javascript:, data:text/html, etc.) is dropped to '#'.
-function safeUrl(u){ u=(u||'').trim(); return /^https?:\/\//i.test(u)?u:'#'; }
-function safeImgUrl(u){ u=(u||'').trim(); return (/^https?:\/\//i.test(u)||/^data:image\//i.test(u))?u:''; }
-function md(src) {
-  const blocks=[];
-  let s=(src||'').replace(/```(\w*)\n?([\s\S]*?)```/g,(m,lang,code)=>{
-    blocks.push('<div class="codeblock"><div class="cb-head"><span class="cb-lang">'+(lang||'text')+'</span>'+
-      '<button class="cb-copy">COPY</button></div><pre><code>'+esc(code.replace(/\n$/,''))+'</code></pre></div>');
-    return '\x00B'+(blocks.length-1)+'\x00';
-  });
-  s=esc(s);
-  s=s.replace(/`([^`\n]+)`/g,'<code>$1</code>');
-  s=s.replace(/^\s*#{1,6}\s+(.+)$/gm,'<h3>$1</h3>');
-  s=s.replace(/\*\*([^*]+)\*\*/g,'<strong>$1</strong>');
-  s=s.replace(/(^|[^*\w])\*([^*\n]+)\*(?!\w)/g,'$1<em>$2</em>');
-  s=s.replace(/\[([^\]]+)\]\((https?:\/\/[^)\s]+)\)/g,'<a href="$2" target="_blank" rel="noopener">$1</a>');
-  s=s.replace(/(?:^|\n)((?:\s*[-*]\s+.+(?:\n|$))+)/g,(m,b)=>
-    '\n<ul>'+b.trim().split('\n').map(x=>'<li>'+x.replace(/^\s*[-*]\s+/,'')+'</li>').join('')+'</ul>');
-  s=s.split(/\n{2,}/).map(p=>p.trim()?'<p>'+p+'</p>':'').join('');
-  s=s.replace(/\n/g,'<br>');
-  s=s.replace(/<p>(<(?:ul|h3|div))/g,'$1').replace(/(<\/(?:ul|h3|div)>)<\/p>/g,'$1');
-  s=s.replace(/\x00B(\d+)\x00/g,(m,i)=>blocks[+i]);
-  return s;
-}
-// strip plain text of markdown/HUD for speech
-function plain(text){
-  return stripHud(text).replace(/```[\s\S]*?```/g,' code block ')
-    .replace(/[#*`>_]/g,'').replace(/\[([^\]]+)\]\([^)]+\)/g,'$1').replace(/\s+/g,' ').trim();
-}
-function scrollDown(){ log.scrollTop=log.scrollHeight; }
-function getThread(){ let t=log.querySelector('.j-thread'); if(!t){t=document.createElement('div');t.className='j-thread';log.appendChild(t);} return t; }
-function clearLog(){ log.innerHTML=''; }
-function avatarHTML(){ return '<div class="j-avatar">C</div>'; }
-function setOrbLabel(text){ const l=$('#orbLabel'); if(l) l.textContent=(text||'New Chat'); }
-function compactOrb(on){ const z=$('#orbZone'); if(z) z.classList.toggle('compact', on); }
-
-// ---- HUD --------------------------------------------------------------------
-const HUD_RX = /```hud\s*\n?([\s\S]*?)```/g;
-function extractHud(text){
-  const out=[]; let m;
-  HUD_RX.lastIndex=0;
-  while((m=HUD_RX.exec(text||''))!==null){
-    try{ out.push({raw:m[1].trim(), obj:JSON.parse(m[1].trim())}); }catch(e){}
-  }
-  return out;
-}
-function stripHud(text){ return (text||'').replace(HUD_RX,'').trim(); }
-
-// Panel types that render inline in the chat and the user can act on.
-const INTERACTIVE_TYPES=new Set(['actions','choices','form','checklist']);
-function renderPanels(text){
-  const found=extractHud(text);
-  if(!found.length) return;
-  // Handle clear directives first
-  found.forEach(({obj})=>{ if((obj.panel||'').toLowerCase()==='clear') clearViewport(); });
-  const layer=$('#windowLayer');
-  found.forEach(({raw,obj})=>{
-    const type=(obj.panel||'').toLowerCase();
-    if(type==='clear') return;
-    if(state.renderedPanels.has(raw)) return;
-    // Interactive panels live inline in the conversation thread.
-    if(INTERACTIVE_TYPES.has(type)){
-      const el=buildInteractive(obj); if(!el) return;
-      state.renderedPanels.add(raw);
-      getThread().appendChild(el); scrollDown();
-      return;
-    }
-    // Data panels render as draggable floating windows.
-    const inner=buildPanelInner(obj); if(!inner) return;
-    state.renderedPanels.add(raw);
-    const idx=_winCascade; // capture before _nextWinPos increments
-    const pos=_nextWinPos();
-    const win=document.createElement('div'); win.className='hud-window';
-    win.style.cssText='left:'+pos.x+'px;top:'+pos.y+'px;--i:'+idx;
-    const title=obj.title||(type.charAt(0).toUpperCase()+type.slice(1));
-    win.innerHTML='<div class="hud-win-head"><span class="hud-win-title">'+esc(title)+'</span>'+
-      '<button class="hud-win-close" title="Close">&times;</button></div>'+
-      '<div class="hud-win-body">'+inner+'</div>'+
-      '<div class="hud-win-resize"></div>';
-    win.querySelector('.hud-win-close').addEventListener('pointerdown',e=>{e.stopPropagation();_closeWindow(win);});
-    layer.appendChild(win);
-    _initWindow(win);
-  });
-}
-// ---- INTERACTIVE WIDGETS ----------------------------------------------------
-function _sendFromWidget(text){
-  text=(text||'').trim();
-  if(!text||state.busy) return;
-  if(log.querySelector('.j-empty')) clearLog();
-  send(text);
-}
-function _markUsed(wrap, activeEl){
-  wrap.classList.add('ix-used');
-  if(activeEl) activeEl.classList.add('ix-active');
-  wrap.querySelectorAll('button,input').forEach(el=>{ el.disabled=true; });
-}
-function buildInteractive(p){
-  const type=(p.panel||'').toLowerCase();
-  const wrap=document.createElement('div');
-  wrap.className='ix-panel ix-'+type;
-  const title=p.title?'<div class="ix-title">'+esc(p.title)+'</div>':'';
-  if(type==='actions'){
-    const btns=(p.buttons||p.items||[]);
-    wrap.innerHTML=title+'<div class="ix-actions-row">'+btns.map((b,i)=>{
-      const label=typeof b==='string'?b:(b.label||b.prompt||'');
-      return '<button class="ix-btn" data-i="'+i+'">'+esc(label)+'</button>';
-    }).join('')+'</div>';
-    wrap.querySelectorAll('.ix-btn').forEach(btn=>{ btn.onclick=()=>{
-      const b=btns[+btn.dataset.i];
-      const prompt=typeof b==='string'?b:(b.prompt||b.send||b.label||'');
-      _markUsed(wrap,btn); _sendFromWidget(prompt);
-    }; });
-  } else if(type==='choices'){
-    const opts=(p.options||p.items||[]); const pre=p.prompt||'';
-    wrap.innerHTML=title+'<div class="ix-choices-list">'+opts.map((o,i)=>{
-      const label=typeof o==='string'?o:(o.label||'');
-      return '<button class="ix-choice" data-i="'+i+'"><span class="ix-choice-mark">&#9656;</span>'+esc(label)+'</button>';
-    }).join('')+'</div>';
-    wrap.querySelectorAll('.ix-choice').forEach(btn=>{ btn.onclick=()=>{
-      const o=opts[+btn.dataset.i];
-      const val=typeof o==='string'?o:(o.label||'');
-      const prompt=(typeof o==='object'&&o.prompt)?o.prompt:(pre+val);
-      _markUsed(wrap,btn); _sendFromWidget(prompt);
-    }; });
-  } else if(type==='form'){
-    const fields=(p.fields||[]); const btnLabel=p.button||'Submit';
-    wrap.innerHTML=title+'<div class="ix-form-fields">'+fields.map((f,i)=>{
-      const name=f.name||('field'+i);
-      const lab=f.label?'<label class="ix-flabel">'+esc(f.label)+'</label>':'';
-      return '<div class="ix-field">'+lab+'<input class="ix-input" data-name="'+esc(name)+'" placeholder="'+esc(f.placeholder||'')+'" value="'+esc(f.value||'')+'"/></div>';
-    }).join('')+'</div><button class="ix-submit">'+esc(btnLabel)+'</button>';
-    const submit=()=>{
-      const vals={};
-      wrap.querySelectorAll('.ix-input').forEach(inp=>{ vals[inp.dataset.name]=inp.value.trim(); });
-      let out=p.submit||p.prompt||'';
-      if(out) out=out.replace(/\{(\w+)\}/g,(m,k)=>vals[k]!==undefined?vals[k]:m);
-      else out=Object.values(vals).filter(Boolean).join(' ');
-      _markUsed(wrap,wrap.querySelector('.ix-submit')); _sendFromWidget(out);
-    };
-    wrap.querySelector('.ix-submit').onclick=submit;
-    wrap.querySelectorAll('.ix-input').forEach(inp=>inp.addEventListener('keydown',e=>{
-      if(e.key==='Enter'){ e.preventDefault(); submit(); }
-    }));
-  } else if(type==='checklist'){
-    const items=(p.items||[]);
-    wrap.innerHTML=title+'<div class="ix-checklist-list">'+items.map(it=>{
-      const label=typeof it==='string'?it:(it.label||'');
-      const done=(typeof it==='object'&&it.done);
-      return '<label class="ix-check'+(done?' checked':'')+'"><input type="checkbox" '+(done?'checked':'')+'/><span class="ix-box"></span><span class="ix-clabel">'+esc(label)+'</span></label>';
-    }).join('')+'</div>';
-    wrap.querySelectorAll('.ix-check').forEach(c=>{
-      const cb=c.querySelector('input');
-      cb.addEventListener('change',()=>c.classList.toggle('checked',cb.checked));
-    });
-  } else { return null; }
-  return wrap;
-}
-function buildPanelInner(p){
-  if(!p||typeof p!=='object') return null;
-  const title='';
-  let inner='';
-  switch((p.panel||'').toLowerCase()){
-    case 'stats':
-      inner=(p.items||[]).map(it=>'<div class="vp-stat-row"><span class="l">'+esc(it.label||'')+
-        '</span><span class="v '+(it.accent||'')+'">'+esc(String(it.value??''))+'</span></div>').join('');
-      break;
-    case 'metric':
-      inner='<div class="vp-metric"><div class="big">'+esc(String(p.value??''))+
-        (p.unit?'<span class="unit">'+esc(p.unit)+'</span>':'')+'</div>'+
-        (p.trend?'<div class="trend '+esc(p.trend)+'">'+({up:'▲ RISING',down:'▼ FALLING',flat:'■ STABLE'}[p.trend]||'')+'</div>':'')+
-        (p.sub?'<div class="sub">'+esc(p.sub)+'</div>':'')+'</div>';
-      break;
-    case 'list':
-      inner='<ul class="vp-list">'+(p.items||[]).map(i=>'<li>'+esc(String(i))+'</li>').join('')+'</ul>';
-      break;
-    case 'table':
-      inner='<table class="vp-table"><thead><tr>'+(p.columns||[]).map(c=>'<th>'+esc(c)+'</th>').join('')+
-        '</tr></thead><tbody>'+(p.rows||[]).map(r=>'<tr>'+r.map(c=>'<td>'+esc(String(c))+'</td>').join('')+'</tr>').join('')+'</tbody></table>';
-      break;
-    case 'image':
-      inner='<div class="vp-image"><img src="'+esc(safeImgUrl(p.url||''))+'" alt="" onerror="this.style.display=\'none\'"/>'+
-        (p.caption?'<div class="cap">'+esc(p.caption)+'</div>':'')+'</div>';
-      break;
-    case 'web':
-      inner=(p.results||[]).map(r=>'<div class="vp-web-item">'+
-        '<a href="'+esc(r.url||'#')+'" target="_blank" rel="noopener">'+esc(r.title||r.url||'')+'</a>'+
-        (r.url?'<div class="url">'+esc(r.url)+'</div>':'')+
-        (r.snippet?'<div class="snip">'+esc(r.snippet)+'</div>':'')+'</div>').join('');
-      break;
-    case 'alert':
-      const lvl=(p.level||'info').toLowerCase();
-      return '<div class="vp-alert '+lvl+'"><div class="at">'+esc(p.title||lvl.toUpperCase())+
-        '</div><div class="ax">'+esc(p.text||'')+'</div></div>';
-    case 'progress':
-      inner=(p.items||[]).map(it=>{const pct=Math.max(0,Math.min(100,+it.pct||0));
-        return '<div class="vp-prog-row"><div class="pl"><span>'+esc(it.label||'')+'</span><span>'+pct+'%</span></div>'+
-        '<div class="vp-prog-bar"><div class="vp-prog-fill" style="width:'+pct+'%"></div></div></div>';}).join('');
-      break;
-    case 'map':
-      inner='<div class="vp-map"><div class="mgrid"></div><div class="crosshair"></div>'+
-        '<div class="mlabel">'+esc(p.label||((p.lat??'?')+', '+(p.lon??'?')))+'</div></div>';
-      break;
-    case 'bar':{ const vals=(p.values||[]).map(Number); const labs=p.labels||vals.map((_,i)=>String(i+1));
-      const maxV=Math.max(...vals,1); const col=p.color||'#f0a87a';
-      const W2=320,H2=160,padL=36,padR=10,padT=14,padB=22;
-      const plotW=W2-padL-padR, plotH=H2-padT-padB;
-      const bw=Math.max(10,Math.min(36,Math.floor(plotW/Math.max(vals.length,1)*0.6)));
-      const gap=Math.floor(plotW/Math.max(vals.length,1));
-      // grid lines
-      let grid='';
-      for(let g=0;g<=4;g++){
-        const gy=padT+plotH*(1-g/4);
-        const gv=(maxV*g/4);
-        grid+=`<line x1="${padL}" y1="${gy}" x2="${W2-padR}" y2="${gy}" stroke="#2a2235" stroke-width="1"/>`;
-        grid+=`<text x="${padL-4}" y="${gy+3}" text-anchor="end" font-size="8" fill="#6b5f7a">${gv%1===0?gv:gv.toFixed(1)}</text>`;
-      }
-      // gradient def
-      const gid='bg'+(_winCascade||0);
-      let bars=grid;
-      bars+=`<defs><linearGradient id="${gid}" x1="0" y1="0" x2="0" y2="1"><stop offset="0%" stop-color="${esc(col)}" stop-opacity="1"/><stop offset="100%" stop-color="${esc(col)}" stop-opacity="0.45"/></linearGradient></defs>`;
-      vals.forEach((v,i)=>{
-        const bh=Math.round((v/maxV)*plotH); const x=padL+i*gap+(gap-bw)/2; const y=padT+plotH-bh;
-        bars+=`<rect x="${x}" y="${y}" width="${bw}" height="${bh}" fill="url(#${gid})" rx="3" ry="3"/>`;
-        bars+=`<text x="${x+bw/2}" y="${H2-4}" text-anchor="middle" font-size="9" fill="#b0a6ba">${esc(String(labs[i]||''))}</text>`;
-        bars+=`<text x="${x+bw/2}" y="${y-4}" text-anchor="middle" font-size="8" font-weight="600" fill="${esc(col)}">${esc(String(v))}</text>`;
-      });
-      inner=`<svg viewBox="0 0 ${W2} ${H2}" style="width:100%;height:auto">${bars}</svg>`; break; }
-    case 'line':{ const ds=(p.datasets||[{values:p.values||[],label:'',color:'#f0a87a'}]);
-      const labs=p.labels||[];  const maxAll=Math.max(...ds.flatMap(d=>d.values||[]).map(Number),1);
-      const W2=320,H2=160,padL=36,padR=10,padT=14,padB=22;
-      const plotW=W2-padL-padR, plotH=H2-padT-padB;
-      let lines=''; const colors=['#f0a87a','#8ecf95','#e3a978','#c97fd4','#e5928f'];
-      // grid
-      for(let g=0;g<=4;g++){
-        const gy=padT+plotH*(1-g/4); const gv=(maxAll*g/4);
-        lines+=`<line x1="${padL}" y1="${gy}" x2="${W2-padR}" y2="${gy}" stroke="#2a2235" stroke-width="1"/>`;
-        lines+=`<text x="${padL-4}" y="${gy+3}" text-anchor="end" font-size="8" fill="#6b5f7a">${gv%1===0?gv:gv.toFixed(1)}</text>`;
-      }
-      ds.forEach((d,di)=>{ const vals=(d.values||[]).map(Number); const col=d.color||colors[di%colors.length];
-        if(!vals.length) return;
-        const pts=vals.map((v,i)=>{const x=padL+i*plotW/Math.max(vals.length-1,1); const y=padT+plotH*(1-v/maxAll); return `${x},${y}`;});
-        // area fill
-        const areaPts=[`${padL},${padT+plotH}`,...pts,`${padL+plotW},${padT+plotH}`].join(' ');
-        const aid='la'+(_winCascade||0)+di;
-        lines+=`<defs><linearGradient id="${aid}" x1="0" y1="0" x2="0" y2="1"><stop offset="0%" stop-color="${esc(col)}" stop-opacity="0.25"/><stop offset="100%" stop-color="${esc(col)}" stop-opacity="0.02"/></linearGradient></defs>`;
-        lines+=`<polygon points="${areaPts}" fill="url(#${aid})"/>`;
-        lines+=`<polyline points="${pts.join(' ')}" fill="none" stroke="${esc(col)}" stroke-width="2.5" stroke-linecap="round" stroke-linejoin="round"/>`;
-        pts.forEach((pt,i)=>{ const[x,y]=pt.split(',');
-          lines+=`<circle cx="${x}" cy="${y}" r="3.5" fill="#16111c" stroke="${esc(col)}" stroke-width="2"/>`; });
-        if(d.label){ const lastPt=pts[pts.length-1].split(',');
-          lines+=`<text x="${+lastPt[0]+6}" y="${+lastPt[1]+3}" font-size="9" font-weight="600" fill="${esc(col)}">${esc(d.label)}</text>`; }
-      });
-      labs.forEach((l,i)=>{ const x=padL+i*plotW/Math.max(labs.length-1,1);
-        lines+=`<text x="${x}" y="${H2-4}" text-anchor="middle" font-size="9" fill="#b0a6ba">${esc(String(l))}</text>`; });
-      inner=`<svg viewBox="0 0 ${W2} ${H2}" style="width:100%;height:auto">${lines}</svg>`; break; }
-    case 'pie':{ const vals=(p.values||[]).map(Number); const labs=p.labels||vals.map((_,i)=>String(i+1));
-      const total=vals.reduce((a,b)=>a+b,0)||1;
-      const colors=['#f0a87a','#8ecf95','#e3a978','#c97fd4','#e5928f','#b0a6ba','#7ec8e3','#d4a76a'];
-      const cx=100,cy=80,r=62,ri=32; let angle=-Math.PI/2; let slices=''; let legend='';
-      // shadow ring
-      slices+=`<circle cx="${cx+1}" cy="${cy+2}" r="${r+2}" fill="none" stroke="#0a0810" stroke-width="4" opacity="0.4"/>`;
-      vals.forEach((v,i)=>{ const sweep=2*Math.PI*(v/total); const col=colors[i%colors.length];
-        const mid=angle+sweep/2;
-        const x1=cx+r*Math.cos(angle),y1=cy+r*Math.sin(angle);
-        const x2=cx+r*Math.cos(angle+sweep),y2=cy+r*Math.sin(angle+sweep);
-        const xi1=cx+ri*Math.cos(angle),yi1=cy+ri*Math.sin(angle);
-        const xi2=cx+ri*Math.cos(angle+sweep),yi2=cy+ri*Math.sin(angle+sweep);
-        const lg=sweep>Math.PI?1:0;
-        // slight explode for large slices
-        const ex=sweep>0.3?2*Math.cos(mid):0, ey=sweep>0.3?2*Math.sin(mid):0;
-        slices+=`<path d="M${xi1+ex} ${yi1+ey} L${x1+ex} ${y1+ey} A${r} ${r} 0 ${lg} 1 ${x2+ex} ${y2+ey} L${xi2+ex} ${yi2+ey} A${ri} ${ri} 0 ${lg} 0 ${xi1+ex} ${yi1+ey}" fill="${col}" opacity="0.9" stroke="#16111c" stroke-width="1"/>`;
-        // percentage label inside slice
-        if(sweep>0.25){
-          const lr=(r+ri)/2, lx=cx+lr*Math.cos(mid)+ex, ly=cy+lr*Math.sin(mid)+ey;
-          const pct=Math.round(v/total*100);
-          slices+=`<text x="${lx}" y="${ly+3}" text-anchor="middle" font-size="9" font-weight="600" fill="#fff">${pct}%</text>`;
-        }
-        const pct=Math.round(v/total*100);
-        legend+=`<rect x="190" y="${8+i*18}" width="10" height="10" rx="2" fill="${col}"/>`;
-        legend+=`<text x="204" y="${17+i*18}" font-size="10" fill="#cdbbd8">${esc(String(labs[i]))} <tspan fill="#8a7e96">${pct}%</tspan></text>`;
-        angle+=sweep; });
-      // center label
-      slices+=`<circle cx="${cx}" cy="${cy}" r="${ri-4}" fill="#16111c" opacity="0.6"/>`;
-      inner=`<svg viewBox="0 0 320 165" style="width:100%;height:auto">${slices}${legend}</svg>`; break; }
-    case 'stocks':{
-      const inner=buildStocksCard(p);
-      if(!inner) return null;
-      return title+inner;
-    }
-    case 'crypto':{
-      const inner=buildCryptoCard(p);
-      if(!inner) return null;
-      return title+inner;
-    }
-    case 'weather':{
-      const inner=buildWeatherCard(p);
-      if(!inner) return null;
-      return title+inner;
-    }
-    case 'sports':{
-      const inner=buildSportsCard(p);
-      if(!inner) return null;
-      return title+inner;
-    }
-    case 'calendar':{
-      const inner=buildCalendarCard(p);
-      if(!inner) return null;
-      return title+inner;
-    }
-    default: return null;
-  }
-  return title+inner;
-}
-
-// ---- SPECIALTY WIDGETS (stocks, weather, crypto, sports, calendar) --------
-//
-// `show_widget` is the agent-facing tool. It emits an SSE `widget` event with
-// {type, title, data}; the frontend drops it into a draggable HUD window.
-// We share the renderer with the inline `hud` panels (panels also use
-// {panel: 'stocks', ...}) so the model can pick either channel.
-function _fmtNum(n, dp){
-  const x=Number(n); if(!isFinite(x)) return '—';
-  if(dp===undefined){
-    if(Math.abs(x)>=1000) return x.toLocaleString('en-US',{maximumFractionDigits:0});
-    return x.toLocaleString('en-US',{maximumFractionDigits:2});
-  }
-  return x.toLocaleString('en-US',{minimumFractionDigits:dp,maximumFractionDigits:dp});
-}
-// ============================================================================
-// SPECIALTY WIDGETS — stocks, crypto, weather, sports, calendar
-// ============================================================================
-//
-// `show_widget` is the agent-facing tool. It emits an SSE `widget` event with
-// {type, title, data}; the frontend drops it into a draggable HUD window.
-// We share the renderer with the inline `hud` panels (panels also use
-// {panel: 'stocks', ...}) so the model can pick either channel.
-//
-// The cards here are designed to look like small versions of the real apps:
-//   * stocks / crypto  → Robinhood × Bloomberg-terminal feel
-//   * weather          → Apple-Weather feel with condition-tinted header
-//   * sports           → ESPN scoreboard
-//   * calendar         → Google Calendar × Fantastical timeline
-
-function _fmtVol(n){
-  const x=Number(n); if(!isFinite(x)) return '—';
-  const a=Math.abs(x);
-  if(a>=1e12) return (x/1e12).toFixed(2)+'T';
-  if(a>=1e9)  return (x/1e9).toFixed(2)+'B';
-  if(a>=1e6)  return (x/1e6).toFixed(2)+'M';
-  if(a>=1e3)  return (x/1e3).toFixed(1)+'K';
-  return String(x);
-}
-function _fmtBig(n){ // for mkt cap, p/e, etc.
-  const x=Number(n); if(!isFinite(x)) return '—';
-  const a=Math.abs(x);
-  if(a>=1e12) return (x/1e12).toFixed(2)+'T';
-  if(a>=1e9)  return (x/1e9).toFixed(2)+'B';
-  if(a>=1e6)  return (x/1e6).toFixed(1)+'M';
-  return x.toLocaleString('en-US',{maximumFractionDigits:0});
-}
-function _fmtPct(n, dp){
-  const x=Number(n); if(!isFinite(x)) return '—';
-  return x.toFixed(dp===undefined?2:dp)+'%';
-}
-function _greetingColor(n){
-  // color by % change; thresholds tuned for a peach/rose palette
-  const x=Number(n);
-  if(!isFinite(x)) return 'var(--text-2)';
-  if(x>=1) return 'var(--ok)';
-  if(x<=-1) return 'var(--hot)';
-  return 'var(--text-2)';
-}
-function _marketState(now){
-  // Heuristic US-market state from local hour (server clock, no TZ awareness).
-  const d=new Date(now||Date.now());
-  const day=d.getDay(); if(day===0||day===6) return {open:false,label:'CLOSED · WKND'};
-  const h=d.getHours(), m=d.getMinutes();
-  const t=h*60+m;
-  if(t<4*60)        return {open:false,label:'CLOSED'};
-  if(t<9*60+30)     return {open:false,label:'PRE-MKT'};
-  if(t<16*60)       return {open:true, label:'● OPEN'};
-  if(t<20*60)       return {open:false,label:'AFTER-HRS'};
-  return {open:false,label:'CLOSED'};
-}
-
-// --- SVG chart primitives ---
-function _uid(p){ return (p||'id')+Math.random().toString(36).slice(2,8); }
-
-function _sparkSVG(vals, color, w, h){
-  // Compact gradient-filled line chart, like the existing 'line' panel but
-  // tighter and used as a hero accent for stocks/crypto.
-  const vs=(vals||[]).map(Number).filter(v=>isFinite(v));
-  if(vs.length<2) return '';
-  const W=w||120, H=h||34, padL=2, padR=2, padT=3, padB=3;
-  const min=Math.min(...vs), max=Math.max(...vs);
-  const span=Math.max(max-min, 1e-9);
-  const plotW=W-padL-padR, plotH=H-padT-padB;
-  const xFor=i=>padL+i*plotW/(vs.length-1);
-  const yFor=v=>padT+plotH-(v-min)/span*plotH;
-  const pts=vs.map((v,i)=>xFor(i)+','+yFor(v));
-  const area=[xFor(0)+','+(padT+plotH), ...pts, xFor(vs.length-1)+','+(padT+plotH)].join(' ');
-  const gid=_uid('spk');
-  const last=vs[vs.length-1], first=vs[0];
-  const up=last>=first;
-  const stroke=up?color:'#e5928f';
-  return '<svg viewBox="0 0 '+W+' '+H+'" class="vp-spark" preserveAspectRatio="none">'+
-    '<defs><linearGradient id="'+gid+'" x1="0" y1="0" x2="0" y2="1">'+
-    '<stop offset="0%" stop-color="'+stroke+'" stop-opacity=".35"/>'+
-    '<stop offset="100%" stop-color="'+stroke+'" stop-opacity="0"/></linearGradient></defs>'+
-    '<polygon points="'+area+'" fill="url(#'+gid+')"/>'+
-    '<polyline points="'+pts.join(' ')+'" fill="none" stroke="'+stroke+'" stroke-width="1.5" stroke-linecap="round" stroke-linejoin="round"/>'+
-    '<circle cx="'+xFor(vs.length-1)+'" cy="'+yFor(last)+'" r="2.4" fill="#16111c" stroke="'+stroke+'" stroke-width="1.5"/>'+
-    '</svg>';
-}
-
-function _areaChartSVG(vals, opts){
-  // Bigger chart: gridlines, area+line, current-price marker on the right.
-  // opts: {w, h, color, showAxis, padL, padR, padT, padB, gradient}
-  const vs=(vals||[]).map(Number).filter(v=>isFinite(v));
-  if(vs.length<2) return '';
-  const o=opts||{};
-  const W=o.w||480, H=o.h||160;
-  const padL=o.padL||36, padR=o.padR||52, padT=o.padT||10, padB=o.padB||18;
-  const stroke=o.color||'#f0a87a';
-  const min=Math.min(...vs), max=Math.max(...vs);
-  const span=Math.max(max-min, 1e-9);
-  const plotW=W-padL-padR, plotH=H-padT-padB;
-  const xFor=i=>padL+i*plotW/(vs.length-1);
-  const yFor=v=>padT+plotH-(v-min)/span*plotH;
-  const pts=vs.map((v,i)=>[xFor(i),yFor(v)]);
-  const area='M '+xFor(0)+' '+(padT+plotH)+' L '+pts.map(p=>p[0]+' '+p[1]).join(' L ')+' L '+xFor(vs.length-1)+' '+(padT+plotH)+' Z';
-  const line=pts.map((p,i)=>(i?'L':'M')+' '+p[0]+' '+p[1]).join(' ');
-  const gid=_uid('ar');
-  const last=vs[vs.length-1], first=vs[0];
-  const up=last>=first;
-  const lineStroke=up?stroke:'#e5928f';
-  // gridlines: 4 horizontal, plus min/max labels on the y-axis
-  const grid=[];
-  for(let g=0; g<=4; g++){
-    const y=padT+(g/4)*plotH;
-    const val=max-(g/4)*span;
-    grid.push('<line x1="'+padL+'" y1="'+y+'" x2="'+(W-padR)+'" y2="'+y+'" stroke="rgba(240,168,122,.08)" stroke-width="1" stroke-dasharray="'+(g===0||g===4?'0':'2 3')+'"/>');
-    if(o.showAxis!==false){
-      grid.push('<text x="'+(padL-6)+'" y="'+(y+3)+'" font-size="9" fill="#7d7388" text-anchor="end" font-family="inherit">'+_fmtNum(val, val<10?2:0)+'</text>');
-    }
-  }
-  // current-price marker on the right
-  const lastY=yFor(last);
-  const marker=o.gradient===false ? '' : (
-    '<line x1="'+xFor(vs.length-1)+'" y1="'+padT+'" x2="'+xFor(vs.length-1)+'" y2="'+(padT+plotH)+'" stroke="'+lineStroke+'" stroke-width="1" stroke-dasharray="2 2" opacity=".6"/>'+
-    '<rect x="'+(W-padR+2)+'" y="'+(lastY-9)+'" width="'+(padR-6)+'" height="18" rx="2" fill="'+lineStroke+'" opacity=".95"/>'+
-    '<text x="'+(W-padR/2-2)+'" y="'+(lastY+4)+'" font-size="10" fill="#16111c" text-anchor="middle" font-weight="700">'+_fmtNum(last,2)+'</text>'
-  );
-  return '<svg viewBox="0 0 '+W+' '+H+'" class="st-chart-svg" preserveAspectRatio="none">'+
-    '<defs><linearGradient id="'+gid+'" x1="0" y1="0" x2="0" y2="1">'+
-    '<stop offset="0%" stop-color="'+lineStroke+'" stop-opacity=".45"/>'+
-    '<stop offset="100%" stop-color="'+lineStroke+'" stop-opacity="0"/></linearGradient></defs>'+
-    grid.join('')+
-    '<path d="'+area+'" fill="url(#'+gid+')"/>'+
-    '<path d="'+line+'" fill="none" stroke="'+lineStroke+'" stroke-width="1.6" stroke-linecap="round" stroke-linejoin="round"/>'+
-    '<circle cx="'+xFor(vs.length-1)+'" cy="'+lastY+'" r="3" fill="#16111c" stroke="'+lineStroke+'" stroke-width="1.8"/>'+
-    marker+
-  '</svg>';
-}
-
-function _candleChartSVG(ohlc, opts){
-  // ohlc: array of {o,h,l,c}. Pure-SVG candlesticks.
-  const vs=(ohlc||[]).filter(c=>c&&isFinite(c.o)&&isFinite(c.h)&&isFinite(c.l)&&isFinite(c.c));
-  if(vs.length<2) return '';
-  const o=opts||{};
-  const W=o.w||480, H=o.h||160;
-  const padL=o.padL||36, padR=o.padR||12, padT=o.padT||8, padB=o.padB||12;
-  const min=Math.min(...vs.map(c=>c.l));
-  const max=Math.max(...vs.map(c=>c.h));
-  const span=Math.max(max-min, 1e-9);
-  const plotW=W-padL-padR, plotH=H-padT-padB;
-  const yFor=v=>padT+plotH-(v-min)/span*plotH;
-  const colW=plotW/vs.length;
-  const bodyW=Math.max(2, colW*0.62);
-  // gridlines
-  const grid=[];
-  for(let g=0; g<=4; g++){
-    const y=padT+(g/4)*plotH;
-    const val=max-(g/4)*span;
-    grid.push('<line x1="'+padL+'" y1="'+y+'" x2="'+(W-padR)+'" y2="'+y+'" stroke="rgba(240,168,122,.08)" stroke-width="1" stroke-dasharray="'+(g===0||g===4?'0':'2 3')+'"/>');
-    grid.push('<text x="'+(padL-6)+'" y="'+(y+3)+'" font-size="9" fill="#7d7388" text-anchor="end" font-family="inherit">'+_fmtNum(val, val<10?2:0)+'</text>');
-  }
-  const candles=vs.map((c,i)=>{
-    const cx=padL+i*colW+colW/2;
-    const up=c.c>=c.o;
-    const color=up?'#8ecf95':'#e5928f';
-    const yo=yFor(c.o), yc=yFor(c.c), yh=yFor(c.h), yl=yFor(c.l);
-    const top=Math.min(yo,yc), bot=Math.max(yo,yc);
-    return '<line x1="'+cx+'" y1="'+yh+'" x2="'+cx+'" y2="'+yl+'" stroke="'+color+'" stroke-width="1"/>'+
-      '<rect x="'+(cx-bodyW/2)+'" y="'+top+'" width="'+bodyW+'" height="'+Math.max(1,bot-top)+'" fill="'+color+'"/>';
-  }).join('');
-  return '<svg viewBox="0 0 '+W+' '+H+'" class="st-chart-svg" preserveAspectRatio="none">'+
-    grid.join('')+candles+
-  '</svg>';
-}
-
-function _hourlyTempSVG(hourly, opts){
-  // hourly: [{h: '1p'|'13', t: 72, icon?: 'sun'}]. Renders a smooth 24h temp
-  // curve with hour labels and a current-hour highlight band.
-  const hs=(hourly||[]).map(h=>({h:String(h.h||''), t:Number(h.t), icon:h.icon||''})).filter(h=>isFinite(h.t));
-  if(hs.length<2) return '';
-  const o=opts||{};
-  const W=o.w||480, H=o.h||92;
-  const padL=o.padL||10, padR=o.padR||10, padT=o.padT||16, padB=o.padB||22;
-  const ts=hs.map(h=>h.t);
-  const tmin=Math.min(...ts), tmax=Math.max(...ts);
-  const span=Math.max(tmax-tmin, 1);
-  const plotW=W-padL-padR, plotH=H-padT-padB;
-  const xFor=i=>padL+(i/(hs.length-1))*plotW;
-  const yFor=v=>padT+plotH-(v-tmin)/span*plotH;
-  // smooth path via Catmull-Rom → cubic Bezier
-  const pts=hs.map((h,i)=>[xFor(i),yFor(h.t)]);
-  let path='';
-  if(pts.length>=2){
-    path='M '+pts[0][0]+' '+pts[0][1];
-    for(let i=0; i<pts.length-1; i++){
-      const p0=pts[i-1]||pts[i], p1=pts[i], p2=pts[i+1], p3=pts[i+2]||p2;
-      const t=0.18;
-      const c1x=p1[0]+(p2[0]-p0[0])*t, c1y=p1[1]+(p2[1]-p0[1])*t;
-      const c2x=p2[0]-(p3[0]-p1[0])*t, c2y=p2[1]-(p3[1]-p1[1])*t;
-      path+=' C '+c1x+' '+c1y+', '+c2x+' '+c2y+', '+p2[0]+' '+p2[1];
-    }
-  }
-  const area=path+' L '+pts[pts.length-1][0]+' '+(padT+plotH)+' L '+pts[0][0]+' '+(padT+plotH)+' Z';
-  const gid=_uid('hr');
-  // current-hour band (first item)
-  const currentIdx=0;
-  const bx0=xFor(currentIdx)-plotW/(hs.length-1)/2, bx1=bx0+plotW/(hs.length-1);
-  // hour labels: show every 6th
-  const labels=hs.map((h,i)=>{
-    if(i!==0 && i!==hs.length-1 && i%6!==0) return '';
-    return '<text x="'+xFor(i)+'" y="'+(H-6)+'" font-size="9" fill="#b0a6ba" text-anchor="middle" font-family="inherit">'+esc(h.h)+'</text>';
-  }).join('');
-  // spot dots every 6
-  const dots=hs.map((h,i)=> i%6===0 || i===hs.length-1
-    ? '<circle cx="'+xFor(i)+'" cy="'+yFor(h.t)+'" r="2.4" fill="#16111c" stroke="#f0a87a" stroke-width="1.4"/>'
-    : '').join('');
-  return '<svg viewBox="0 0 '+W+' '+H+'" class="ww-hourly-svg" preserveAspectRatio="none">'+
-    '<defs><linearGradient id="'+gid+'" x1="0" y1="0" x2="0" y2="1">'+
-    '<stop offset="0%" stop-color="#f0a87a" stop-opacity=".35"/>'+
-    '<stop offset="100%" stop-color="#f0a87a" stop-opacity="0"/></linearGradient></defs>'+
-    '<rect x="'+bx0+'" y="'+padT+'" width="'+(bx1-bx0)+'" height="'+plotH+'" fill="rgba(240,168,122,.10)"/>'+
-    '<path d="'+area+'" fill="url(#'+gid+')"/>'+
-    '<path d="'+path+'" fill="none" stroke="#f0a87a" stroke-width="1.6" stroke-linecap="round" stroke-linejoin="round"/>'+
-    dots+labels+
-  '</svg>';
-}
-
-function _sunArcSVG(sunrise, sunset, now){
-  // sunrise/sunset: "HH:MM" strings. now: current "HH:MM" or null.
-  if(!sunrise||!sunset) return '';
-  const toMin=s=>{const p=s.split(':').map(Number); return p[0]*60+(p[1]||0);};
-  const sr=toMin(sunrise), ss=toMin(sunset);
-  const mid=(sr+ss)/2;
-  const total=ss-sr;
-  const W=240, H=58, padL=18, padR=18, baseline=H-10;
-  const ax0=padL, ax1=W-padR, ay=baseline;
-  const xFor=m=>ax0+((m-sr)/total)*(ax1-ax0);
-  const yFor=m=>{ const t=(m-sr)/total; return ay - Math.sin(t*Math.PI)*40; };
-  // arc + ground line
-  const sx0=xFor(sr), sy0=yFor(sr);
-  const sx1=xFor(ss), sy1=yFor(ss);
-  const mx=xFor(mid), my=yFor(mid);
-  const arc='M '+sx0+' '+sy0+' Q '+mx+' '+(my-12)+', '+sx1+' '+sy1;
-  const gid=_uid('sn');
-  // sun position from `now` (defaults to actual current time of day)
-  const nowMin = now ? toMin(now) : (()=>{const d=new Date(); return d.getHours()*60+d.getMinutes();})();
-  const sunFrac = Math.max(0, Math.min(1, (nowMin-sr)/total));
-  const sunX = ax0 + sunFrac*(ax1-ax0);
-  const sunY = ay - Math.sin(sunFrac*Math.PI)*40;
-  const sunOnArc = nowMin>=sr && nowMin<=ss;
-  const sun = sunOnArc
-    ? '<circle cx="'+sunX+'" cy="'+sunY+'" r="4.2" fill="#f0a87a" stroke="#16111c" stroke-width="1.4"/>'
-    : '<circle cx="'+sunOnArc?sunX:(nowMin<sr?sx0:sx1)+'" cy="'+(sunOnArc?sunY:ay-3)+'" r="3" fill="#5a4e69"/>';
-  return '<svg viewBox="0 0 '+W+' '+H+'" class="ww-sun-svg" preserveAspectRatio="xMidYMid meet">'+
-    '<defs><linearGradient id="'+gid+'" x1="0" y1="0" x2="1" y2="0">'+
-    '<stop offset="0%" stop-color="#e5928f" stop-opacity=".55"/>'+
-    '<stop offset="50%" stop-color="#f0a87a" stop-opacity=".85"/>'+
-    '<stop offset="100%" stop-color="#e6c073" stop-opacity=".55"/></linearGradient></defs>'+
-    '<line x1="'+ax0+'" y1="'+ay+'" x2="'+ax1+'" y2="'+ay+'" stroke="rgba(240,168,122,.18)" stroke-dasharray="2 3"/>'+
-    '<path d="'+arc+'" fill="none" stroke="url(#'+gid+')" stroke-width="1.6" stroke-linecap="round"/>'+
-    sun+
-    '<text x="'+sx0+'" y="'+(H-1)+'" font-size="9" fill="#b0a6ba" text-anchor="middle" font-family="inherit">'+esc(sunrise)+'</text>'+
-    '<text x="'+sx1+'" y="'+(H-1)+'" font-size="9" fill="#b0a6ba" text-anchor="middle" font-family="inherit">'+esc(sunset)+'</text>'+
-  '</svg>';
-}
-
-// ============================================================================
-// STOCKS / CRYPTO
-// ============================================================================
-//
-// A Robinhood × Bloomberg-terminal look. The card has:
-//   1. Hero row:  market status pill · exchange chip · symbol · name ·
-//                 price · colored change row
-//   2. Timeframe tab strip:  1D | 1W | 1M | 3M | 1Y | All   (CSS-only)
-//   3. Main chart:           area+line with gridlines + current-price marker,
-//                             or candlesticks if `ohlc` is provided
-//   4. Stats grid:           Open, High, Low, Volume, Mkt Cap, 52W Range
-//   5. Watchlist:            symbol · mini-spark · price · change%
-//   6. News strip (optional)
-
-function _stTimeframeTabs(active){
-  const tabs=['1D','1W','1M','3M','1Y','All'];
-  return '<div class="st-tabs">'+
-    tabs.map(t=>'<div class="st-tab'+(t===active?' st-tab-active':'')+'">'+t+'</div>').join('')+
-  '</div>';
-}
-
-function _stStatsGrid(p, isCrypto){
-  // Open/High/Low/Volume + Mkt Cap + 52W Range with mini position bar
-  const cells=[];
-  if(p.open!==undefined)  cells.push(['Open',  _fmtNum(p.open,2)]);
-  if(p.high!==undefined)  cells.push(['High',  _fmtNum(p.high,2)]);
-  if(p.low!==undefined)   cells.push(['Low',   _fmtNum(p.low,2)]);
-  if(p.volume!==undefined)cells.push([isCrypto?'24h Vol':'Volume', _fmtVol(p.volume)]);
-  if(p.market_cap!==undefined) cells.push(['Mkt Cap', _fmtBig(p.market_cap)]);
-  if(isCrypto && p.dominance!==undefined) cells.push(['Dominance', _fmtPct(p.dominance,1)]);
-  if(!isCrypto && p.pe!==undefined) cells.push(['P/E', _fmtNum(p.pe,2)]);
-  // 52W Range with mini bar
-  if(p.low_52w!==undefined && p.high_52w!==undefined){
-    const lo=Number(p.low_52w), hi=Number(p.high_52w), cur=Number(p.price);
-    const span=Math.max(hi-lo, 1e-9);
-    const pct=isFinite(cur)?Math.max(0,Math.min(100, ((cur-lo)/span)*100)):0;
-    const rangeHtml='<div class="st-stat"><div class="st-stat-l">52W Range</div>'+
-      '<div class="st-stat-r"><div class="st-range">'+
-      '<div class="st-range-track"></div>'+
-      '<div class="st-range-fill" style="width:'+pct.toFixed(1)+'%"></div>'+
-      '<div class="st-range-tick" style="left:'+pct.toFixed(1)+'%"></div>'+
-      '</div>'+
-      '<div class="st-range-vals"><span>'+_fmtNum(lo,2)+'</span><span>'+_fmtNum(hi,2)+'</span></div></div></div>';
-    cells.push(['__raw__', rangeHtml]);
-  }
-  const grid=cells.map(c=>{
-    if(c[0]==='__raw__') return c[1];
-    return '<div class="st-stat"><div class="st-stat-l">'+esc(c[0])+'</div><div class="st-stat-v">'+esc(c[1])+'</div></div>';
-  }).join('');
-  return '<div class="st-stats">'+grid+'</div>';
-}
-
-function _stWatchlist(items){
-  if(!items||!items.length) return '';
-  return '<div class="st-watch">'+
-    items.map(it=>{
-      const u=Number(it.change)>=0;
-      const spk=(it.chart&&it.chart.values)?_sparkSVG(it.chart.values, u?'#8ecf95':'#e5928f', 56, 18):'';
-      return '<div class="st-watch-row">'+
-        '<div class="st-watch-sym">'+esc(it.symbol||'')+'</div>'+
-        '<div class="st-watch-spk">'+spk+'</div>'+
-        '<div class="st-watch-name">'+esc(it.name||'')+'</div>'+
-        '<div class="st-watch-price">'+_fmtNum(it.price,2)+'</div>'+
-        '<div class="st-watch-chg '+(u?'ok':'hot')+'">'+(u?'+':'')+_fmtNum(it.change_pct,2)+'%</div>'+
-      '</div>';
-    }).join('')+
-  '</div>';
-}
-
-function _stNews(news){
-  if(!news||!news.length) return '';
-  return '<div class="st-news">'+
-    news.map(n=>'<div class="st-news-row">'+
-      '<div class="st-news-dot"></div>'+
-      '<div class="st-news-body">'+
-        '<div class="st-news-title">'+esc(n.title||'')+'</div>'+
-        '<div class="st-news-meta"><span>'+esc(n.source||'')+'</span>'+(n.time?'<span class="st-news-sep">·</span><span>'+esc(n.time)+'</span>':'')+'</div>'+
-      '</div>'+
-    '</div>').join('')+
-  '</div>';
-}
-
-function buildStocksCard(p){
-  // p: {title, symbol, name, price, change, change_pct, exchange, market_state,
-  //     open, high, low, volume, market_cap, pe, low_52w, high_52w,
-  //     chart: {labels, values, timeframe}, ohlc: [...], items: [...], news: [...]}
-  const items=(p.items||[]);
-  const hasTopLevel=(p.price!==undefined||p.change!==undefined||p.change_pct!==undefined||p.symbol);
-  if(!items.length && !p.chart && !p.ohlc && !hasTopLevel) return null;
-
-  // hero
-  const sym=(p.symbol||(items[0]&&items[0].symbol)||'').toUpperCase();
-  const name=p.name||(items[0]&&items[0].name)||'';
-  const price=(p.price!==undefined)?p.price:(items[0]&&items[0].price);
-  const chg=(p.change!==undefined)?p.change:(items[0]&&items[0].change);
-  const chgPct=(p.change_pct!==undefined)?p.change_pct:(items[0]&&items[0].change_pct);
-  const up=Number(chg)>=0;
-  const arrow=up?'\u25B2':'\u25BC';
-  const chgColorClass = up?'ok':(Number(chg)<0?'hot':'flat');
-
-  const ms = p.market_state || _marketState();
-  const msClass = ms.open ? 'st-ms-open' : 'st-ms-closed';
-  const ex = p.exchange || (sym.endsWith('-USD')?'CRYPTO':(sym.length<=4?'NYSE':'NASDAQ'));
-
-  // chart
-  const tf = (p.chart&&p.chart.timeframe) || '1D';
-  const chart = p.ohlc
-    ? _candleChartSVG(p.ohlc, {w:480,h:160,padL:36,padR:12})
-    : (p.chart&&p.chart.values ? _areaChartSVG(p.chart.values, {w:480,h:160,color:'#f0a87a',padL:36,padR:52}) : '');
-
-  // watchlist — strip the first item if it duplicates the hero
-  const rest = items.length>1 ? items.slice(1) : [];
-
-  return '<div class="sw-card sw-stocks">'+
-    '<div class="st-head">'+
-      '<div class="st-head-l">'+
-        '<div class="st-sym">'+esc(sym)+'</div>'+
-        '<div class="st-name">'+esc(name)+'</div>'+
-        '<div class="st-chips">'+
-          '<span class="st-chip st-ex">'+esc(ex)+'</span>'+
-          '<span class="st-chip '+msClass+'">'+esc(ms.label)+'</span>'+
-        '</div>'+
-      '</div>'+
-      '<div class="st-head-r">'+
-        '<div class="st-price">'+_fmtNum(price,2)+'</div>'+
-        '<div class="st-chg '+chgColorClass+'">'+arrow+' '+(up?'+':'')+_fmtNum(chg,2)+' <span class="st-chg-pct">'+(up?'+':'')+_fmtNum(chgPct,2)+'%</span></div>'+
-      '</div>'+
-    '</div>'+
-    (chart ? ('<div class="st-chart">'+_stTimeframeTabs(tf)+chart+'</div>') : '')+
-    _stStatsGrid(p, false)+
-    _stWatchlist(rest)+
-    _stNews(p.news)+
-  '</div>';
-}
-
-function buildCryptoCard(p){
-  // Mirror stocks with crypto labels. Reuses everything via the same code path
-  // by flipping isCrypto=true for the stats grid and the exchange chip.
-  const items=(p.items||[]);
-  const hasTopLevel=(p.price!==undefined||p.change!==undefined||p.change_pct!==undefined||p.symbol);
-  if(!items.length && !p.chart && !p.ohlc && !hasTopLevel) return null;
-
-  const sym=(p.symbol||(items[0]&&items[0].symbol)||'').toUpperCase();
-  const name=p.name||(items[0]&&items[0].name)||'';
-  const price=(p.price!==undefined)?p.price:(items[0]&&items[0].price);
-  const chg=(p.change!==undefined)?p.change:(items[0]&&items[0].change);
-  const chgPct=(p.change_pct!==undefined)?p.change_pct:(items[0]&&items[0].change_pct);
-  const up=Number(chg)>=0;
-  const arrow=up?'\u25B2':'\u25BC';
-  const chgColorClass = up?'ok':(Number(chg)<0?'hot':'flat');
-
-  const tf = (p.chart&&p.chart.timeframe) || '24H';
-  const chart = p.ohlc
-    ? _candleChartSVG(p.ohlc, {w:480,h:160,padL:36,padR:12})
-    : (p.chart&&p.chart.values ? _areaChartSVG(p.chart.values, {w:480,h:160,color:'#f0a87a',padL:36,padR:52}) : '');
-  const rest = items.length>1 ? items.slice(1) : [];
-  const ex = p.exchange || (sym.endsWith('-USD')?'GLOBAL':(sym.length<=4?'CEX':'DEX'));
-
-  return '<div class="sw-card sw-stocks sw-crypto">'+
-    '<div class="st-head">'+
-      '<div class="st-head-l">'+
-        '<div class="st-sym">'+esc(sym)+'</div>'+
-        '<div class="st-name">'+esc(name)+'</div>'+
-        '<div class="st-chips">'+
-          '<span class="st-chip st-ex">'+esc(ex)+'</span>'+
-          '<span class="st-chip st-ms-open">● 24H</span>'+
-        '</div>'+
-      '</div>'+
-      '<div class="st-head-r">'+
-        '<div class="st-price">'+_fmtNum(price,2)+'</div>'+
-        '<div class="st-chg '+chgColorClass+'">'+arrow+' '+(up?'+':'')+_fmtNum(chg,2)+' <span class="st-chg-pct">'+(up?'+':'')+_fmtNum(chgPct,2)+'%</span></div>'+
-      '</div>'+
-    '</div>'+
-    (chart ? ('<div class="st-chart">'+_stTimeframeTabs(tf)+chart+'</div>') : '')+
-    _stStatsGrid(p, true)+
-    _stWatchlist(rest)+
-  '</div>';
-}
-
-// ============================================================================
-// WEATHER
-// ============================================================================
-//
-// Apple-Weather feel: condition-tinted header gradient, big temp, 24h hourly
-// curve, 5-day forecast with hi/lo bars + precip, sunrise/sunset arc, 4-up
-// wind/humidity/UV/pressure grid.
-
-function _wxIcon(s){
-  const m={
-    'sunny':'\u2600','clear':'\u2600',
-    'partly':'\u26C5','partly cloudy':'\u26C5','cloudy':'\u2601','overcast':'\u2601',
-    'rain':'\u2602','rainy':'\u2602','showers':'\u2602','drizzle':'\u2602',
-    'thunder':'\u26C8','thunderstorm':'\u26C8',
-    'snow':'\u2744','snowy':'\u2744','sleet':'\u2745',
-    'fog':'\u2601','mist':'\u2601','haze':'\u2601',
-    'wind':'\u2638','windy':'\u2638',
-    'night':'\u263E','clear night':'\u263E',
-    'hot':'\u2600','cold':'\u2744'
-  };
-  return m[(s||'').toLowerCase()]||'\u2601';
-}
-function _wxToneClass(s){
-  const k=(s||'').toLowerCase();
-  if(k.includes('thunder')||k.includes('rain')||k.includes('shower')||k.includes('drizzle')) return 'ww-tone-rain';
-  if(k.includes('snow')||k.includes('sleet')) return 'ww-tone-snow';
-  if(k.includes('fog')||k.includes('mist')||k.includes('haze')||k.includes('overcast')) return 'ww-tone-fog';
-  if(k.includes('night')||k.includes('clear')&&k.includes('night')) return 'ww-tone-night';
-  if(k.includes('cloud')||k.includes('partly')) return 'ww-tone-cloud';
-  return 'ww-tone-day';
-}
-
-function buildWeatherCard(p){
-  // p: {title, location, updated, current:{temp, condition, icon, feels, humidity, wind, uv, pressure, visibility},
-  //     hourly: [{h, t, icon}], forecast: [{day, high, low, icon, condition, precip}],
-  //     sunrise, sunset}
-  const cur=p.current||{};
-  const fc=p.forecast||[];
-  const hourly=p.hourly||[];
-  const tone=_wxToneClass(cur.icon||cur.condition||'sunny');
-  const tempStr = cur.temp!==undefined ? Math.round(Number(cur.temp)) : '—';
-  const iconStr = _wxIcon(cur.icon||cur.condition||'sunny');
-  const hl=fc.length?{hi:Math.max(...fc.map(d=>Number(d.high||d.hi||0))), lo:Math.min(...fc.map(d=>Number(d.low||d.lo||0)))}:{hi:0,lo:0};
-  // meta grid (humidity, wind, uv, pressure, visibility, feels)
-  const meta=[];
-  if(cur.humidity!==undefined)    meta.push(['Humidity',   cur.humidity+'%']);
-  if(cur.wind!==undefined)        meta.push(['Wind',       typeof cur.wind==='number'?cur.wind+' mph':String(cur.wind)]);
-  if(cur.feels!==undefined)       meta.push(['Feels Like', Math.round(Number(cur.feels))+'°']);
-  if(cur.uv!==undefined)          meta.push(['UV Index',   String(cur.uv)]);
-  if(cur.pressure!==undefined)    meta.push(['Pressure',   String(cur.pressure)]);
-  if(cur.visibility!==undefined)  meta.push(['Visibility', typeof cur.visibility==='number'?cur.visibility+' mi':String(cur.visibility)]);
-  // forecast with hi/lo bars
-  const fcHtml = fc.length ? (
-    '<div class="ww-fc">'+
-      fc.map(d=>{
-        const hi=Number(d.high??d.hi), lo=Number(d.low??d.lo);
-        // bar position within the day's overall hi/lo range
-        const dayMin=Math.min(lo, hl.lo);
-        const dayMax=Math.max(hi, hl.hi);
-        const span=Math.max(dayMax-dayMin, 1e-9);
-        const a=((lo-dayMin)/span)*100, b=((hi-dayMin)/span)*100;
-        return '<div class="ww-fcday">'+
-          '<div class="ww-fcd">'+esc((d.day||'').slice(0,3))+'</div>'+
-          '<div class="ww-fci">'+_wxIcon(d.icon||d.condition)+'</div>'+
-          '<div class="ww-fch">'+Math.round(hi)+'°</div>'+
-          '<div class="ww-fcbar"><div class="ww-fcbar-fill" style="left:'+a.toFixed(1)+'%;width:'+(b-a).toFixed(1)+'%"></div></div>'+
-          '<div class="ww-fcl">'+Math.round(lo)+'°</div>'+
-          (d.precip!==undefined?'<div class="ww-fcp">'+Math.round(Number(d.precip))+'%</div>':'')+
-        '</div>';
-      }).join('')+
-    '</div>'
-  ) : '';
-  const hourlySvg = hourly.length ? _hourlyTempSVG(hourly) : '';
-  const sunSvg = _sunArcSVG(p.sunrise, p.sunset, p.now);
-
-  return '<div class="sw-card sw-weather '+tone+'">'+
-    '<div class="ww-hero">'+
-      '<div class="ww-hero-l">'+
-        '<div class="ww-loc">'+esc(p.location||p.title||'Current Location')+'</div>'+
-        (p.updated?'<div class="ww-upd">Updated '+esc(p.updated)+'</div>':'')+
-        '<div class="ww-temp">'+tempStr+'<span class="ww-temp-u">°</span></div>'+
-        '<div class="ww-cond">'+esc(cur.condition||'')+'</div>'+
-        (fc.length?'<div class="ww-hl"><span>H '+Math.round(hl.hi)+'°</span><span class="ww-hl-sep">·</span><span>L '+Math.round(hl.lo)+'°</span></div>':'')+
-      '</div>'+
-      '<div class="ww-ic">'+iconStr+'</div>'+
-    '</div>'+
-    (hourlySvg?'<div class="ww-hourly">'+hourlySvg+'</div>':'')+
-    (meta.length?'<div class="ww-meta">'+meta.map(([l,v])=>
-      '<div class="ww-metacell"><div class="ww-metal">'+esc(l)+'</div><div class="ww-metav">'+esc(String(v))+'</div></div>'
-    ).join('')+'</div>':'')+
-    fcHtml+
-    (sunSvg?'<div class="ww-sun">'+sunSvg+'</div>':'')+
-  '</div>';
-}
-
-// ============================================================================
-// SPORTS
-// ============================================================================
-//
-// ESPN scoreboard: league chip, status pill with pulsing dot, two team rows
-// with logo-block + record + big score, winner accent-tinted.
-
-function _sxInitials(name){
-  return (name||'').split(/\s+/).filter(Boolean).slice(0,2).map(w=>w[0].toUpperCase()).join('')||'?';
-}
-function _sxTint(name){
-  // Deterministic hue from team name, 0-360
-  let h=0; for(let i=0; i<name.length; i++) h=(h*31+name.charCodeAt(i))%360;
-  return 'hsl('+h+',55%,52%)';
-}
-
-function buildSportsCard(p){
-  // p: {title, league, games: [{home, away, home_score, away_score, status, time, note, home_record, away_record, home_color, away_color}]}
-  const games=p.games||p.items||[];
-  if(!games.length) return null;
-  const league=p.league||'';
-  return '<div class="sw-card sw-sports">'+
-    (league?'<div class="sx-league">'+esc(league)+'</div>':'')+
-    games.map(g=>{
-      const hs=Number(g.home_score), as=Number(g.away_score);
-      const hasScore=isFinite(hs)&&isFinite(as);
-      const homeWin=hasScore&&hs>as, awayWin=hasScore&&as>hs;
-      const status=(g.status||'').toLowerCase();
-      const live=status==='live'||status==='in progress'||status==='in_progress';
-      const final=status==='final'||status==='finished';
-      const scheduled=status==='scheduled'||status==='pre'||(!hasScore&&!live&&!final);
-      const homeCol=g.home_color||_sxTint(g.home||'H');
-      const awayCol=g.away_color||_sxTint(g.away||'A');
-      return '<div class="sx-row">'+
-        '<div class="sx-status-row">'+
-          (live?'<span class="sx-dot"></span><span class="sx-status-lbl sx-live">LIVE</span>':'')+
-          (final?'<span class="sx-status-lbl sx-final">FINAL</span>':'')+
-          (scheduled?'<span class="sx-status-lbl sx-sched">'+esc(g.status||g.time||'SCHEDULED')+'</span>':'')+
-          (g.time&&hasScore?'<span class="sx-time">'+esc(g.time)+'</span>':'')+
-        '</div>'+
-        '<div class="sx-game">'+
-          '<div class="sx-team '+(homeWin?' sx-win':'')+'">'+
-            '<div class="sx-logo" style="background:'+esc(homeCol)+'22;border-color:'+esc(homeCol)+'">'+esc(_sxInitials(g.home))+'</div>'+
-            '<div class="sx-team-info">'+
-              '<div class="sx-name">'+esc(g.home||'')+'</div>'+
-              (g.home_record?'<div class="sx-rec">'+esc(g.home_record)+'</div>':'')+
-            '</div>'+
-            (hasScore?'<div class="sx-score '+(homeWin?' sx-score-win':'')+'">'+hs+'</div>':'')+
-          '</div>'+
-          '<div class="sx-team '+(awayWin?' sx-win':'')+'">'+
-            '<div class="sx-logo" style="background:'+esc(awayCol)+'22;border-color:'+esc(awayCol)+'">'+esc(_sxInitials(g.away))+'</div>'+
-            '<div class="sx-team-info">'+
-              '<div class="sx-name">'+esc(g.away||'')+'</div>'+
-              (g.away_record?'<div class="sx-rec">'+esc(g.away_record)+'</div>':'')+
-            '</div>'+
-            (hasScore?'<div class="sx-score '+(awayWin?' sx-score-win':'')+'">'+as+'</div>':'')+
-          '</div>'+
-        '</div>'+
-        (g.note?'<div class="sx-note">'+esc(g.note)+'</div>':'')+
-      '</div>';
-    }).join('')+
-  '</div>';
-}
-
-// ============================================================================
-// CALENDAR
-// ============================================================================
-//
-// Google-Calendar × Fantastical timeline: date header, all-day events as
-// pill rows, hourly gutter on the left, color-coded events, current-time
-// red horizontal line.
-
-function _cxToMin(s){
-  if(!s) return null;
-  const m=String(s).match(/^(\d{1,2})(?::(\d{2}))?\s*(am|pm)?$/i);
-  if(!m) return null;
-  let h=parseInt(m[1],10), mm=parseInt(m[2]||'0',10);
-  const ap=(m[3]||'').toLowerCase();
-  if(ap==='pm'&&h<12) h+=12;
-  if(ap==='am'&&h===12) h=0;
-  return h*60+mm;
-}
-function _cxFormatHour(h){
-  const ap=h<12?'a':'p';
-  const v=h%12===0?12:h%12;
-  return v+ap;
-}
-
-function buildCalendarCard(p){
-  // p: {title, date, day_name, now: 'HH:MM', events: [{start:'9:00', end:'10:30', title, location, note, color, all_day}]}
-  const events=p.events||p.items||[];
-  if(!events.length) return null;
-  const allDay = events.filter(e=>e.all_day);
-  const timed  = events.filter(e=>!e.all_day);
-  // collect hour gutter bounds
-  const startMins = timed.map(e=>_cxToMin(e.start)).filter(v=>v!==null);
-  const endMins   = timed.map(e=>_cxToMin(e.end||e.start)).filter(v=>v!==null);
-  let hourStart = startMins.length ? Math.floor(Math.min(...startMins)/60) : 8;
-  let hourEnd   = endMins.length   ? Math.ceil(Math.max(...endMins)/60)   : 18;
-  hourStart = Math.max(0, Math.min(23, hourStart-1));
-  hourEnd   = Math.max(hourStart+4, Math.min(24, hourEnd+1));
-  const spanMins = (hourEnd-hourStart)*60;
-  const nowMin = _cxToMin(p.now);
-  const nowPct = (nowMin!==null) ? ((nowMin-hourStart*60)/spanMins)*100 : null;
-
-  // all-day pills
-  const allDayHtml = allDay.length
-    ? '<div class="cx-allday">'+allDay.map(e=>{
-        const color=e.color||'#f0a87a';
-        return '<div class="cx-allday-pill" style="--cx-color:'+esc(color)+'">'+esc(e.title||'')+'</div>';
-      }).join('')+'</div>'
-    : '';
-  // timeline
-  const hourLabels=[];
-  for(let h=hourStart; h<=hourEnd; h++){
-    hourLabels.push('<div class="cx-hour"><div class="cx-hour-lbl">'+_cxFormatHour(h)+'</div><div class="cx-hour-line"></div></div>');
-  }
-  const eventsHtml = timed.map(e=>{
-    const s=_cxToMin(e.start);
-    let en=_cxToMin(e.end||e.start);
-    if(en===null||en<=s) en=s+30;
-    const top=((s-hourStart*60)/spanMins)*100;
-    const height=Math.max(4, ((en-s)/spanMins)*100);
-    const color=e.color||'#f0a87a';
-    return '<div class="cx-ev" style="top:'+top.toFixed(2)+'%;height:'+height.toFixed(2)+'%;--cx-color:'+esc(color)+'">'+
-      '<div class="cx-ev-bar"></div>'+
-      '<div class="cx-ev-body">'+
-        '<div class="cx-ev-time">'+esc((e.start||'')+(e.end?' – '+e.end:''))+'</div>'+
-        '<div class="cx-ev-title">'+esc(e.title||'')+'</div>'+
-        (e.location?'<div class="cx-ev-loc">'+esc(e.location)+'</div>':'')+
-      '</div>'+
-    '</div>';
-  }).join('');
-
-  return '<div class="sw-card sw-cal">'+
-    (p.date||p.day_name?'<div class="cx-date">'+esc(p.day_name||'')+(p.date?'<span class="cx-date-num">'+esc(p.date)+'</span>':'')+'</div>':'')+
-    allDayHtml+
-    '<div class="cx-timeline">'+
-      '<div class="cx-hours">'+hourLabels.join('')+'</div>'+
-      '<div class="cx-track">'+eventsHtml+(nowPct!==null?'<div class="cx-now" style="top:'+nowPct.toFixed(2)+'%"><div class="cx-now-dot"></div><div class="cx-now-line"></div></div>':'')+'</div>'+
-    '</div>'+
-  '</div>';
-}
-
-// Orchestrator: turn a `show_widget` SSE event into a draggable HUD window.
-function renderWidget(d){
-  const type=(d.type||'').toLowerCase();
-  const title=d.title||((type||'').charAt(0).toUpperCase()+(type||'').slice(1));
-  const data=d.data||{};
-  // Build a synthetic panel payload so buildPanelInner does the work.
-  const p={panel:type, title:title, ...data};
-  const inner=buildPanelInner(p);
-  const layer=$('#windowLayer');
-  if(!inner){ return; }
-  const idx=_winCascade;
-  const pos=_nextWinPos();
-  const win=document.createElement('div'); win.className='hud-window sw-window sw-'+type;
-  win.style.cssText='left:'+pos.x+'px;top:'+pos.y+'px;--i:'+idx;
-  win.innerHTML='<div class="hud-win-head"><span class="hud-win-title">'+esc(title)+'</span>'+
-    '<button class="hud-win-close" title="Close">&times;</button></div>'+
-    '<div class="hud-win-body sw-body">'+inner+'</div>'+
-    '<div class="hud-win-resize"></div>';
-  win.querySelector('.hud-win-close').addEventListener('pointerdown',e=>{e.stopPropagation();_closeWindow(win);});
-  layer.appendChild(win);
-  _initWindow(win);
-}
-
-// ---- FLOATING HUD WINDOWS ----------------------------------------------------
-let _winCascade = 0;
-function _nextWinPos(){
-  const layer=$('#windowLayer');
-  const lw=layer.clientWidth, lh=layer.clientHeight;
-  const cols=Math.max(1, Math.floor((lw-40)/280));
-  const rows=Math.max(1, Math.floor((lh-40)/240));
-  const col=_winCascade%cols, row=Math.floor(_winCascade/cols)%rows;
-  const cellW=(lw-40)/cols, cellH=(lh-40)/rows;
-  const x=20+col*cellW+20, y=20+row*cellH+20;
-  _winCascade++;
-  return {x: Math.min(x, lw-260), y: Math.min(y, lh-200)};
-}
-// One shared pointer manager drives every window's drag + resize, so windows
-// don't each leak a set of document-level listeners. Pointer events unify
-// mouse and touch in a single path.
-let _drag=null; // {win, mode:'move'|'resize', sx, sy, ox, oy, ow, oh}
-function _initWindow(win){
-  const head=win.querySelector('.hud-win-head');
-  if(head) head.addEventListener('pointerdown',e=>{
-    if(e.target.classList.contains('hud-win-close')) return;
-    _drag={win, mode:'move', sx:e.clientX, sy:e.clientY,
-      ox:parseInt(win.style.left)||0, oy:parseInt(win.style.top)||0};
-    win.classList.add('dragging'); e.preventDefault();
-  });
-  const handle=win.querySelector('.hud-win-resize');
-  if(handle) handle.addEventListener('pointerdown',e=>{
-    _drag={win, mode:'resize', sx:e.clientX, sy:e.clientY,
-      ow:win.offsetWidth, oh:win.offsetHeight};
-    win.classList.add('resizing'); e.preventDefault(); e.stopPropagation();
-  });
-}
-document.addEventListener('pointermove',e=>{
-  if(!_drag) return;
-  const dx=e.clientX-_drag.sx, dy=e.clientY-_drag.sy;
-  if(_drag.mode==='move'){
-    _drag.win.style.left=(_drag.ox+dx)+'px';
-    _drag.win.style.top=(_drag.oy+dy)+'px';
-  } else {
-    _drag.win.style.width=Math.max(220,_drag.ow+dx)+'px';
-    _drag.win.style.height=Math.max(100,_drag.oh+dy)+'px';
-  }
-});
-document.addEventListener('pointerup',()=>{
-  if(!_drag) return;
-  _drag.win.classList.remove('dragging','resizing');
-  _drag=null;
-});
-function _closeWindow(win){
-  win.style.display='none';
-  state.closedWindows.push(win);
-  _updateRestorePill();
-}
-function _restoreWindow(win){
-  win.style.display='';
-  state.closedWindows=state.closedWindows.filter(w=>w!==win);
-  // Re-trigger entrance animation
-  win.style.animation='none'; win.offsetHeight; win.style.animation='';
-  _updateRestorePill();
-}
-function _updateRestorePill(){
-  const pill=$('#restorePill');
-  const dd=$('#restoreDropdown');
-  if(!pill) return;
-  if(state.closedWindows.length===0){
-    pill.style.display='none';
-    pill.classList.remove('open');
-    return;
-  }
-  pill.style.display='';
-  pill.querySelector('.restore-pill-count').textContent=state.closedWindows.length;
-  dd.innerHTML=state.closedWindows.map((w,i)=>{
-    const t=w.querySelector('.hud-win-title');
-    const label=t?t.textContent:('Panel '+(i+1));
-    return '<div class="restore-item" data-ri="'+i+'">↩ '+esc(label)+'</div>';
-  }).join('');
-  dd.querySelectorAll('.restore-item').forEach(el=>{
-    el.onclick=()=>{ const idx=+el.dataset.ri; _restoreWindow(state.closedWindows[idx]); };
-  });
-}
-$('#restorePill').addEventListener('click',e=>{
-  if(e.target.closest('.restore-item')) return;
-  e.currentTarget.classList.toggle('open');
-});
-// Close dropdown when clicking outside
-document.addEventListener('pointerdown',e=>{
-  const pill=$('#restorePill');
-  if(pill && !pill.contains(e.target)) pill.classList.remove('open');
-});
-function clearViewport(){
-  state.renderedPanels.clear();
-  state.closedWindows=[];
-  _winCascade=0;
-  const layer=$('#windowLayer');
-  if(layer) layer.innerHTML='';
-  _updateRestorePill();
-}
-
-// bring window to front on interaction
-$('#windowLayer').addEventListener('pointerdown',e=>{
-  const win=e.target.closest('.hud-window');
-  if(win && !e.target.classList.contains('hud-win-close')){
-    // move to end of DOM = top of stack
-    e.currentTarget.appendChild(win);
-  }
-});
-
-// ---- EMPTY STATE ------------------------------------------------------------
-const QUICK = [
-  {icon:'🔍', title:'Search the web',  sub:'Find and summarise anything online', prompt:'Search the web for '},
-  {icon:'🖥️', title:'Read my screen',  sub:'Summarise what\'s in my browser tab', prompt:'Read my screen and summarise what you see'},
-  {icon:'📊', title:'Show me stats',   sub:'Render live data as floating panels',  prompt:'Show me a status panel of my system'},
-  {icon:'📈', title:'Draw a chart',    sub:'Bar, line, or pie - visualise data',   prompt:'Show me a bar chart comparing '},
-  {icon:'📝', title:'Take a note',     sub:'Remember something for later',        prompt:'Take a note: '},
-  {icon:'⏰', title:'Set a reminder',  sub:'Add something to my reminder list',   prompt:'Add a reminder: '},
-  {icon:'📂', title:'Browse files',    sub:'List or read files on your machine',  prompt:'List files in my current directory'},
-  {icon:'🎛️', title:'Interactive panel', sub:'Buttons & forms I can click',       prompt:'Show me an interactive panel with a few action buttons I can click'},
-];
-function showEmpty() {
-  clearLog();
-  const wrap=document.createElement('div'); wrap.className='j-empty';
-   wrap.innerHTML='<div class="j-empty-title">Select a chat or type a message</div><div class="quick-cards">'+
-    QUICK.map((q,i)=>`<div class="qcard" style="--i:${i}" data-prompt="${esc(q.prompt)}"><span class="qcard-icon">${q.icon}</span>`+
-      `<span class="qcard-title">${esc(q.title)}</span><span class="qcard-sub">${esc(q.sub)}</span></div>`).join('')+'</div>';
-  log.appendChild(wrap);
-  wrap.querySelectorAll('.qcard').forEach(c=>{ c.onclick=()=>{ input.value=c.dataset.prompt; autoGrow(); input.focus(); }; });
-}
-
-// ---- RENDERING --------------------------------------------------------------
-let _userMsgIdx=0;
-const MSG_ACTIONS_HTML='<button class="msg-act-btn" data-act="resend" title="Resend">&#8635; resend</button><button class="msg-act-btn" data-act="edit" title="Edit">&#9998; edit</button><button class="msg-act-btn del-btn" data-act="delete" title="Delete">&#10005; delete</button>';
-function wireMsgActions(row, idx, text){
-  row.querySelector('[data-act="resend"]').onclick=()=>resendMsg(idx,row);
-  row.querySelector('[data-act="edit"]').onclick=()=>editMsg(idx,row,text);
-  row.querySelector('[data-act="delete"]').onclick=()=>deleteMsg(idx,row);
-}
-function addUser(text){
-    const idx=_userMsgIdx++;
-    const r=document.createElement('div'); r.className='msg-row user'; r.dataset.idx=idx;
-    r.innerHTML='<div class="bubble">'+esc(text)+'</div><div class="msg-actions">'+MSG_ACTIONS_HTML+'</div>';
-    wireMsgActions(r, idx, text);
-    getThread().appendChild(r); scrollDown(); return r;
-  }
-// ---- DOM HELPERS (shared) ---------------------------------------------------
-function truncateAfter(row, includeSelf){
-  // Remove all DOM siblings after (and optionally including) the given row.
-  const thread=getThread();
-  const toRemove=[];
-  let cutting=false;
-  for(const ch of thread.children){
-    if(ch===row){ cutting=true; if(includeSelf) toRemove.push(ch); continue; }
-    if(cutting) toRemove.push(ch);
-  }
-  toRemove.forEach(ch=>ch.remove());
-}
-
-function resendMsg(idx,row){
-  if(state.busy) return;
-  const bubble=row.querySelector('.bubble');
-  const text=bubble.textContent||'';
-  truncateAfter(row, false);
-  streamEdit(idx,text);
-}
-function streamEdit(idx,text){
-  live={body:null,raw:'',toolRow:null,thinking:null,turnStart:null,tokensIn:0,tokensOut:0};
-  showThinking(); setOrbLabel(_curVerb+'\u2026'); setBusy(true); compactOrb(true);
-  fetch('/api/chat/edit',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({index:idx,message:text})})
-  .then(r=>{ if(!r.ok||!r.body) throw new Error(r.status); return readSSE(r,handle); })
-  .then(()=>{clearThinking();if(state.busy)finishTurn();})
-  .catch(()=>{clearThinking();addNote('CONNECTION FAILURE',true);finishTurn();});
-}
-
-function deleteMsg(idx,row){
-  if(state.busy) return;
-  truncateAfter(row, true);
-  // If no messages left, show empty state
-  if(!getThread().children.length) showEmpty();
-  // Tell backend to truncate history
-  fetch('/api/chat/delete-msg',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({index:idx})})
-  .then(r=>r.json()).then(d=>{
-    if(d.messages) { /* reload chat state */ }
-    refreshChats();
-  }).catch(()=>{});
-}
-
-function editMsg(idx,row,origText){
-  if(state.busy) return;
-  row.classList.add('editing');
-  const bubble=row.querySelector('.bubble');
-  const actions=row.querySelector('.msg-actions');
-  const ta=document.createElement('textarea'); ta.className='edit-area'; ta.value=origText;
-  bubble.innerHTML=''; bubble.appendChild(ta);
-  ta.style.height=Math.min(ta.scrollHeight,130)+'px';
-  ta.focus();
-  actions.innerHTML='<button class="msg-act-btn edit-save" title="Save &amp; send">&#10003; save</button><button class="msg-act-btn edit-cancel" title="Cancel">&#10005; cancel</button>';
-  const save=()=>{
-    const newText=ta.value.trim(); if(!newText){cancel();return;}
-    row.classList.remove('editing');
-    truncateAfter(row, false);
-    // Update the bubble with new text
-    bubble.innerHTML=esc(newText);
-    streamEdit(idx,newText);
-  };
-  const cancel=()=>{
-    row.classList.remove('editing');
-    bubble.innerHTML=esc(origText);
-    actions.innerHTML=MSG_ACTIONS_HTML;
-    wireMsgActions(row, idx, origText);
-  };
-  actions.querySelector('.edit-save').onclick=save;
-  actions.querySelector('.edit-cancel').onclick=cancel;
-  ta.addEventListener('keydown',e=>{
-    if(e.key==='Enter'&&!e.shiftKey){e.preventDefault();save();}
-    if(e.key==='Escape'){e.preventDefault();cancel();}
-  });
-}
-function addAssistant(html, tools){
-    const r=document.createElement('div'); r.className='msg-row assistant';
-    r.innerHTML=avatarHTML()+'<div class="msg-body">'+(html||'')+'</div>';
-    getThread().appendChild(r);
-    (tools||[]).forEach(t=>addToolRow({name:t},true));
-    scrollDown(); return r;
-  }
-function addToolRow(t, done){
-  // Collapse same-name tool calls, skipping over non-tool-row elements
-  // (info notes, assistant text, etc.) so that calls across iterations
-  // of the tool loop still collapse into one row.
-  const thread=getThread();
-  let prev=null;
-  for(let el=thread.lastElementChild; el; el=el.previousElementSibling){
-    if(el.classList.contains('tool-row')){ prev=el; break; }
-  }
-  if(prev && prev.dataset.name===t.name){
-    let cnt=prev.dataset.cnt ? parseInt(prev.dataset.cnt)+1 : 2;
-    prev.dataset.cnt=cnt;
-    const nameEl=prev.querySelector('.tname');
-    if(nameEl) nameEl.textContent=t.name+' \u00d7'+cnt;
-    if(t.summary){
-      const sumEl=prev.querySelector('.tsum');
-      if(sumEl) sumEl.textContent=t.summary;
-    }
-    if(!done){ prev.classList.remove('ok','bad'); prev.classList.add('pending'); }
-    scrollDown(); return prev;
-  }
-  const row=document.createElement('div'); row.className='tool-row'+(done?'':' pending');
-  row.dataset.name=t.name||'';
-  const isCmd=(t.name||'').startsWith('run_')||(t.name||'').startsWith('bash');
-  const icon=isCmd?'&#9654;':'&#9889;';
-  const iconColor=isCmd?'var(--warn)':'var(--accent)';
-  row.innerHTML='<span class="tool-icon" style="color:'+iconColor+'">'+icon+'</span>'+
-    '<span class="tname">'+esc(t.name||'')+'</span>'+
-    (t.summary?'<span class="tsum">'+esc(t.summary)+'</span>':'')+
-    (done?'':'<span class="tres">RUNNING&#8230;</span>');
-  getThread().appendChild(row); scrollDown(); return row;
-}
-function addNote(text, isErr){
-  const n=document.createElement('div'); n.className='note-row'+(isErr?' err':'');
-  n.textContent=text||''; getThread().appendChild(n); scrollDown();
-}
-function showPermission(d){
-  const box=document.createElement('div'); box.className='perm-box';
-  box.innerHTML='<div class="pq">AUTHORIZATION REQUIRED: <code>'+esc(d.tool)+'</code>'+(d.summary?' &mdash; '+esc(d.summary):'')+' </div>';
-  const btns=document.createElement('div'); btns.className='perm-btns';
-  const answer=(a,past)=>{
-    box.innerHTML='<div class="pq"><code>'+esc(d.tool)+'</code></div><div class="perm-decided">&#8594; '+past.toUpperCase()+'</div>';
-    fetch('/api/permission',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({answer:a})});
-  };
-  [['yes','APPROVE','approved'],['always','ALWAYS ALLOW','always allowed'],['no','DENY','denied']].forEach(([a,l,p])=>{
-    const b=document.createElement('button'); b.className=a; b.textContent=l; b.onclick=()=>answer(a,p); btns.appendChild(b);
-  });
-  box.appendChild(btns); getThread().appendChild(box); scrollDown();
-}
-
-// ---- SSE STREAM READER (shared) -------------------------------------------
-async function readSSE(response, onEvent){
-  if(!response||!response.body) return;
-  const reader=response.body.getReader(), dec=new TextDecoder(); let buf='';
-  while(true){
-    let chunk; try{chunk=await reader.read();}catch(e){break;}
-    if(chunk.done) break;
-    buf+=dec.decode(chunk.value,{stream:true}); let i;
-    while((i=buf.indexOf('\n\n'))>=0){ const line=buf.slice(0,i); buf=buf.slice(i+2);
-      if(line.startsWith('data: ')){ try{onEvent(JSON.parse(line.slice(6)));}catch(e){} } }
-  }
-}
-
-// ---- LIVE TURN --------------------------------------------------------------
-let live={body:null,raw:'',toolRow:null,thinking:null,turnStart:null,tokensIn:0,tokensOut:0};
-let _thinkTimer=null;
-const _VERBS=['hatching','orbiting','pondering','brewing','simmering','marinating','percolating','crystallizing','weaving','conjuring','manifesting','distilling','synthesizing','calculating','reverberating','catalyzing','assembling','composting','fermenting','spinning','dreaming','musing','ruminating','cooking','germinating','blossoming','incubating','metabolizing','transmuting','alchemizing'];
-let _curVerb='thinking';
-function randomVerb(){ return _VERBS[Math.floor(Math.random()*_VERBS.length)]; }
-function showThinking(){
-  _curVerb=randomVerb();
-  const t=document.createElement('div'); t.className='thinking-row';
-  t.innerHTML=avatarHTML()+'<span>'+_curVerb+'\u2026</span><div class="thinking-dots"><span></span><span></span><span></span></div><span class="thinking-timer" id="thinkTimer"></span>';
-  getThread().appendChild(t); scrollDown(); live.thinking=t;
-  live.turnStart=Date.now(); live.tokensIn=0; live.tokensOut=0;
-  const timerEl=t.querySelector('#thinkTimer');
-  _thinkTimer=setInterval(()=>{ if(!live.turnStart){clearInterval(_thinkTimer);_thinkTimer=null;return;} const s=((Date.now()-live.turnStart)/1000).toFixed(1); let parts=[s+'s']; if(live.tokensIn) parts.push('\u2193'+live.tokensIn); if(live.tokensOut) parts.push('\u2191'+live.tokensOut); if(timerEl) timerEl.textContent=parts.join(' \u00b7 '); },100);
-}
-function clearThinking(){ if(live.thinking){live.thinking.remove();live.thinking=null;} if(_thinkTimer){clearInterval(_thinkTimer);_thinkTimer=null;} }
-function handle(ev){
-  const k=ev.kind, d=ev.data||{};
-  if(k!=='user') clearThinking();
-  if(k==='delta'){
-    if(!live.body){const _r=addAssistant('');live.body=_r.querySelector('.msg-body');live.raw='';}
-    live.raw+=d.text||'';
-    live.tokensOut+=Math.round((d.text||'').length/4);
-    live.body.innerHTML=md(stripHud(live.raw));
-    live.body.classList.add('cursor'); scrollDown();
-  } else if(k==='assistant'){
-    const txt=(d.text||'');
-    if(!live.body&&stripHud(txt).trim()){const _r=addAssistant(md(stripHud(txt)));live.body=_r.querySelector('.msg-body');live.raw=txt;}
-    else if(live.body){ live.raw=txt; live.body.innerHTML=md(stripHud(txt)); }
-    if(live.body) live.body.classList.remove('cursor');
-    renderPanels(txt);
-    if(state.voiceOut){ const p=plain(txt); if(p) speak(p); }
-  } else if(k==='plan'){
-    const p=document.createElement('div'); p.className='plan-box';
-    p.innerHTML='<div class="ph">&#9658; Plan</div><ol>'+(d.steps||[]).map(s=>'<li>'+esc(s)+'</li>').join('')+'</ol>';
-    getThread().appendChild(p); live.body=null; scrollDown();
-  } else if(k==='tool_call'){
-    live.body=null; live.toolRow=addToolRow({name:d.name,summary:d.summary},false);
-  } else if(k==='tool_result'){
-    if(live.toolRow){
-      live.toolRow.classList.remove('pending'); live.toolRow.classList.add(d.ok?'ok':'bad');
-      const res=live.toolRow.querySelector('.tres')||document.createElement('span');
-      res.className='tres'; res.textContent=(d.ok?'✓ ':'✗ ')+(d.first_line||'').slice(0,90);
-      if(!res.parentNode) live.toolRow.appendChild(res); live.toolRow=null;
-    }
-  } else if(k==='permission'){ live.body=null; showPermission(d);
-  } else if(k==='info'||k==='warn'){ addNote(d.text,false); live.body=null;
-    /* If the info message mentions tokens, update live.tokensIn */
-    const m=d.text&&d.text.match(/~(\d[\d,]*)\s*tokens/);
-    if(m) live.tokensIn=parseInt(m[1].replace(/,/g,''),10);
-  } else if(k==='error'){ addNote(d.text||'ERROR: SYSTEM FAULT',true); live.body=null;
-  } else if(k==='widget'){
-    // show_widget SSE event — render a dedicated specialty card. We translate
-    // the (type, title, data) payload into a HUD panel so it benefits from
-    // dragging/resizing like the inline ```hud``` panels.
-    live.body=null;
-    renderWidget(d);
-  } else if(k==='done'){
-    if(live.body) live.body.classList.remove('cursor'); live.body=null;
-    if(_thinkTimer){clearInterval(_thinkTimer);_thinkTimer=null;}
-    const usage=d.usage||{};
-    const hasStats=usage.input||usage.output||usage.ms;
-    if(hasStats||live.turnStart){
-      const row=document.createElement('div'); row.className='done-stats';
-      let parts=[];
-      if(usage.input||usage.output) parts.push('tokens in/out '+usage.input+'/'+usage.output);
-      if(usage.ms) parts.push(Math.round(usage.ms)+'ms');
-      if(live.turnStart){
-        const elapsed=((Date.now()-live.turnStart)/1000).toFixed(1);
-        parts.push(elapsed+'s');
-      }
-      row.innerHTML=parts.join('<span class="ds-sep">\u00b7</span>');
-      getThread().appendChild(row); scrollDown();
-    }
-    /* Show token stats in footer */
-    const ts=$('#tokenStats');
-    if(ts){ let tp=[]; if(usage.input) tp.push('\u2193'+usage.input); if(usage.output) tp.push('\u2191'+usage.output); if(tp.length){ts.textContent=tp.join(' ');ts.classList.remove('hidden');}else{ts.classList.add('hidden');} }
-    live.turnStart=null;
-  } else if(k==='end'){ finishTurn(); }
-  scrollDown();
-}
-log.addEventListener('click',e=>{
-  const btn=e.target.closest('.cb-copy'); if(!btn) return;
-  const code=btn.closest('.codeblock').querySelector('pre code');
-  navigator.clipboard.writeText(code.textContent||'').then(()=>{ btn.textContent='COPIED'; setTimeout(()=>{btn.textContent='COPY';},1400); });
-});
-
-// ---- VOICE OUTPUT (TTS) -----------------------------------------------------
-let voices=[];
-function loadVoices(){ voices=window.speechSynthesis ? speechSynthesis.getVoices() : []; populateVoiceSelect(); }
-if(window.speechSynthesis){ speechSynthesis.onvoiceschanged=loadVoices; loadVoices(); }
-function pickVoice(){
-  if(!voices.length) return null;
-  if(state.voiceName){ const v=voices.find(v=>v.name===state.voiceName); if(v) return v; }
-  // prefer a deep/UK English voice
-  return voices.find(v=>/en-GB/i.test(v.lang)&&/male|daniel|arthur/i.test(v.name))
-      || voices.find(v=>/en-GB/i.test(v.lang)) || voices.find(v=>/^en/i.test(v.lang)) || voices[0];
-}
-function speak(text){
-  if(!window.speechSynthesis) return;
-  speechSynthesis.cancel();
-  const u=new SpeechSynthesisUtterance(text.slice(0,600));
-  const v=pickVoice(); if(v) u.voice=v;
-  u.rate=1.0; u.pitch=0.9;
-  window.__jSpeak=true; const z=$('#orbZone'); if(z) z.classList.add('speaking'); setOrbLabel('SPEAKING');
-  u.onend=()=>{ window.__jSpeak=false; if(z) z.classList.remove('speaking'); setOrbLabel(currentTitle()); };
-  speechSynthesis.speak(u);
-}
-function populateVoiceSelect(){
-  const sel=$('#setVoice'); if(!sel) return;
-  sel.innerHTML='<option value="">Auto</option>'+
-    voices.filter(v=>/^en/i.test(v.lang)).map(v=>'<option value="'+esc(v.name)+'">'+esc(v.name+' — '+v.lang)+'</option>').join('');
-  sel.value=state.voiceName||'';
-}
-
-// ---- VOICE INPUT (STT) ------------------------------------------------------
-const SR = window.SpeechRecognition || window.webkitSpeechRecognition;
-let recog=null, recognizing=false;
-if(SR){
-  recog=new SR(); recog.lang='en-US'; recog.interimResults=true; recog.continuous=false;
-  recog.onstart=()=>{ recognizing=true; $('#micBtn').classList.add('listening'); $('#cmdBox').classList.add('listening');
-    $('#orbZone').classList.add('listening'); setOrbLabel('LISTENING'); };
-  recog.onend=()=>{ recognizing=false; $('#micBtn').classList.remove('listening'); $('#cmdBox').classList.remove('listening');
-    $('#orbZone').classList.remove('listening'); setOrbLabel(currentTitle()); };
-  recog.onerror=()=>{ recognizing=false; $('#micBtn').classList.remove('listening'); $('#cmdBox').classList.remove('listening'); };
-  recog.onresult=e=>{
-    let txt=''; for(let i=0;i<e.results.length;i++) txt+=e.results[i][0].transcript;
-    input.value=txt; autoGrow();
-    if(e.results[e.results.length-1].isFinal){ setTimeout(()=>{ if(input.value.trim()) submit(); },350); }
-  };
-}
-function toggleMic(){
-  if(!SR){ addNote('Voice input not supported in this browser (try Chrome).',true); return; }
-  if(recognizing){ recog.stop(); } else { try{ recog.start(); }catch(e){} }
-}
-
-// ---- CONFIRM DIALOG ---------------------------------------------------------
-let _confirmCb=null;
-function showConfirm(msg,cb){
-  _confirmCb=cb;
-  $('#confirmMsg').textContent=msg;
-  $('#confirmModal').classList.remove('hidden');
-}
-$('#confirmOk').onclick=()=>{ $('#confirmModal').classList.add('hidden'); if(_confirmCb) _confirmCb(); _confirmCb=null; };
-$('#confirmCancel').onclick=()=>{ $('#confirmModal').classList.add('hidden'); _confirmCb=null; };
-$('#confirmClose').onclick=()=>{ $('#confirmModal').classList.add('hidden'); _confirmCb=null; };
-$('#confirmModal').addEventListener('click',e=>{ if(e.target.id==='confirmModal'){ $('#confirmModal').classList.add('hidden'); _confirmCb=null; } });
-
-// ---- CONTEXT MENU (⋮) -------------------------------------------------------
-let _ctxChatId=null, _projCtxId=null, _ctxMode='chat';
-function showCtx(e,chatId){
-  _ctxChatId=chatId; _ctxMode='chat';
-  const m=$('#ctxMenu');
-  m.innerHTML='<div class="ctx-item" data-action="rename">&#9998; Rename</div>'+
-    '<div class="ctx-item" data-action="project">&#128193; Add to Project</div>'+
-    '<div class="ctx-sep"></div>'+
-    '<div class="ctx-item ctx-danger" data-action="delete">&#128465; Delete</div>';
-  m.classList.remove('hidden');
-  m.style.left=Math.min(e.clientX,window.innerWidth-170)+'px';
-  m.style.top=Math.min(e.clientY,window.innerHeight-120)+'px';
-}
-function showNewProjectModal(){
-  $('#newProjectInput').value='';
-  $('#newProjectModal').classList.remove('hidden');
-  setTimeout(()=>$('#newProjectInput').focus(),50);
-}
-function closeNewProjectModal(){ $('#newProjectModal').classList.add('hidden'); }
-
-function showProjectCtx(e,projectId){
-  _projCtxId=projectId; _ctxMode='project';
-  const m=$('#ctxMenu');
-  m.innerHTML='<div class="ctx-item" data-action="proj-config">&#9881; Config</div>'+
-    '<div class="ctx-item" data-action="proj-rename">&#9998; Rename</div>'+
-    '<div class="ctx-item ctx-danger" data-action="proj-delete">&#128465; Delete</div>';
-  m.classList.remove('hidden');
-  m.style.left=Math.min(e.clientX,window.innerWidth-170)+'px';
-  m.style.top=Math.min(e.clientY,window.innerHeight-120)+'px';
-}
-function hideCtx(){ $('#ctxMenu').classList.add('hidden'); _ctxChatId=null; _projCtxId=null; }
-document.addEventListener('click',e=>{
-  const m=$('#ctxMenu');
-  if(m.contains(e.target)){
-    e.stopPropagation();
-    const action=e.target.dataset.action; if(!action) return;
-    const chatId=_ctxChatId, projId=_projCtxId;
-    hideCtx();
-    if(action==='delete'){ showConfirm('Delete this chat?',()=>deleteChat(chatId)); }
-    else if(action==='rename'){ showRename(chatId); }
-    else if(action==='project'){ showProjectPicker(chatId); }
-    else if(action==='proj-rename'){ showRenameProject(projId); }
-    else if(action==='proj-delete'){
-      showConfirm('Delete this project?',async()=>{
-        const r=await api('/api/projects/delete',{id:projId});
-        state.projects=r.projects; state.activeProjectId=null; renderSessions();
-      });
-    }
-    else if(action==='proj-config'){ showProjectConfig(projId); }
-  } else { hideCtx(); }
-});
-
-// ---- RENAME MODAL -----------------------------------------------------------
-let _renameId=null;
-let _renameMode='chat'; // 'chat' or 'project'
-function showRename(chatId){
-  _renameId=chatId; _renameMode='chat';
-  const c=state.chats.find(c=>c.id===chatId);
-  $('#renameInput').value=c?c.title:'';
-  $('#renameModal').classList.remove('hidden');
-  setTimeout(()=>$('#renameInput').focus(),50);
-}
-function showRenameProject(projectId){
-  _renameId=projectId; _renameMode='project';
-  const p=state.projects.find(p=>p.id===projectId);
-  $('#renameInput').value=p?p.name:'';
-  $('#renameModal').classList.remove('hidden');
-  setTimeout(()=>$('#renameInput').focus(),50);
-}
-function closeRename(){ $('#renameModal').classList.add('hidden'); _renameId=null; _renameMode='chat'; }
-$('#renameClose').onclick=closeRename;
-$('#renameCancel').onclick=closeRename;
-$('#renameOk').onclick=async()=>{
-  const val=$('#renameInput').value.trim(); if(!val||!_renameId) return;
-  if(_renameMode==='project'){
-    const r=await api('/api/projects/rename',{id:_renameId,name:val});
-    state.projects=r.projects; renderSessions(); closeRename();
-  } else {
-    const r=await api('/api/chats/rename',{id:_renameId,title:val});
-    state.chats=r.chats; renderSessions(); closeRename();
-  }
-};
-$('#renameInput').addEventListener('keydown',e=>{ if(e.key==='Enter') $('#renameOk').click(); });
-$('#renameModal').addEventListener('click',e=>{ if(e.target.id==='renameModal') closeRename(); });
-$('#newProjectModal').addEventListener('click',e=>{ if(e.target.id==='newProjectModal') closeNewProjectModal(); });
-
-// ---- PROJECT PICKER MODAL ---------------------------------------------------
-let _projPickChatId=null;
-async function showProjectPicker(chatId){
-  _projPickChatId=chatId;
-  const body=$('#projectModalBody'); body.innerHTML='';
-  if(!state.projects.length){
-     body.innerHTML='<div class="empty-hint md">No projects yet. Create one below.</div>';
-  } else {
-    state.projects.forEach(p=>{
-      const d=document.createElement('div');
-      d.className='proj-item-j';
-      d.innerHTML='<span class="proj-dot" style="background:'+esc(p.color)+'"></span><span class="proj-name">'+esc(p.name)+'</span>';
-      d.onclick=async()=>{
-        const r=await api('/api/projects/add_chat',{project_id:p.id,chat_id:_projPickChatId});
-        state.projects=r.projects; state.chats=r.chats; renderSessions();
-        closeProjectPicker();
-      };
-      body.appendChild(d);
-    });
-  }
-  $('#projectModal').classList.remove('hidden');
-}
-function closeProjectPicker(){ $('#projectModal').classList.add('hidden'); _projPickChatId=null; }
-$('#projectModalClose').onclick=closeProjectPicker;
-$('#projectModalCancel').onclick=closeProjectPicker;
-$('#projectModal').addEventListener('click',e=>{ if(e.target.id==='projectModal') closeProjectPicker(); });
-$('#projectModalNewBtn').onclick=()=>{
-  closeProjectPicker();
-  showNewProjectModal();
-  // After creating, the new project modal handler will refresh
-};
-
-// ---- PROJECT CONFIG MODAL ---------------------------------------------------
-let _projConfigId=null;
-function showProjectConfig(projectId){
-  _projConfigId=projectId;
-  const p=state.projects.find(p=>p.id===projectId);
-  $('#projConfigPrompt').value=p?(p.system_prompt||''):'';
-  $('#projConfigContext').value=p?(p.context||''):'';
-  $('#projConfigModal').classList.remove('hidden');
-  setTimeout(()=>$('#projConfigPrompt').focus(),50);
-}
-function closeProjectConfig(){ $('#projConfigModal').classList.add('hidden'); _projConfigId=null; }
-$('#projConfigClose').onclick=closeProjectConfig;
-$('#projConfigCancel').onclick=closeProjectConfig;
-$('#projConfigModal').addEventListener('click',e=>{ if(e.target.id==='projConfigModal') closeProjectConfig(); });
-$('#projConfigSave').onclick=async()=>{
-  if(!_projConfigId) return;
-  const r=await api('/api/projects/config',{
-    id:_projConfigId,
-    system_prompt:$('#projConfigPrompt').value,
-    context:$('#projConfigContext').value
-  });
-  state.projects=r.projects; closeProjectConfig();
-};
-
-// ---- SESSIONS ---------------------------------------------------------------
-function currentTitle(){ const c=state.chats.find(c=>c.id===state.currentId); return c?c.title:'New Chat'; }
-function renderSessions(){
-  const list=$('#sessionList'); if(!list) return; list.innerHTML='';
-  // Build a map of project_id -> chat list
-  const projChats={};
-  state.projects.forEach(p=>{ projChats[p.id]=state.chats.filter(c=>c.project_id===p.id); });
-  const unaffiliated=state.chats.filter(c=>!c.project_id);
-  // --- Projects expandable group ---
-  const projGrp=document.createElement('div'); projGrp.className='sess-group';
-  const projHead=document.createElement('div'); projHead.className='sess-group-head'+(state._openProjectsRoot?' open':'');
-  projHead.innerHTML='<span class="sg-caret">&#9654;</span><span class="sg-dot" style="background:var(--accent)"></span><span class="sg-name">Projects</span><span class="sg-count">'+state.projects.length+'</span><button class="sg-add" title="New Project">+</button>';
-  projHead.querySelector('.sg-add').onclick=e=>{ e.stopPropagation(); showNewProjectModal(); };
-  projHead.onclick=e=>{
-    if(e.target.closest('.sg-add')) return;
-    state._openProjectsRoot=!state._openProjectsRoot;
-    renderSessions();
-  };
-  projGrp.appendChild(projHead);
-  const projBody=document.createElement('div'); projBody.className='sess-group-chats'+(state._openProjectsRoot?' open':'');
-  if(!state.projects.length){
-     projBody.innerHTML='<div class="empty-hint">No projects yet</div>';
-  } else {
-    state.projects.forEach(p=>{
-      const chats=projChats[p.id]||[];
-      const isOpen=state._openProjects.has(p.id);
-      const pGrp=document.createElement('div'); pGrp.className='sess-group';
-      const pHead=document.createElement('div'); pHead.className='sess-group-head'+(isOpen?' open':'');
-      pHead.innerHTML='<span class="sg-caret">&#9654;</span><span class="sg-dot" style="background:'+esc(p.color)+'"></span><span class="sg-name">'+esc(p.name)+'</span><span class="sg-count">'+chats.length+'</span><button class="sg-menu" title="Menu">&#8942;</button>';
-      pHead.querySelector('.sg-menu').onclick=e=>{ e.stopPropagation(); showProjectCtx(e,p.id); };
-      pHead.onclick=e=>{
-        if(e.target.closest('.sg-menu')) return;
-        if(state._openProjects.has(p.id)) state._openProjects.delete(p.id); else state._openProjects.add(p.id);
-        renderSessions();
-      };
-      pGrp.appendChild(pHead);
-      const pBody=document.createElement('div'); pBody.className='sess-group-chats'+(isOpen?' open':'');
-      chats.forEach(c=>{ pBody.appendChild(makeChatItem(c)); });
-      if(!chats.length) pBody.innerHTML='<div class="empty-hint">No chats</div>';
-      pGrp.appendChild(pBody);
-      projBody.appendChild(pGrp);
-    });
-  }
-  projGrp.appendChild(projBody);
-  list.appendChild(projGrp);
-  // --- Chats expandable group ---
-  const chatGrp=document.createElement('div'); chatGrp.className='sess-group';
-  const chatHead=document.createElement('div'); chatHead.className='sess-group-head'+(state._openUnaffiliated!==false?' open':'');
-  chatHead.innerHTML='<span class="sg-caret">&#9654;</span><span class="sg-dot" style="background:var(--text-dim)"></span><span class="sg-name">Chats</span><span class="sg-count">'+unaffiliated.length+'</span>';
-  chatHead.onclick=()=>{
-    state._openUnaffiliated=state._openUnaffiliated===false?true:false;
-    renderSessions();
-  };
-  chatGrp.appendChild(chatHead);
-  const chatBody=document.createElement('div'); chatBody.className='sess-group-chats'+(state._openUnaffiliated!==false?' open':'');
-  if(!unaffiliated.length){
-    chatBody.innerHTML='<div class="empty-hint">No chats yet</div>';
-  } else {
-    unaffiliated.forEach(c=>{ chatBody.appendChild(makeChatItem(c)); });
-  }
-  chatGrp.appendChild(chatBody);
-  list.appendChild(chatGrp);
-}
-function makeChatItem(c){
-  const item=document.createElement('div'); item.className='chat-item-j'+(c.id===state.currentId?' active':'');
-  item.innerHTML='<span class="ci-arrow">&#9658;</span><span class="ci-title">'+esc(c.title)+'</span><button class="ci-menu-btn" title="Menu">&#8942;</button>';
-  item.querySelector('.ci-title').onclick=()=>loadChat(c.id);
-  item.querySelector('.ci-menu-btn').onclick=e=>{ e.stopPropagation(); showCtx(e,c.id); };
-  return item;
-}
-function setCurrent(cur){
-  state.currentId=cur.id;
-  _userMsgIdx=0;
-  const s=$('#jSession'); if(s) s.textContent=(cur.id||'--------').slice(0,8).toUpperCase();
-  setOrbLabel(cur.title||'New Chat');
-  clearLog();
-  if(!cur.messages||!cur.messages.length){ showEmpty(); compactOrb(false); return; }
-  compactOrb(true);
-  let idx=0;
-  cur.messages.forEach(m=>{
-    let row;
-    if(m.role==='user'){ row=addUser(m.content); idx++; }
-    else {
-      const html=md(stripHud(m.content));
-      const hasContent=html&&html.trim();
-      if(hasContent){ row=addAssistant(html,m.tools); renderPanels(m.content); idx++; }
-      else { (m.tools||[]).forEach(t=>{ const tr=addToolRow({name:t},true); if(tr) tr.style.setProperty('--i',idx++); }); }
-    }
-    if(row) row.style.setProperty('--i',idx-1);
-  });
-  scrollDown();
-}
-
-// ---- NETWORK ----------------------------------------------------------------
-async function api(path,body){
-  const r=await fetch(path,{method:body?'POST':'GET',headers:{'Content-Type':'application/json'},body:body?JSON.stringify(body):undefined});
-  return r.json();
-}
-function setModelBadge(m){ const n=$('#msName'); if(n) n.textContent=(m||'').toUpperCase(); }
-async function boot(){
-  const b=await api('/api/bootstrap');
-  state.chats=b.chats; state.settings=b.settings; state.projects=b.projects||[];
-  setModelBadge(b.model);
-  const vs=$('#versionSpan'); if(vs) vs.textContent=b.version||'--';
-  renderModelMenu();
-  renderSessions(); setCurrent(b.current);
-}
-async function newChat(){
-  const r=await api('/api/chats/new',{}); state.chats=r.chats; renderSessions(); setCurrent(r.current);
-  if(r.current&&r.current.model){state.settings.model=r.current.model;setModelBadge(r.current.model);renderModelMenu();}
-  clearViewport(); closeSessions(); input.focus();
-}
-async function loadChat(id){
-  const r=await api('/api/chats/load',{id}); state.chats=r.chats; clearViewport(); renderSessions(); setCurrent(r.current); if(r.current&&r.current.model){state.settings.model=r.current.model;setModelBadge(r.current.model);renderModelMenu();} closeSessions();
-}
-async function deleteChat(id){
-  const r=await api('/api/chats/delete',{id}); state.chats=r.chats; state.projects=r.projects||state.projects; renderSessions(); setCurrent(r.current); closeSessions();
-}
-async function refreshChats(){
-  const b=await api('/api/bootstrap'); state.chats=b.chats; state.projects=b.projects||[]; renderSessions(); setOrbLabel(b.current.title||'New Chat');
-}
-
-// ---- MODEL SWITCHER ---------------------------------------------------------
-function renderModelMenu(){
-  const menu=$('#modelMenu'); const models=state.settings.models||[];
-  if(!models.length){ menu.innerHTML='<div class="mm-item">'+esc(state.settings.model||'no models')+'</div>'; return; }
-  menu.innerHTML=models.map(m=>'<div class="mm-item'+(m===state.settings.model?' active':'')+'" data-m="'+esc(m)+'">'+
-    '<span class="mm-tick">'+(m===state.settings.model?'✓':'')+'</span>'+esc(m)+'</div>').join('');
-  menu.querySelectorAll('.mm-item').forEach(it=>{ if(it.dataset.m) it.onclick=()=>switchModel(it.dataset.m); });
-}
-async function switchModel(m){
-  $('#modelMenu').classList.add('hidden');
-  const r=await api('/api/model',{model:m});
-  state.settings.model=r.model; setModelBadge(r.model); renderModelMenu();
-  addNote('Model switched to '+r.model);
-}
-$('#modelSwitch').onclick=e=>{ e.stopPropagation(); $('#modelMenu').classList.toggle('hidden'); };
-document.addEventListener('click',()=>$('#modelMenu').classList.add('hidden'));
-$('#modelMenu').onclick=e=>e.stopPropagation();
-
-// ---- DRAWER / MODAL ---------------------------------------------------------
-function openSessions(){ $('#sessionsPanel').classList.add('open'); $('#backdrop').classList.remove('hidden'); }
-function closeSessions(){ $('#sessionsPanel').classList.remove('open'); $('#backdrop').classList.add('hidden'); }
-function openSettings(){
-  closeSessions();
-  const s=state.settings, sel=$('#setModel'); sel.innerHTML='';
-  (s.models&&s.models.length?s.models:[s.model]).forEach(m=>{
-    const o=document.createElement('option'); o.value=m; o.textContent=m; if(m===s.model) o.selected=true; sel.appendChild(o);
-  });
-  $('#setName').value=s.user_name||'';
-  $('#setTemp').value=s.temperature; $('#tempVal').textContent=(+s.temperature).toFixed(2);
-  $('#setStream').checked=!!s.stream; $('#setYolo').checked=!!s.yolo;
-  $('#setGwPort').value=s.gateway_port||8700;
-  $('#setGwAuto').checked=!!(s.gateway_auto_start!==false);
-  $('#setSysPrompt').value=s.system_prompt||'';
-  populateVoiceSelect();
-  $('#settingsModal').classList.remove('hidden');
-}
-function closeSettings(){ $('#settingsModal').classList.add('hidden'); }
-async function saveSettings(){
-  state.voiceName=$('#setVoice').value||'';
-  try{ localStorage.setItem('cagentic_voice',state.voiceName); }catch(e){}
-  state.settings=await api('/api/settings',{
-    model:$('#setModel').value, user_name:$('#setName').value, temperature:parseFloat($('#setTemp').value),
-    stream:$('#setStream').checked, yolo:$('#setYolo').checked,
-    gateway_port:parseInt($('#setGwPort').value)||8700,
-    gateway_auto_start:$('#setGwAuto').checked,
-    system_prompt:$('#setSysPrompt').value });
-  setModelBadge(state.settings.model); renderModelMenu(); closeSettings();
-}
-
-// ---- VOICE OUT TOGGLE -------------------------------------------------------
-function toggleVoiceOut(){
-  state.voiceOut=!state.voiceOut;
-  $('#voiceOutBtn').classList.toggle('active', state.voiceOut);
-  $('#voiceOutBtn').innerHTML='[ &#128264; Voice: '+(state.voiceOut?'ON':'OFF')+' ]';
-  if(!state.voiceOut && window.speechSynthesis) speechSynthesis.cancel();
-  try{ localStorage.setItem('cagentic_voiceout', state.voiceOut?'1':'0'); }catch(e){}
-}
-
-// ---- SEND -------------------------------------------------------------------
-function setBusy(on){ state.busy=on; sendBtn.disabled=on; input.disabled=on; const bl=$('#busyLabel'); if(bl){bl.textContent='\u25CF '+_curVerb+'\u2026';bl.classList.toggle('hidden',!on);} $('#stopBtn').classList.toggle('hidden',!on); }
-function finishTurn(){ setBusy(false); const ts=$('#tokenStats'); if(ts) ts.classList.add('hidden'); input.focus(); refreshChats(); }
-let _abortCtrl=null;
-async function abortGeneration(){
-  if(!state.busy) return;
-  try{ await fetch('/api/abort',{method:'POST'}); }catch(e){}
-  if(_abortCtrl) try{ _abortCtrl.abort(); }catch(e){}
-  clearThinking(); addNote('Generation stopped.',false); finishTurn();
-}
-async function send(text){
-  if(state.busy) return;
-  // Slash commands → /api/cmd instead of /api/chat
-  if(text.startsWith('/')){
-    const parts=text.split(/\s+/);
-    const cmd=parts[0].slice(1);
-    const arg1=parts[1]||'';
-    const arg2=parts.slice(2).join(' ')||'';
-    showThinking(); setOrbLabel(_curVerb+'\u2026'); setBusy(true);
-    try{
-      const r=await fetch('/api/cmd',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({cmd,arg1,arg2})});
-      const d=await r.json();
-      if(d.current) setCurrent(d.current);
-      if(d.model) { state.settings.model=d.model; setModelBadge(d.model); renderModelMenu(); }
-      addNote(d.text||'Done',!d.ok);
-    }catch(e){ addNote('Command failed: '+e,true); }
-    clearThinking(); setBusy(false);
-    return;
-  }
-  if(log.querySelector('.j-empty')) clearLog();
-  addUser(text);
-  live={body:null,raw:'',toolRow:null,thinking:null,turnStart:null,tokensIn:0,tokensOut:0};
-  showThinking(); setOrbLabel(_curVerb+'\u2026'); setBusy(true); compactOrb(true);
-  _abortCtrl=new AbortController();
-  let res;
-  try{ res=await fetch('/api/chat',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({message:text}),signal:_abortCtrl.signal}); }
-  catch(e){ if(e.name==='AbortError'){finishTurn();return;} clearThinking(); addNote('CONNECTION FAILURE',true); finishTurn(); return; }
-  if(!res||!res.ok||!res.body){ clearThinking(); addNote('REQUEST FAILED: '+(res?res.status:'no response'),true); finishTurn(); return; }
-  try{
-    await readSSE(res, handle);
-  }catch(e){ console.error('Stream read error:',e); }
-  clearThinking(); if(state.busy) finishTurn();
-}
-
-// ---- COMPOSER + WIRING ------------------------------------------------------
-function autoGrow(){ input.style.height='auto'; input.style.height=Math.min(input.scrollHeight,130)+'px'; }
-function submit(){ const t=input.value.trim(); if(!t||state.busy)return; input.value=''; autoGrow(); send(t); }
-input.addEventListener('input', autoGrow);
-input.addEventListener('keydown', e=>{ if(e.key==='Enter'&&!e.shiftKey){e.preventDefault();submit();} });
-sendBtn.onclick=submit;
-$('#stopBtn').onclick=abortGeneration;
-$('#micBtn').onclick=toggleMic;
-$('#logsBtn').onclick=openSessions;
-$('#newMissionBtn').onclick=newChat;
-$('#configBtn').onclick=openSettings;
-$('#voiceOutBtn').onclick=toggleVoiceOut;
-
-$('#closeSessionsBtn').onclick=closeSessions;
-$('#newProjectModalClose').onclick=closeNewProjectModal;
-$('#newProjectCancel').onclick=closeNewProjectModal;
-$('#newProjectOk').onclick=async()=>{
-  const name=$('#newProjectInput').value.trim(); if(!name) return;
-  closeNewProjectModal();
-  const r=await api('/api/projects/create',{name});
-  state.projects=r.projects; state._openProjectsRoot=true; state._openProjects.add(r.projects[r.projects.length-1].id); renderSessions();
-};
-$('#newProjectInput').addEventListener('keydown',e=>{ if(e.key==='Enter') $('#newProjectOk').click(); });
-$('#backdrop').onclick=()=>{closeSessions();};
-$('#closeSettings').onclick=closeSettings;
-$('#cancelSettings').onclick=closeSettings;
-$('#saveSettings').onclick=saveSettings;
-$('#setTemp').addEventListener('input',e=>{$('#tempVal').textContent=(+e.target.value).toFixed(2);});
-$('#settingsModal').addEventListener('click',e=>{if(e.target.id==='settingsModal')closeSettings();});
-document.addEventListener('keydown',e=>{
-  if((e.ctrlKey||e.metaKey)&&e.key==='k'){ e.preventDefault(); newChat(); return; }
-  if((e.ctrlKey||e.metaKey)&&e.key==='m'){ e.preventDefault(); toggleMic(); return; }
-  if((e.ctrlKey||e.metaKey)&&e.key==='s'){ e.preventDefault(); openSettings(); return; }
-  if(e.key==='Escape'){
-    if(!$('#confirmModal').classList.contains('hidden')){ $('#confirmModal').classList.add('hidden'); _confirmCb=null; }
-    else if(!$('#newProjectModal').classList.contains('hidden')) closeNewProjectModal();
-    else if(!$('#renameModal').classList.contains('hidden')) closeRename();
-    else if(!$('#projectModal').classList.contains('hidden')) closeProjectPicker();
-    else if(!$('#projConfigModal').classList.contains('hidden')) closeProjectConfig();
-    else if(!$('#settingsModal').classList.contains('hidden')) closeSettings();
-    else if($('#sessionsPanel').classList.contains('open')) closeSessions();
-    else $('#modelMenu').classList.add('hidden');
-  }
-});
-
-
-try{
-  state.voiceName=localStorage.getItem('cagentic_voice')||'';
-  if(localStorage.getItem('cagentic_voiceout')==='1') toggleVoiceOut();
-}catch(e){}
-
-boot();
-"""
+_HTML = _asset_text("index.html")
+_CSS = _asset_text("app.css")
+_JS = _asset_text("app.js")

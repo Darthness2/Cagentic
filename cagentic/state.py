@@ -3,6 +3,7 @@
 Mirrors the React `useAppState` pattern in plain Python: a single mutable
 record, observers register a callback and get notified on every update.
 """
+
 from __future__ import annotations
 
 import logging
@@ -27,11 +28,19 @@ class AppState:
 
     # service auth
     github_token: str | None = None
+    default_repository: str | None = None
+    workspace_boundary: Path | None = None
+    active_model_spec: str | None = None
 
     # behavior switches
-    yolo: bool = False                  # auto-approve all tool calls
-    insecure_ssl: bool = False          # turn off TLS verify (school MITM)
-    tools_enabled: bool = True          # native ollama tool calls vs text-protocol
+    yolo: bool = False  # auto-approve all tool calls
+    insecure_ssl: bool = False  # turn off TLS verify (school MITM)
+    tools_enabled: bool = True  # native ollama tool calls vs text-protocol
+
+    # Effort dial — how much effort/thoroughness the model applies. One of
+    # "low" | "medium" | "high". Injected into the system prompt; higher means
+    # more exploration before acting and more verification after.
+    effort: str = "medium"
 
     # per-tool permission cache: name -> "always"|"once"|"never"|None
     permissions: dict[str, str] = field(default_factory=dict)
@@ -39,12 +48,18 @@ class AppState:
     # files we've read/edited this session (relative paths, in order)
     file_history: list[str] = field(default_factory=list)
 
+    # worktree stack — entered worktree dirs we'll pop back to.
+    worktree_stack: list[str] = field(default_factory=list)
+
     # Plan mode: read-only, no mutating tools.
     plan_mode: bool = False
 
     # Lightweight per-session todo list (TodoWrite). Separate from persistent
     # reminders (cagentic.reminders) — these are scratch for the current turn.
     todos: list[dict] = field(default_factory=list)
+
+    # In-memory briefs (BriefTool): name -> markdown.
+    briefs: dict[str, str] = field(default_factory=dict)
 
     # Enabled tool groups — controls which tool schemas are sent to the model.
     # None means "use tools.DEFAULT_GROUPS".
@@ -93,9 +108,7 @@ class AppState:
                     # A listener failing (e.g. a silent autosave) must not
                     # abort the update or the other listeners — but it should
                     # be visible in the logs rather than vanishing.
-                    logger.warning(
-                        "AppState listener failed on update of %r", key, exc_info=True
-                    )
+                    logger.warning("AppState listener failed on update of %r", key, exc_info=True)
 
     def push_file(self, path: str) -> None:
         if path in self.file_history:
@@ -109,5 +122,7 @@ class AppState:
             "root": self.workspace,
             "yolo": self.yolo,
             "github_token": self.github_token,
+            "default_repository": self.default_repository,
+            "workspace_boundary": self.workspace_boundary,
             "insecure_ssl": self.insecure_ssl,
         }

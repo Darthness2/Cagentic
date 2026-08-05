@@ -1,4 +1,5 @@
 """Terminal UI helpers — warm dusk palette, blocky panels, no external deps."""
+
 from __future__ import annotations
 
 import os
@@ -9,18 +10,19 @@ import textwrap
 import threading
 import time
 
-
 # ----- Windows ANSI passthrough --------------------------------------------
 # Older Windows shells don't process ANSI escape sequences by default; the
 # escapes leak as raw text (`^[[38;5;49m`). Enable Virtual Terminal Processing
 # on stdout/stderr so our color/cursor codes work in cmd.exe / PowerShell /
 # Windows Terminal without needing colorama.
 
+
 def _enable_windows_ansi() -> None:
     if os.name != "nt":
         return
     try:
         import ctypes
+
         kernel32 = ctypes.windll.kernel32
         ENABLE_VIRTUAL_TERMINAL_PROCESSING = 0x0004
         for handle_id in (-11, -12):  # STD_OUTPUT_HANDLE, STD_ERROR_HANDLE
@@ -30,7 +32,8 @@ def _enable_windows_ansi() -> None:
             mode = ctypes.c_ulong()
             if kernel32.GetConsoleMode(handle, ctypes.byref(mode)):
                 kernel32.SetConsoleMode(
-                    handle, mode.value | ENABLE_VIRTUAL_TERMINAL_PROCESSING,
+                    handle,
+                    mode.value | ENABLE_VIRTUAL_TERMINAL_PROCESSING,
                 )
     except Exception:
         pass
@@ -81,16 +84,16 @@ GRAY = "\033[90m"
 #
 # DUSK / GLOW / PLUM are the three core accent tones; GOLD is a fourth used
 # sparingly for highlights worth noticing (success, the wordmark spark).
-DUSK   = "\033[38;5;139m"   # muted orchid — primary accent
-GLOW   = "\033[38;5;216m"   # warm peach — highlights, prompt, the wordmark
-PLUM   = "\033[38;5;96m"    # dusk plum — borders, rules, quiet structure
-GOLD   = "\033[38;5;179m"   # soft gold — sparks, accents worth a glance
+DUSK = "\033[38;5;139m"  # muted orchid — primary accent
+GLOW = "\033[38;5;216m"  # warm peach — highlights, prompt, the wordmark
+PLUM = "\033[38;5;96m"  # dusk plum — borders, rules, quiet structure
+GOLD = "\033[38;5;179m"  # soft gold — sparks, accents worth a glance
 SURFACE = "\033[38;5;253m"  # near-white — body text
-MUTED   = "\033[38;5;247m"  # warm grey — secondary text
-SOFT    = "\033[38;5;240m"  # faint grey — timers, hints, rules
-WARN    = "\033[38;5;215m"  # warm amber — warnings
-ERR     = "\033[38;5;174m"  # dusty rose — errors
-OK      = "\033[38;5;108m"  # sage — success marks
+MUTED = "\033[38;5;247m"  # warm grey — secondary text
+SOFT = "\033[38;5;240m"  # faint grey — timers, hints, rules
+WARN = "\033[38;5;215m"  # warm amber — warnings
+ERR = "\033[38;5;174m"  # dusty rose — errors
+OK = "\033[38;5;108m"  # sage — success marks
 
 
 def _supports_color() -> bool:
@@ -106,6 +109,7 @@ def color(text: str, c: str) -> str:
 
 
 # ---------- screen / sizing ----------
+
 
 def clear_screen() -> None:
     if not sys.stdout.isatty():
@@ -214,6 +218,7 @@ def render_markdown(text: str) -> str:
         n, total = m.group(1), m.group(2)
         label = f"→ step {n} of {total}" if total else f"→ step {n}"
         return "\n" + color(label, GOLD + BOLD) + "\n"
+
     out = _MD_STEP_RX.sub(_step, out)
 
     # Bold and italic. (Order matters — bold first.)
@@ -249,13 +254,19 @@ class StreamMarkdown:
     """
 
     SUPPRESS_PAIRS = [
-        ("<plan>",     "</plan>",     "elide"),
-        ("<think>",    "</think>",    "dim"),
+        ("<plan>", "</plan>", "elide"),
+        ("<think>", "</think>", "dim"),
         ("<thinking>", "</thinking>", "dim"),
     ]
 
-    def __init__(self, emit, first_prefix: str = "", cont_prefix: str = "",
-                 dim_first_prefix: str = "", dim_cont_prefix: str = ""):
+    def __init__(
+        self,
+        emit,
+        first_prefix: str = "",
+        cont_prefix: str = "",
+        dim_first_prefix: str = "",
+        dim_cont_prefix: str = "",
+    ):
         self.emit = emit
         self.first_prefix = first_prefix
         self.cont_prefix = cont_prefix
@@ -264,8 +275,8 @@ class StreamMarkdown:
         self.buf = ""
         self.opened = False
         self.mid_line = False
-        self.in_dim = False        # currently inside a <think> block
-        self.dim_opened = False    # have we emitted any dim line in current block?
+        self.in_dim = False  # currently inside a <think> block
+        self.dim_opened = False  # have we emitted any dim line in current block?
         self.suppress_until: str | None = None  # close marker if currently eliding
         self._max_open = max(len(o) for o, _, _ in self.SUPPRESS_PAIRS)
         # True iff we've emitted at least one non-dim, non-empty line.
@@ -300,7 +311,7 @@ class StreamMarkdown:
                 prefix = self.cont_prefix
             self.opened = True
             self.emit(prefix + render_markdown(line) + terminator)
-        self.mid_line = (terminator == "")
+        self.mid_line = terminator == ""
 
     def feed(self, text: str) -> None:
         if not text:
@@ -330,7 +341,7 @@ class StreamMarkdown:
                     if len(self.buf) > keep:
                         self.buf = self.buf[-keep:]
                     return
-                self.buf = self.buf[idx + len(close):]
+                self.buf = self.buf[idx + len(close) :]
                 self.suppress_until = None
                 continue
 
@@ -344,8 +355,8 @@ class StreamMarkdown:
                     # so we don't split the close marker across emits.
                     if "\n" in self.buf:
                         last_nl = self.buf.rfind("\n")
-                        head = self.buf[:last_nl + 1]
-                        self.buf = self.buf[last_nl + 1:]
+                        head = self.buf[: last_nl + 1]
+                        self.buf = self.buf[last_nl + 1 :]
                         for line in head.split("\n")[:-1]:
                             self._emit_line(line, "\n")
                         continue
@@ -365,7 +376,7 @@ class StreamMarkdown:
                 # newline so the next normal line starts fresh), then exit
                 # dim mode.
                 before = self.buf[:idx]
-                self.buf = self.buf[idx + len(close):]
+                self.buf = self.buf[idx + len(close) :]
                 if before:
                     parts = before.split("\n")
                     for line in parts[:-1]:
@@ -396,7 +407,7 @@ class StreamMarkdown:
             if earliest >= 0:
                 # Emit text before the marker as normal lines.
                 before = self.buf[:earliest]
-                self.buf = self.buf[earliest + earliest_open_len:]
+                self.buf = self.buf[earliest + earliest_open_len :]
                 self.suppress_until = earliest_close
                 if before:
                     parts = before.split("\n")
@@ -417,8 +428,8 @@ class StreamMarkdown:
             # catch open markers split across feed() calls.
             if "\n" in self.buf:
                 last_nl = self.buf.rfind("\n")
-                head = self.buf[:last_nl + 1]
-                self.buf = self.buf[last_nl + 1:]
+                head = self.buf[: last_nl + 1]
+                self.buf = self.buf[last_nl + 1 :]
                 for line in head.split("\n")[:-1]:
                     self._emit_line(line, "\n")
                 continue
@@ -474,16 +485,22 @@ def _wrap_visible(text: str, width: int) -> list[str]:
 
 # Box characters
 _BX = {
-    "single":  ("┌", "┐", "└", "┘", "─", "│"),
-    "double":  ("╔", "╗", "╚", "╝", "═", "║"),
-    "round":   ("╭", "╮", "╰", "╯", "─", "│"),
-    "thick":   ("┏", "┓", "┗", "┛", "━", "┃"),
+    "single": ("┌", "┐", "└", "┘", "─", "│"),
+    "double": ("╔", "╗", "╚", "╝", "═", "║"),
+    "round": ("╭", "╮", "╰", "╯", "─", "│"),
+    "thick": ("┏", "┓", "┗", "┛", "━", "┃"),
 }
 
 
-def panel(body: str | list[str], title: str = "", style: str = "round",
-          color_c: str = PLUM, title_c: str = GLOW,
-          inner_pad: int = 1, markdown: bool = False) -> None:
+def panel(
+    body: str | list[str],
+    title: str = "",
+    style: str = "round",
+    color_c: str = PLUM,
+    title_c: str = GLOW,
+    inner_pad: int = 1,
+    markdown: bool = False,
+) -> None:
     """Print a bordered panel containing wrapped body text.
 
     If `markdown=True`, the body is run through render_markdown() and
@@ -513,8 +530,11 @@ def panel(body: str | list[str], title: str = "", style: str = "round",
     if title:
         title_visible = f" {title} "
         bar_len = max(0, w - 2 - _vlen(title_visible))
-        top = (color(tl + h * 2, color_c) + color(title_visible, title_c) +
-               color(h * (bar_len - 2) + tr, color_c))
+        top = (
+            color(tl + h * 2, color_c)
+            + color(title_visible, title_c)
+            + color(h * (bar_len - 2) + tr, color_c)
+        )
     else:
         top = color(tl + h * (w - 2) + tr, color_c)
 
@@ -676,7 +696,7 @@ class Spinner:
             # the whole line always fits on one row.
             term_w = width()
             label_text = self._current_label(elapsed) + "…"
-            fixed = len(frame) + len(timer) + 6   # spaces + padding
+            fixed = len(frame) + len(timer) + 6  # spaces + padding
             avail = max(8, term_w - fixed)
             if len(label_text) > avail:
                 label_text = label_text[: max(1, avail - 1)] + "…"
@@ -792,6 +812,7 @@ class SilenceWatchdog:
 #   ✓ / ✗  how that tool turned out
 #   ❀  a plan / something organized
 
+
 def info(msg: str) -> None:
     print(color("  · ", DUSK) + color(msg, SURFACE))
 
@@ -847,9 +868,11 @@ def tool_result(summary: str, ok: bool = True) -> None:
 
 # ---------- banner ----------
 
+
 def greeting_word(hour: int | None = None) -> str:
     """Time-of-day greeting. Cagentic opens warm, not with a status dump."""
     import time as _t
+
     if hour is None:
         hour = _t.localtime().tm_hour
     if hour < 5:
@@ -863,8 +886,7 @@ def greeting_word(hour: int | None = None) -> str:
     return "winding down"
 
 
-def banner(model: str, cwd: str, tools_enabled: bool = True,
-           user_name: str | None = None) -> None:
+def banner(model: str, cwd: str, tools_enabled: bool = True, user_name: str | None = None) -> None:
     """Cozy, compact welcome card — a lit window at dusk, not a tech splash.
 
     No giant block-letter logo: a personal assistant should feel like a
@@ -919,7 +941,7 @@ def _short_path(p: str) -> str:
         if p == home:
             return "~"
         if p.startswith(home + os.sep):
-            return "~" + p[len(home):]
+            return "~" + p[len(home) :]
     except Exception:
         pass
     return p
@@ -927,12 +949,14 @@ def _short_path(p: str) -> str:
 
 def _os_home() -> str:
     from pathlib import Path
+
     return str(Path.home())
 
 
 # ---------------------------------------------------------------------------
 # Status bar
 # ---------------------------------------------------------------------------
+
 
 class StatusBar:
     """One-row status bar pinned to the terminal's last line via DECSTBM.
@@ -954,15 +978,15 @@ class StatusBar:
 
     def __init__(self, ctx_tokens: int = 0) -> None:
         self._t0 = time.monotonic()
-        self._tok = 0            # output chars seen this turn ÷ 4 ≈ tokens
-        self._ctx = ctx_tokens   # running context estimate, updated on done
+        self._tok = 0  # output chars seen this turn ÷ 4 ≈ tokens
+        self._ctx = ctx_tokens  # running context estimate, updated on done
         self._step_n: int | None = None
         self._step_m: int | None = None
         self._stop = threading.Event()
         self._thread: threading.Thread | None = None
         self._lock = threading.Lock()
         self._active = False
-        self._last_rows = 0      # track height so resize re-reserves the row
+        self._last_rows = 0  # track height so resize re-reserves the row
 
     # ------------------------------------------------------------------
     # Public API
@@ -980,9 +1004,9 @@ class StatusBar:
         # over the banner and previous output.
         with _PAINT_LOCK:
             sys.stdout.write(
-                "\0337"                   # ESC 7: save cursor (DECSC)
-                + f"\033[1;{rows - 1}r"   # DECSTBM — reserve bottom row (homes)
-                + "\0338"                 # ESC 8: restore cursor (DECRC)
+                "\0337"  # ESC 7: save cursor (DECSC)
+                + f"\033[1;{rows - 1}r"  # DECSTBM — reserve bottom row (homes)
+                + "\0338"  # ESC 8: restore cursor (DECRC)
             )
             sys.stdout.flush()
         self._active = True
@@ -1023,11 +1047,11 @@ class StatusBar:
         # whole screen.
         with _PAINT_LOCK:
             sys.stdout.write(
-                "\0337"               # ESC 7: save cursor (DECSC)
-                + "\033[r"            # reset scroll region (homes cursor)
-                + f"\033[{rows};1H"   # move to bar row
-                + "\033[2K"           # clear it
-                + "\0338"             # ESC 8: restore cursor (DECRC)
+                "\0337"  # ESC 7: save cursor (DECSC)
+                + "\033[r"  # reset scroll region (homes cursor)
+                + f"\033[{rows};1H"  # move to bar row
+                + "\033[2K"  # clear it
+                + "\0338"  # ESC 8: restore cursor (DECRC)
             )
             sys.stdout.flush()
 
@@ -1061,7 +1085,7 @@ class StatusBar:
         row = "  " + " · ".join(parts)
         cols = shutil.get_terminal_size((80, 24)).columns
         if len(row) > cols - 1:
-            row = row[:max(0, cols - 2)] + "…"
+            row = row[: max(0, cols - 2)] + "…"
         return row
 
     def _paint(self) -> None:
@@ -1076,12 +1100,12 @@ class StatusBar:
             self._last_rows = rows
         with _PAINT_LOCK:
             sys.stdout.write(
-                "\0337"                          # ESC 7: save cursor
-                + resize_seq                     # re-reserve bottom row on resize
-                + f"\033[{rows};1H"              # move to bottom row
-                + "\033[2K"                      # clear line
-                + f"\033[38;5;246m{text}\033[0m" # muted gray (256-color 246)
-                + "\0338"                        # ESC 8: restore cursor
+                "\0337"  # ESC 7: save cursor
+                + resize_seq  # re-reserve bottom row on resize
+                + f"\033[{rows};1H"  # move to bottom row
+                + "\033[2K"  # clear line
+                + f"\033[38;5;246m{text}\033[0m"  # muted gray (256-color 246)
+                + "\0338"  # ESC 8: restore cursor
             )
             sys.stdout.flush()
 

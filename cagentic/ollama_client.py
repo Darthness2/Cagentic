@@ -1,4 +1,5 @@
 """Thin wrapper around the Ollama HTTP API."""
+
 from __future__ import annotations
 
 import json
@@ -12,6 +13,7 @@ def _is_apple_silicon() -> bool:
     CPU' from /api/ps doesn't mean a model is spilling off the GPU the way
     it does on a discrete-VRAM card. Used to tune the warning copy."""
     import platform
+
     return platform.system() == "Darwin" and platform.machine() in ("arm64", "aarch64")
 
 
@@ -46,7 +48,7 @@ def _normalize_host(host: str) -> str:
         "0.0.0.0": "127.0.0.1",
         "::": "::1",
         "[::]": "::1",
-        "0": "127.0.0.1",          # `OLLAMA_HOST=0` is shorthand some tools accept
+        "0": "127.0.0.1",  # `OLLAMA_HOST=0` is shorthand some tools accept
     }
     rewritten = _LOOPBACK.get(hostname)
 
@@ -77,8 +79,9 @@ def _explain_http_error(status: int, body: str) -> str:
     """
     b = body.lower()
     # Common Ollama-internal parse failures — typically transient, retry works.
-    if status == 500 and ("xml syntax error" in b or "template:" in b
-                          or "json: cannot unmarshal" in b):
+    if status == 500 and (
+        "xml syntax error" in b or "template:" in b or "json: cannot unmarshal" in b
+    ):
         return (
             f"ollama internal error (HTTP 500): {body[:200]}\n"
             "→ this is an Ollama parser hiccup, usually transient. Try /retry. "
@@ -130,7 +133,8 @@ def _looks_like_tools_error(body: str) -> bool:
     b = body.lower()
     return (
         "does not support tools" in b
-        or "tool" in b and ("not support" in b or "unsupported" in b or "no tool" in b)
+        or "tool" in b
+        and ("not support" in b or "unsupported" in b or "no tool" in b)
     )
 
 
@@ -171,7 +175,7 @@ class OllamaClient:
         `timeout` is kept for back-compat: if you pass it and leave both
         read timeouts at their defaults, it overrides them both.
         """
-        self.host = host   # property setter runs _normalize_host
+        self.host = host  # property setter runs _normalize_host
         self.timeout = timeout
         self.connect_timeout = connect_timeout
         legacy_override = timeout != 600
@@ -179,7 +183,9 @@ class OllamaClient:
             float(timeout) if legacy_override and read_timeout == 1800.0 else read_timeout
         )
         self.nonstream_read_timeout = (
-            float(timeout) if legacy_override and nonstream_read_timeout == 1800.0 else nonstream_read_timeout
+            float(timeout)
+            if legacy_override and nonstream_read_timeout == 1800.0
+            else nonstream_read_timeout
         )
         self.keep_alive = keep_alive
         self.num_ctx = num_ctx
@@ -199,7 +205,11 @@ class OllamaClient:
     def _apply_keep_alive(self, payload: dict) -> None:
         if self.keep_alive is not None and "keep_alive" not in payload:
             payload["keep_alive"] = self.keep_alive
-        opts = payload.setdefault("options", {}) if (self.num_ctx or self.num_predict is not None) else None
+        opts = (
+            payload.setdefault("options", {})
+            if (self.num_ctx or self.num_predict is not None)
+            else None
+        )
         if self.num_ctx and opts is not None:
             opts.setdefault("num_ctx", self.num_ctx)
         # num_predict: only ever send a POSITIVE cap.
@@ -211,8 +221,7 @@ class OllamaClient:
         # rejected with HTTP 400). Omitting it instead lets every backend
         # apply its own sensible default: unlimited on local Ollama, a
         # reasonable cap on cloud providers.
-        if (isinstance(self.num_predict, int) and self.num_predict > 0
-                and opts is not None):
+        if isinstance(self.num_predict, int) and self.num_predict > 0 and opts is not None:
             opts.setdefault("num_predict", self.num_predict)
 
     def list_models(self) -> list[str]:
@@ -403,16 +412,19 @@ class OllamaClient:
             if tc:
                 tool_calls.extend(tc)
             if chunk.get("done"):
-                yield ("done", {
-                    "message": {
-                        "role": role,
-                        "content": full,
-                        "tool_calls": tool_calls,
+                yield (
+                    "done",
+                    {
+                        "message": {
+                            "role": role,
+                            "content": full,
+                            "tool_calls": tool_calls,
+                        },
+                        "eval_count": int(chunk.get("eval_count") or 0),
+                        "prompt_eval_count": int(chunk.get("prompt_eval_count") or 0),
+                        "total_duration_ns": int(chunk.get("total_duration") or 0),
                     },
-                    "eval_count": int(chunk.get("eval_count") or 0),
-                    "prompt_eval_count": int(chunk.get("prompt_eval_count") or 0),
-                    "total_duration_ns": int(chunk.get("total_duration") or 0),
-                })
+                )
                 return
 
         # Stream ended without ever seeing a 'done' chunk — usually means the
@@ -420,14 +432,17 @@ class OllamaClient:
         # proxy closed the socket). Don't throw the partial response away;
         # synthesize a 'done' from what we accumulated so the caller can
         # still act on the content received so far.
-        yield ("done", {
-            "message": {
-                "role": role,
-                "content": full,
-                "tool_calls": tool_calls,
+        yield (
+            "done",
+            {
+                "message": {
+                    "role": role,
+                    "content": full,
+                    "tool_calls": tool_calls,
+                },
+                "eval_count": 0,
+                "prompt_eval_count": 0,
+                "total_duration_ns": 0,
+                "truncated": True,
             },
-            "eval_count": 0,
-            "prompt_eval_count": 0,
-            "total_duration_ns": 0,
-            "truncated": True,
-        })
+        )

@@ -10,6 +10,7 @@ answer writes right over the banner and previous output.
 These tests assert the structural invariant directly: *every* scroll-region
 escape the StatusBar emits lies between a save and a later restore.
 """
+
 from __future__ import annotations
 
 import io
@@ -21,8 +22,7 @@ import unittest
 
 from cagentic import ui
 
-
-_REGION_RX = re.compile(r"\x1b\[[0-9;]*r")   # DECSTBM set/reset
+_REGION_RX = re.compile(r"\x1b\[[0-9;]*r")  # DECSTBM set/reset
 
 
 class _FakeTTY(io.StringIO):
@@ -39,18 +39,18 @@ def _region_escapes_are_bracketed(s: str) -> bool:
     n = len(s)
     while i < n:
         two = s[i : i + 2]
-        if two == "\x1b7":          # DECSC — save
+        if two == "\x1b7":  # DECSC — save
             depth += 1
             i += 2
             continue
-        if two == "\x1b8":          # DECRC — restore
+        if two == "\x1b8":  # DECRC — restore
             depth = max(0, depth - 1)
             i += 2
             continue
         m = _REGION_RX.match(s, i)
         if m:
             if depth <= 0:
-                return False        # region change with no save in effect
+                return False  # region change with no save in effect
             i = m.end()
             continue
         i += 1

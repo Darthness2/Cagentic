@@ -3,61 +3,51 @@
 Uses prompt_toolkit if available — gives a real popup as you type `/`.
 Falls back to readline tab-completion, then plain input().
 """
+
 from __future__ import annotations
 
-# The one command catalog: (name, argument-spec, hint), grouped for /help.
-#
-# Both the completion popup and `/help` are built from this, so they can't drift
-# apart the way two hand-maintained lists did. Keep a command's entry next to
-# the others in its section; the REPL dispatches on the name in cli.repl().
-COMMAND_GROUPS: list[tuple[str, list[tuple[str, str, str]]]] = [
-    ("conversation", [
-        ("/new",      "[title]",       "start a fresh conversation"),
-        ("/resume",   "[id|number]",   "list or resume a saved conversation"),
-        ("/sessions", "",              "list saved conversations"),
-        ("/save",     "[title]",       "force-save the current conversation"),
-        ("/rename",   "<new title>",   "rename the current conversation"),
-        ("/delete",   "<id|number>",   "delete a saved conversation"),
-        ("/clear",    "",              "wipe history (the saved session stays)"),
-        ("/retry",    "",              "re-run your last message"),
-    ]),
-    ("what I remember", [
-        ("/notes",    "",              "list saved notes (my knowledge base)"),
-        ("/note",     "<name>",        "show a single note"),
-        ("/remind",   "[add <text>]",  "list reminders, or add one"),
-        ("/todo",     "[add|done|clear]", "the session todo list"),
-        ("/name",     "<your name>",   "tell me what to call you"),
-    ]),
-    ("files", [
-        ("/cd",       "[path]",        "show or change the workspace directory"),
-        ("/diff",     "[N]",           "show file edits from this session"),
-        ("/undo",     "",              "revert the most recent file edit"),
-    ]),
-    ("tools & permissions", [
-        ("/tools",    "",              "list the tools I can call"),
-        ("/groups",   "[enable|disable <g>]", "which tool groups I'm given"),
-        ("/plan",     "on|off",        "plan mode — read-only, no changes"),
-        ("/yolo",     "[on|off]",      "auto-approve tool calls"),
-    ]),
-    ("connections", [
-        ("/mcp",      "[server]",      "MCP servers, or one server's tools"),
-        ("/browser",  "",              "Chrome extension status + setup"),
-        ("/gateway",  "[off]",         "start or stop the web UI"),
-        ("/login",    "<service> <key>", "save a github / openai / anthropic key"),
-        ("/logout",   "<service>",     "remove a saved key"),
-        ("/whoami",   "",              "show the authenticated GitHub user"),
-    ]),
-    ("system", [
-        ("/model",    "[name]",        "show or switch model"),
-        ("/models",   "",              "list available models"),
-        ("/host",     "[url]",         "show or change the Ollama host"),
-        ("/stream",   "on|off",        "toggle live token streaming"),
-        ("/config",   "",              "show current config (tokens redacted)"),
-        ("/set",      "<key> <value>", "set a config value"),
-        ("/diag",     "",              "model / workspace / tools / data status"),
-        ("/help",     "",              "show this list"),
-        ("/exit",     "",              "leave Cagentic"),
-    ]),
+# (name, hint) pairs shown in the popup. Personal-assistant flavored.
+SLASH_COMMANDS: list[tuple[str, str]] = [
+    ("/help", "show available commands"),
+    ("/tools", "list tools the model can call"),
+    ("/groups", "show/change which tool groups are sent to the model"),
+    ("/cd", "show or change the workspace directory"),
+    ("/notes", "list saved notes (knowledge base)"),
+    ("/note", "show a single note: /note <name>"),
+    ("/remind", "list reminders, add one: /remind add <text>"),
+    ("/mcp", "list MCP servers / tools: /mcp [server]"),
+    ("/browser", "Chrome extension status + setup instructions"),
+    ("/gateway", "start/stop the Cagentic web UI"),
+    ("/plan", "toggle plan mode (read-only)"),
+    ("/effort", "how hard the model works: /effort low|medium|high"),
+    ("/todo", "view or modify the session todo list"),
+    ("/stream", "toggle token streaming on/off"),
+    ("/diag", "print model / workspace / tools / mcp status"),
+    ("/model", "show or switch model"),
+    ("/models", "list installed Ollama models"),
+    ("/host", "show or change Ollama host"),
+    ("/config", "show current config (tokens redacted)"),
+    ("/set", "set a config value: /set <key> <value>"),
+    ("/name", "tell the assistant what to call you: /name Alex"),
+    ("/login", "/login github <token>"),
+    ("/logout", "/logout github"),
+    ("/whoami", "show authenticated GitHub user"),
+    ("/clear", "reset conversation history"),
+    ("/diff", "show file edits this session"),
+    ("/undo", "revert the most recent file edit"),
+    ("/retry", "re-run your last message"),
+    ("/new", "start a new conversation"),
+    ("/resume", "list/resume saved conversations"),
+    ("/sessions", "list saved conversations"),
+    ("/search", "search saved conversations"),
+    ("/context", "show context token usage"),
+    ("/compact", "summarize older context and retain recent turns"),
+    ("/save", "force-save / set title of current conversation"),
+    ("/rename", "rename the current conversation"),
+    ("/delete", "delete a saved conversation"),
+    ("/yolo", "toggle / set auto-approve (/yolo on|off)"),
+    ("/exit", "leave Cagentic"),
+    ("/quit", "leave Cagentic"),
 ]
 
 # Flat (name, hint) pairs for the completion popup, derived from the catalog.
@@ -107,15 +97,17 @@ def _build_pt_session():
     # Slash-command popup styled in Cagentic's warm-dusk palette — dark
     # plum menu, soft mauve text, a copper-peach highlight on the selected
     # row.
-    style = Style.from_dict({
-        "completion-menu":                    "bg:#241c2e #cdbbd8",
-        "completion-menu.completion":         "bg:#241c2e #cdbbd8",
-        "completion-menu.completion.current": "bg:#e3a978 #2a1e10 bold",
-        "completion-menu.meta":               "bg:#241c2e #8f7f9e",
-        "completion-menu.meta.current":       "bg:#d39a6a #2a1e10",
-        "scrollbar.background":               "bg:#241c2e",
-        "scrollbar.button":                   "bg:#8a6f86",
-    })
+    style = Style.from_dict(
+        {
+            "completion-menu": "bg:#241c2e #cdbbd8",
+            "completion-menu.completion": "bg:#241c2e #cdbbd8",
+            "completion-menu.completion.current": "bg:#e3a978 #2a1e10 bold",
+            "completion-menu.meta": "bg:#241c2e #8f7f9e",
+            "completion-menu.meta.current": "bg:#d39a6a #2a1e10",
+            "scrollbar.background": "bg:#241c2e",
+            "scrollbar.button": "bg:#8a6f86",
+        }
+    )
 
     try:
         session = PromptSession(
@@ -173,14 +165,14 @@ class Prompt:
             return None
         reason = self._pt_error or "prompt_toolkit unavailable"
         if self._readline:
-            return (f"slash-command popup OFF — {reason}. "
-                    f"TAB still completes /commands.")
+            return f"slash-command popup OFF — {reason}. TAB still completes /commands."
         return f"slash-command popup OFF — {reason}."
 
     def ask(self, prompt: str) -> str:
         if self._pt is not None:
             try:
                 from prompt_toolkit.formatted_text import ANSI
+
                 return self._pt.prompt(ANSI(prompt))
             except Exception:
                 return self._pt.prompt(prompt)

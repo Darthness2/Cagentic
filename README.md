@@ -14,10 +14,14 @@ Cagentic **remembers things about you** across sessions, keeps a persistent remi
 - **MCP bridges** — point Cagentic at any MCP server (Notion, Google Drive, Slack, your own custom ones) via stdio JSON-RPC and it can call their tools and read their resources.
 - **Controls your browser** — a companion Chrome extension lets Cagentic read pages, open tabs, click links, and fill forms in your actual browser.
 - **Web UI** — `/gateway` starts a local web app: the full assistant in a browser tab, with tool approvals shown right on the page.
+- **Personal OS dashboard** — the gateway opens on a proactive command center for goals, calendar events, deadlines, a unified inbox, scheduled AI routines, connected services, and a focus feed. Everything is stored locally and is also available to the assistant as tools.
 - **Conversations persist** — sessions auto-save to `~/.config/cagentic/sessions/`. `/resume` to come back to one.
 - **Background jobs** — slow shell commands run in the background; their output gets injected back into the conversation when they finish.
 - **GitHub integration** (optional) — list repos, read files, browse issues/PRs with a personal access token.
+- **Full coding agent** (absorbed from Collama) — atomic `multi_edit` batches, parser-only `check_syntax` for 12+ languages, Jupyter `notebook_edit`, a worktree stack for sub-projects, PowerShell support, sub-agents (`agent_call` / `agent_call_async`), a persistent cross-session task graph, and an `/effort low|medium|high` dial for how hard the model works.
+- **Agent teams** (optional, `/groups enable teams`) — long-lived teammate personas with mailboxes; a coordinator processes each teammate's mail by forking sub-agents and can auto-claim matching tasks from the task graph.
 - **Multi-provider** — use Ollama locally, or connect OpenAI and Anthropic for cloud models when you need more power.
+- **iOS companion** — the Cagentic iOS app's chat *and* coding tabs both connect to the same `/gateway`. To reach it from your phone, set `"gateway": {"lan": true, "token": "<secret>"}` in `~/.config/cagentic/config.json` (LAN exposure is off by default; the token is required on every request).
 
 ## Requirements
 
@@ -186,8 +190,9 @@ Cagentic launches each server as a subprocess on first use and keeps a long-live
 | | |
 |---|---|
 | `/tools` | list every tool the model can call |
-| `/groups` | manage which tool groups are sent (default: files, web, notes, reminders, mcp, shell, tasks, interaction, planning, system) |
+| `/groups` | manage which tool groups are sent (default: files, web, notes, reminders, mcp, browser, shell, tasks, interaction, planning, system, coding, worktree, subagent; opt-in: teams, github) |
 | `/plan on\|off` | read-only mode |
+| `/effort low\|medium\|high` | how hard the model works per turn |
 | `/todo` | per-session todo list |
 | `/yolo` | toggle auto-approve for tool calls |
 
@@ -255,11 +260,51 @@ Browser tools: `browser_status`, `browser_tabs`, `browser_read`, `browser_open`,
 
 It runs its own conversation (separate from the terminal session) but shares your notes, reminders, and connected services. The port is `gateway.port` in config (default `8700`). Like everything else, it's bound to localhost only.
 
+If the configured port is already occupied, Cagentic automatically tries the next 20 ports and prints the URL it selected. Set `gateway.auto_port` to `false` if you prefer startup to fail instead.
+
+The gateway's Core, Inbox, Planner, Goals, Routines, Skills, and Connections workspaces share one local data model with chat. You can capture an inbox item, event, deadline, or goal in the UI, or ask Cagentic naturally; the assistant can use the `inbox_*`, `calendar_event_*`, `goal_*`, `routine_*`, and `personal_briefing` tools to keep the same dashboard current. Configured MCP servers appear in Connections and remain the bridge to services such as Notion, Drive, and Slack.
+
+The **Core** route uses a dense terminal-style command deck: live vitals and directives on the left, an animated cognitive network and primary intent in the center, and on-demand commands, schedule, deadlines, and proactive intelligence on the right. The **Skills** route exposes Cagentic's live architecture as four execution modes—manual actions, reusable skills, scheduled routines, and delegated agents—organized into Memory, Productivity, Research, Content, Community, Agency, Sales, Finance, and Custom Ops branches. Capability tiles are grounded in registered tools and hand their intent directly to the conductor instead of acting as decorative shortcuts.
+
+Connections can also synchronize calendars directly:
+
+- **iCalendar feeds** (`https://…/*.ics` or `webcal://…`) import events from Google Calendar, Outlook, Apple Calendar, and other products that expose a subscription URL.
+- **CalDAV** connects to standards-compatible providers for import-only, publish-only, or two-way event sync.
+- **Export .ics** in Planner exports the local Cagentic calendar for transfer or subscription elsewhere.
+
+Calendar connections can refresh automatically in the background. Connector credentials are stored only in the local SQLite database, whose files are restricted to the current OS user, and credential fields are never returned by gateway APIs.
+
+The unified inbox combines manual capture with standards-based IMAP ingestion. Email sync imports unread message headers—sender, subject, date, message ID, and size metadata—without downloading message bodies or attachments. Read, done, archived, priority, and snooze state remain local and survive provider refreshes.
+
+Proactive routines put useful thinking on a local schedule: daily planning, inbox triage, weekly review, or a custom prompt. A routine uses the configured model when it is available and falls back to a deterministic local briefing when it is not, then stores the result in the notification center.
+
+The proactive monitor also watches for overdue deadlines, events starting soon, schedule conflicts, and goals at risk. Alerts are durable and deduplicated, and can optionally be delivered as native desktop notifications. Both monitoring and desktop delivery can be disabled in Settings.
+
+The frontend is shipped as package assets rather than embedded in Python. API chat requests may include a saved session `id`; those sessions run through isolated actors with separate engines, message buffers, workspace boundaries, repository defaults, and locks.
+
+## Setup, diagnostics, and saved context
+
+```bash
+cagentic --setup                  # guided model/name/workspace/gateway setup
+cagentic --doctor                # readable health report
+cagentic --doctor --json         # automation-friendly health report
+cagentic --completion bash       # also zsh or fish
+cagentic --sessions              # list conversations without starting a model
+cagentic --search "auth bug"      # search titles and message content
+cagentic --context SESSION_ID    # token usage
+cagentic --compact SESSION_ID    # compact older context, keep recent turns
+```
+
+Inside the REPL, `/search`, `/context`, and `/compact` provide the same core workflows. Unknown slash commands suggest the closest known command.
+
+Sessions, projects, tasks, and reminders are indexed transactionally in `~/.config/cagentic/state.sqlite3` using WAL mode. Existing JSON is imported automatically and retained as a non-destructive compatibility backup.
+
 ## File locations
 
 ```
 ~/.config/cagentic/
 ├── config.json          # persistent config (chmod 600)
+├── state.sqlite3        # indexed transactional state (WAL mode)
 ├── history              # REPL input history
 ├── notes/               # *.md knowledge-base notes
 ├── reminders.json       # persistent reminders

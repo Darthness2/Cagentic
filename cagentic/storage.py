@@ -1,119 +1,143 @@
-"""Small shared helpers used by every persistence module.
+"""Small transactional SQLite JSON store with non-destructive migration."""
 
-Centralizes the things that were copy-pasted across config.py, sessions.py,
-projects.py, reminders.py, and tasks.py:
-- atomic_write_json: unique temp file -> fsync -> replace, at 0600
-- read_json: load with graceful fallback on missing/bad files
-- fmt_duration / fmt_ago: the s/m/h/d ladder that sessions + reminders both had
-- STATUS_MARK: the done/pending/active/blocked glyph map
-"""
 from __future__ import annotations
 
 import json
-import logging
 import os
+import sqlite3
 import stat
-import tempfile
 import threading
-import time
 from pathlib import Path
-from typing import Any, Callable, TypeVar
+from typing import Iterable
 
-logger = logging.getLogger(__name__)
+from .config import config_dir
 
-# A safe default for files that may hold tokens (config, sessions, reminders,
-# projects, tasks). Failure to chmod is fine on Windows / FAT / some sandboxes.
-_PRIVATE_MODE = stat.S_IRUSR | stat.S_IWUSR
-
-# Serializes concurrent saves (gateway thread + REPL autosave) so the
-# write-temp-then-replace dance can't interleave and corrupt a file.
-_SAVE_LOCK = threading.Lock()
-
-T = TypeVar("T")
+_LOCK = threading.RLock()
+_MIGRATED: set[tuple[str, str]] = set()
 
 
-def atomic_write_json(path: Path, payload: Any, *, private: bool = True) -> Path:
-    """Write `payload` to `path` as JSON, atomically and privately.
+def database_path() -> Path:
+    root = config_dir()
+    root.mkdir(parents=True, exist_ok=True)
+    return root / "state.sqlite3"
 
-    Writes to a uniquely-named temp file in the same directory, fsyncs it, then
-    os.replace()s it into place — so a crash or a concurrent writer can never
-    leave a half-written file behind, and readers only ever see the old or the
-    new content.
 
-    `private` tightens the temp file to 0600 *before* any bytes are written, so
-    a file holding secrets (API tokens, MCP env values) is never briefly
-    world-readable. fchmod is POSIX-only; on Windows the file inherits the
-    user's own config directory ACL, which is already user-private.
-
-    Raises OSError if the write fails, having cleaned up the temp file.
-    """
-    path.parent.mkdir(parents=True, exist_ok=True)
-    data = json.dumps(payload, indent=2)
-    with _SAVE_LOCK:
-        fd, tmp_name = tempfile.mkstemp(
-            dir=str(path.parent), prefix=f".{path.name}.", suffix=".tmp"
-        )
-        try:
-            if private and hasattr(os, "fchmod"):
-                os.fchmod(fd, _PRIVATE_MODE)
-            with os.fdopen(fd, "w", encoding="utf-8") as f:
-                f.write(data)
-                f.flush()
-                os.fsync(f.fileno())
-            os.replace(tmp_name, path)
-        except OSError:
-            logger.warning("atomic write failed for %s", path, exc_info=True)
+def _connect() -> sqlite3.Connection:
+    path = database_path()
+    db = sqlite3.connect(path, timeout=10)
+    db.execute("PRAGMA journal_mode=WAL")
+    db.execute("PRAGMA synchronous=NORMAL")
+    # The database can hold calendar app passwords and other connector
+    # credentials. Keep the main file and SQLite sidecars user-private.
+    if hasattr(os, "chmod"):
+        for candidate in (path, Path(str(path) + "-wal"), Path(str(path) + "-shm")):
             try:
-                os.unlink(tmp_name)
+                if candidate.exists():
+                    os.chmod(candidate, stat.S_IRUSR | stat.S_IWUSR)
             except OSError:
-                logger.warning("could not clean up temp file %s", tmp_name, exc_info=True)
-            raise
-    return path
+                pass
+    db.execute(
+        """CREATE TABLE IF NOT EXISTS objects (
+            namespace TEXT NOT NULL,
+            key TEXT NOT NULL,
+            payload TEXT NOT NULL,
+            updated_at REAL NOT NULL DEFAULT 0,
+            PRIMARY KEY(namespace, key)
+        )"""
+    )
+    db.execute(
+        "CREATE INDEX IF NOT EXISTS objects_by_updated ON objects(namespace, updated_at DESC)"
+    )
+    return db
 
 
-def read_json(path: Path, default: T, *, loader: Callable[[str], T] = json.loads) -> T:
-    """Read JSON from `path`; return `default` on missing/broken/IO errors."""
-    if not path.exists():
-        return default
+def put(namespace: str, key: str, value: object, updated_at: float = 0) -> None:
+    payload = json.dumps(value, ensure_ascii=False)
+    with _LOCK, _connect() as db:
+        db.execute(
+            """INSERT INTO objects(namespace,key,payload,updated_at) VALUES(?,?,?,?)
+               ON CONFLICT(namespace,key) DO UPDATE SET
+                 payload=excluded.payload, updated_at=excluded.updated_at""",
+            (namespace, key, payload, updated_at),
+        )
+
+
+def get(namespace: str, key: str):
+    with _LOCK, _connect() as db:
+        row = db.execute(
+            "SELECT payload FROM objects WHERE namespace=? AND key=?", (namespace, key)
+        ).fetchone()
+    if row is None:
+        return None
     try:
-        return loader(path.read_text(encoding="utf-8"))
-    except (json.JSONDecodeError, OSError, UnicodeDecodeError, ValueError):
-        return default
+        return json.loads(row[0])
+    except (json.JSONDecodeError, TypeError):
+        return None
 
 
-def fmt_duration(seconds: float) -> str:
-    """Compact "<n>s|m|h|d" duration. Negative values get the same magnitude."""
-    s = abs(int(seconds))
-    if s < 60:
-        return f"{s}s"
-    if s < 3600:
-        return f"{s // 60}m"
-    if s < 86400:
-        return f"{s // 3600}h"
-    return f"{s // 86400}d"
+def delete(namespace: str, key: str) -> bool:
+    with _LOCK, _connect() as db:
+        cur = db.execute("DELETE FROM objects WHERE namespace=? AND key=?", (namespace, key))
+        return cur.rowcount > 0
 
 
-def fmt_ago(ts: int | float | None) -> str:
-    """Relative time string ("3m ago", "2d ago"). Returns "?" for falsy input."""
-    if not ts:
-        return "?"
-    delta = int(time.time()) - int(ts)
-    return f"{fmt_duration(delta)} ago"
+def list_values(namespace: str) -> list[object]:
+    with _LOCK, _connect() as db:
+        rows = db.execute(
+            "SELECT payload FROM objects WHERE namespace=? ORDER BY updated_at DESC, key",
+            (namespace,),
+        ).fetchall()
+    out = []
+    for (payload,) in rows:
+        try:
+            out.append(json.loads(payload))
+        except (json.JSONDecodeError, TypeError):
+            continue
+    return out
 
 
-# Shared status glyph map. Keys are the canonical status strings used by
-# reminders (pending/done/snoozed/cancelled), tasks (pending/active/done/
-# blocked/failed/cancelled), and the REPL's /todo command.
-STATUS_MARK: dict[str, str] = {
-    "done":      "✓",
-    "pending":   " ",
-    "active":    "→",
-    "blocked":   "✗",
-    "snoozed":   "z",
-    "failed":    "!",
-    "cancelled": "✗",
-}
+def search_values(namespace: str, query: str, limit: int = 50) -> list[object]:
+    pattern = f"%{query.casefold()}%"
+    with _LOCK, _connect() as db:
+        rows = db.execute(
+            """SELECT payload FROM objects
+               WHERE namespace=? AND lower(payload) LIKE ?
+               ORDER BY updated_at DESC LIMIT ?""",
+            (namespace, pattern, max(1, min(limit, 500))),
+        ).fetchall()
+    out = []
+    for (payload,) in rows:
+        try:
+            out.append(json.loads(payload))
+        except (json.JSONDecodeError, TypeError):
+            continue
+    return out
 
 
-def status_mark(status: str, default: str = "?") -> str:
-    return STATUS_MARK.get(status or "", default)
+def migrate_json_files(namespace: str, paths: Iterable[Path]) -> int:
+    """Import legacy JSON only when its key is absent; never remove source files."""
+    marker = (str(database_path()), namespace)
+    with _LOCK:
+        if marker in _MIGRATED:
+            return 0
+    imported = 0
+    with _LOCK, _connect() as db:
+        for path in paths:
+            try:
+                value = json.loads(path.read_text(encoding="utf-8"))
+            except (OSError, UnicodeDecodeError, json.JSONDecodeError):
+                continue
+            key = str(value.get("id") or path.stem) if isinstance(value, dict) else path.stem
+            exists = db.execute(
+                "SELECT 1 FROM objects WHERE namespace=? AND key=?", (namespace, key)
+            ).fetchone()
+            if exists is not None:
+                continue
+            updated = float(value.get("updated_at") or 0) if isinstance(value, dict) else 0
+            db.execute(
+                "INSERT INTO objects(namespace,key,payload,updated_at) VALUES(?,?,?,?)",
+                (namespace, key, json.dumps(value, ensure_ascii=False), updated),
+            )
+            imported += 1
+        _MIGRATED.add(marker)
+    return imported

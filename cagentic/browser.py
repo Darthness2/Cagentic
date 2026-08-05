@@ -30,6 +30,7 @@ talk to it. So the bridge is *not* trusted to its bind address alone:
 Every mutating browser action still goes through Cagentic's normal approval
 prompt before it's queued.
 """
+
 from __future__ import annotations
 
 import hmac
@@ -55,9 +56,7 @@ _ALLOWED_HOSTS = frozenset({"localhost", "127.0.0.1", "[::1]", "::1"})
 
 def _token_path() -> str:
     """Path to the persisted shared-secret token file."""
-    base = os.environ.get("XDG_CONFIG_HOME") or os.path.join(
-        os.path.expanduser("~"), ".config"
-    )
+    base = os.environ.get("XDG_CONFIG_HOME") or os.path.join(os.path.expanduser("~"), ".config")
     return os.path.join(base, "cagentic", "browser_token")
 
 
@@ -78,26 +77,19 @@ class BrowserBridge:
         self.token: str = ""
         self._server: ThreadingHTTPServer | None = None
         self._thread: threading.Thread | None = None
-        # Reentrant: _cv is built on this lock, so any helper that takes _lock
-        # (e.g. _record) would deadlock forever if called from inside a
-        # `with self._cv` block. Callers still avoid nesting, but a plain Lock
-        # turns such a slip into a permanently wedged process rather than a bug
-        # you can notice.
         self._lock = threading.RLock()
         self._cv = threading.Condition(self._lock)
-        self._queue: list[dict] = []         # commands awaiting the extension
+        self._queue: list[dict] = []  # commands awaiting the extension
         self._results: dict[int, dict] = {}  # command id -> result
-        # Command ids whose caller has already given up. A result arriving for
-        # one of these is dropped instead of sitting in _results forever.
-        self._abandoned: set[int] = set()
+        self._pending: set[int] = set()  # command ids still awaited by send()
         self._next_id = 1
-        self._last_poll = 0.0                # monotonic time of last extension poll
-        self.error: str | None = None        # set if start() failed
+        self._last_poll = 0.0  # monotonic time of last extension poll
+        self.error: str | None = None  # set if start() failed
         # Live status surfaced to the extension popup.
-        self.model: str | None = None        # the loaded Ollama model
-        self.activity: str = "idle"          # what the assistant is doing
+        self.model: str | None = None  # the loaded Ollama model
+        self.activity: str = "idle"  # what the assistant is doing
         self.activity_at: float = time.time()
-        self._recent: list[dict] = []        # last browser actions, newest first
+        self._recent: list[dict] = []  # last browser actions, newest first
 
     # -- lifecycle ----------------------------------------------------------
 
@@ -112,7 +104,7 @@ class BrowserBridge:
         except OSError as e:
             self.error = f"could not bind 127.0.0.1:{self.port} ({e})"
             return False
-        server.bridge = self            # type: ignore[attr-defined]
+        server.bridge = self  # type: ignore[attr-defined]
         server.daemon_threads = True
         self._server = server
         self._thread = threading.Thread(target=server.serve_forever, daemon=True)
@@ -194,9 +186,15 @@ class BrowserBridge:
 
     def _record(self, action: str, summary: str, ok: bool) -> None:
         with self._lock:
-            self._recent.insert(0, {
-                "action": action, "summary": summary, "ok": ok, "ts": time.time(),
-            })
+            self._recent.insert(
+                0,
+                {
+                    "action": action,
+                    "summary": summary,
+                    "ok": ok,
+                    "ts": time.time(),
+                },
+            )
             del self._recent[8:]
 
     def status(self) -> dict:
@@ -227,6 +225,7 @@ class BrowserBridge:
         with self._cv:
             cmd_id = self._next_id
             self._next_id += 1
+            self._pending.add(cmd_id)
             self._queue.append({"id": cmd_id, "action": action, "params": params})
             self._cv.notify_all()
             deadline = time.monotonic() + timeout
@@ -236,23 +235,23 @@ class BrowserBridge:
                     # Give up: drop the command so the extension doesn't run it
                     # late, and mark the id so a late result isn't retained.
                     self._queue = [c for c in self._queue if c["id"] != cmd_id]
-                    self._abandoned.add(cmd_id)
-                    timed_out = True
-                    break
+                    self._pending.discard(cmd_id)
+                    self._record(action, summary, False)
+                    if not self.is_connected():
+                        return {
+                            "ok": False,
+                            "error": (
+                                "the Cagentic Chrome extension isn't connected — "
+                                "install or enable it (run /browser for setup steps)"
+                            ),
+                        }
+                    return {
+                        "ok": False,
+                        "error": f"browser command '{action}' timed out",
+                    }
                 self._cv.wait(remaining)
-            if not timed_out:
-                result = self._results.pop(cmd_id)
-
-        if timed_out:
-            self._record(action, summary, False)
-            if not self.is_connected():
-                return {"ok": False, "error": (
-                    "the Cagentic Chrome extension isn't connected — "
-                    "install or enable it (run /browser for setup steps)"
-                )}
-            return {"ok": False, "error": f"browser command '{action}' timed out"}
-
-        assert result is not None
+            result = self._results.pop(cmd_id)
+            self._pending.discard(cmd_id)
         self._record(action, summary, bool(result.get("ok")))
         return result
 
@@ -271,10 +270,7 @@ class BrowserBridge:
 
     def _deliver_result(self, cmd_id: int, ok: bool, result) -> None:
         with self._cv:
-            if cmd_id in self._abandoned:
-                # Nobody is waiting for this any more — keeping it would grow
-                # _results without bound across a long session.
-                self._abandoned.discard(cmd_id)
+            if cmd_id not in self._pending:
                 return
             self._results[cmd_id] = {"ok": ok, "result": result}
             self._cv.notify_all()
@@ -359,6 +355,7 @@ class _Handler(BaseHTTPRequestHandler):
             key, _, val = part.partition("=")
             if key == "token" and val:
                 from urllib.parse import unquote
+
                 return unquote(val)
         return None
 

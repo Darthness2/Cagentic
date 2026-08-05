@@ -10,6 +10,7 @@ Two kinds of background work:
   - bash_async(cmd)   — run a shell command in a thread.
   - dream(prompt)     — fork a sub-agent in a thread; result comes back later.
 """
+
 from __future__ import annotations
 
 import logging
@@ -32,8 +33,8 @@ MAX_INFLIGHT = 8
 @dataclass
 class BackgroundJob:
     id: str
-    kind: str          # "bash" | "dream"
-    label: str         # the cmd / prompt
+    kind: str  # "bash" | "dream"
+    label: str  # the cmd / prompt
     status: str = "running"  # running | done | failed
     result: str = ""
     started_at: float = field(default_factory=time.time)
@@ -68,8 +69,7 @@ class BackgroundExecutor:
     def submit_bash(self, command: str, cwd: Path, *, timeout: int = 600) -> str:
         if not self._slots.acquire(blocking=False):
             raise RuntimeError(
-                f"too many background jobs in flight (max {MAX_INFLIGHT}); "
-                f"wait for some to finish"
+                f"too many background jobs in flight (max {MAX_INFLIGHT}); wait for some to finish"
             )
         self._reap_threads()
         job_id = new_id(TaskKind.BASH)
@@ -78,14 +78,18 @@ class BackgroundExecutor:
             if self.tasks is not None:
                 task = self.tasks.create(
                     title=f"bash: {command[:60]}",
-                    kind=TaskKind.BASH, status="active",
-                    description=command, worktree=str(cwd),
+                    kind=TaskKind.BASH,
+                    description=command,
+                    worktree=str(cwd),
                 )
+                self.tasks.update(task.id, status="active")
                 job.task_id = task.id
             with self._lock:
                 self._jobs[job_id] = job
             t = threading.Thread(
-                target=self._run_bash, args=(job_id, command, cwd, timeout), daemon=True,
+                target=self._run_bash,
+                args=(job_id, command, cwd, timeout),
+                daemon=True,
             )
             t.start()
         except BaseException:
@@ -105,8 +109,7 @@ class BackgroundExecutor:
         return the final text. Used by the agent_call tool's async variant."""
         if not self._slots.acquire(blocking=False):
             raise RuntimeError(
-                f"too many background jobs in flight (max {MAX_INFLIGHT}); "
-                f"wait for some to finish"
+                f"too many background jobs in flight (max {MAX_INFLIGHT}); wait for some to finish"
             )
         self._reap_threads()
         job_id = new_id(TaskKind.DREAM)
@@ -115,7 +118,9 @@ class BackgroundExecutor:
             with self._lock:
                 self._jobs[job_id] = job
             t = threading.Thread(
-                target=self._run_dream, args=(job_id, prompt, run), daemon=True,
+                target=self._run_dream,
+                args=(job_id, prompt, run),
+                daemon=True,
             )
             t.start()
         except BaseException:
@@ -162,10 +167,15 @@ class BackgroundExecutor:
             job.result = result
             job.finished_at = time.time()
             task_id = job.task_id
-            self._notifications.append({
-                "id": job_id, "kind": job.kind, "label": job.label,
-                "status": status, "result": result[:2000],
-            })
+            self._notifications.append(
+                {
+                    "id": job_id,
+                    "kind": job.kind,
+                    "label": job.label,
+                    "status": status,
+                    "result": result[:2000],
+                }
+            )
         # Update the concrete task by id — not by matching description, which
         # collided when two jobs shared the same command.
         if self.tasks is not None and task_id is not None:
@@ -183,11 +193,16 @@ class BackgroundExecutor:
         # the model emits; route through bash/sh when available. Lazy import to
         # avoid a tools<->background import-time dependency.
         from .tools import _shell_run_invocation
+
         run_cmd, use_shell = _shell_run_invocation(command)
         try:
             proc = subprocess.run(
-                run_cmd, shell=use_shell, cwd=str(cwd),
-                capture_output=True, text=True, timeout=timeout,
+                run_cmd,
+                shell=use_shell,
+                cwd=str(cwd),
+                capture_output=True,
+                text=True,
+                timeout=timeout,
             )
             ok = proc.returncode == 0
             parts = [f"exit code: {proc.returncode}"]
