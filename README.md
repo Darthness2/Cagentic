@@ -172,6 +172,9 @@ Cagentic launches each server as a subprocess on first use and keeps a long-live
 | `/new [title]` | start fresh |
 | `/resume [id]` | list / resume saved sessions |
 | `/sessions` | list saved sessions |
+| `/search <text>` | search titles and message content |
+| `/context` | show context token usage |
+| `/compact` | summarize older turns, keep the recent ones |
 | `/save [title]` | force-save |
 | `/rename <title>` | rename the current conversation |
 | `/delete <id>` | delete a saved conversation |
@@ -190,7 +193,7 @@ Cagentic launches each server as a subprocess on first use and keeps a long-live
 | | |
 |---|---|
 | `/tools` | list every tool the model can call |
-| `/groups` | manage which tool groups are sent (default: files, web, notes, reminders, mcp, browser, shell, tasks, interaction, planning, system, coding, worktree, subagent; opt-in: teams, github) |
+| `/groups` | manage which tool groups are sent (default: files, web, notes, reminders, life, mcp, browser, shell, tasks, interaction, planning, system, coding, worktree, subagent; opt-in: teams, github) |
 | `/plan on\|off` | read-only mode |
 | `/effort low\|medium\|high` | how hard the model works per turn |
 | `/todo` | per-session todo list |
@@ -309,8 +312,10 @@ Sessions, projects, tasks, and reminders are indexed transactionally in `~/.conf
 ├── notes/               # *.md knowledge-base notes
 ├── reminders.json       # persistent reminders
 ├── sessions/            # auto-saved conversations
+├── projects/            # project folders grouping sessions
 ├── transcripts/         # append-only JSONL of every turn
 ├── tasks/               # background-job tracking
+├── teams/               # teammate personas and their mailboxes
 └── skills/              # *.md skills the model can attach
 ```
 
