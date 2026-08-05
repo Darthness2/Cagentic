@@ -50,6 +50,16 @@ SLASH_COMMANDS: list[tuple[str, str]] = [
     ("/quit", "leave Cagentic"),
 ]
 
+# Flat (name, hint) pairs for the completion popup, derived from the catalog.
+SLASH_COMMANDS: list[tuple[str, str]] = [
+    (name, f"{args}  —  {hint}" if args else hint)
+    for _section, entries in COMMAND_GROUPS
+    for name, args, hint in entries
+] + [("/quit", "leave Cagentic")]
+
+# Every command name the REPL knows, for the "did you mean" hint.
+ALL_COMMANDS: list[str] = [name for name, _ in SLASH_COMMANDS] + ["/reminders"]
+
 
 def _build_pt_session():
     try:

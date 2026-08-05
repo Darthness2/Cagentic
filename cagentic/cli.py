@@ -7,6 +7,7 @@ import json
 import logging
 import os
 import sys
+import textwrap
 import time
 from pathlib import Path
 
@@ -235,6 +236,34 @@ def _pick_model_interactive(client: OllamaClient) -> str | None:
     return ans
 
 
+def print_tools(agent: Agent) -> None:
+    """List the model's tools by group, marking which groups are actually sent.
+
+    A flat 60-line column told you nothing about why a tool wasn't being used;
+    grouping shows the off switches (/groups) right next to what they control.
+    """
+    from .tools import DEFAULT_GROUPS, TOOL_GROUPS, _all_tools
+
+    active = (agent.state.tool_groups
+              if agent.state.tool_groups is not None else DEFAULT_GROUPS)
+    known = set(_all_tools())
+
+    print()
+    for group, names in TOOL_GROUPS.items():
+        on = group in active
+        mark = ui.color("✓", ui.OK) if on else ui.color("·", ui.SOFT)
+        head = ui.color(group, (ui.DUSK + ui.BOLD) if on else ui.SOFT)
+        suffix = "" if on else ui.color(f"  (off — /groups enable {group})", ui.SOFT)
+        print(f"  {mark} {head}{suffix}")
+        body = ", ".join(n for n in names if n in known)
+        for line in textwrap.wrap(body, max(30, ui.width() - 8)):
+            print("      " + ui.color(line, ui.MUTED if on else ui.SOFT))
+    print()
+    mode = "native" if agent.tools_enabled else "text-protocol fallback"
+    sent = len({n for g in active for n in TOOL_GROUPS.get(g, ()) if n in known})
+    ui.info(f"{sent} of {len(known)} tools sent to the model · mode: {mode}")
+
+
 def _reminder_miss(rid: str) -> str:
     """Why an id didn't resolve — genuinely absent, or an ambiguous prefix."""
     matches = [r for r in _reminders.list_all(include_done=True) if r.id.startswith(rid)]
@@ -291,9 +320,13 @@ def _apply_setting_live(agent: Agent, key: str, value) -> bool:
 
 
 def _apply_to_agent(agent: Agent, cfg: dict) -> None:
-    agent.state.github_token = config.get_value(cfg, "github.token")
-    agent.state.yolo = bool(cfg.get("yolo", agent.state.yolo))
-    agent.state.insecure_ssl = bool(config.get_value(cfg, "insecure_ssl", False))
+    # Go through state.update() so subscribers (autosave, tool-support
+    # detection) actually see the change — direct assignment skips them.
+    agent.state.update(
+        github_token=config.get_value(cfg, "github.token"),
+        yolo=bool(cfg.get("yolo", agent.state.yolo)),
+        insecure_ssl=bool(config.get_value(cfg, "insecure_ssl", False)),
+    )
 
 
 def _activate_model(agent: Agent, cfg: dict, model_spec: str) -> None:
@@ -471,7 +504,7 @@ def repl(agent: Agent, cfg: dict, gateway_holder: dict | None = None) -> int:
             if cmd in ("exit", "quit"):
                 return 0
             if cmd == "help":
-                print(HELP_TEXT)
+                print_help()
                 continue
             if cmd == "tools":
                 from .tools import _all_tools
@@ -504,7 +537,7 @@ def repl(agent: Agent, cfg: dict, gateway_holder: dict | None = None) -> int:
                         groups.add(arg2)
                     else:
                         groups.discard(arg2)
-                    agent.state.tool_groups = groups
+                    agent.state.update(tool_groups=groups)
                     agent.engine.refresh_system_prompt()
                     config.set_value(cfg, "tool_groups", sorted(groups))
                     config.save(cfg)
@@ -785,15 +818,16 @@ def repl(agent: Agent, cfg: dict, gateway_holder: dict | None = None) -> int:
                 ui.info(f"groups:   {', '.join(sorted(groups))}")
                 ui.info(f"stream:   {'on' if agent.engine.stream else 'off'}")
                 if isinstance(agent.client, OllamaClient):
-                    ui.info(f"num_ctx:  {agent.client.num_ctx}")
+                    _row("host", agent.client.host)
+                    _row("num_ctx", str(agent.client.num_ctx))
                     status = agent.client.model_vram_status(agent.model)
                     mac = _is_apple_silicon()
                     label = "memory" if mac else "vram"
                     if status is None:
-                        ui.info(f"{label}:    model not currently loaded")
+                        _row(label, "model not currently loaded")
                     elif status["fully_gpu"]:
                         place = "in Metal buffer (unified)" if mac else "fully on GPU ✓"
-                        ui.info(f"{label}:    {status['size_vram'] / (1024**3):.1f} GB · {place}")
+                        _row(label, f"{status['size_vram'] / (1024**3):.1f} GB · {place}")
                     else:
                         size_gb = status["size"] / (1024**3)
                         cpu_gb = status["cpu_bytes"] / (1024**3)
@@ -802,17 +836,20 @@ def repl(agent: Agent, cfg: dict, gateway_holder: dict | None = None) -> int:
                             f"{label}:    {cpu_gb:.1f}/{size_gb:.1f} GB on CPU ({pct:.0f}% offloaded — slow)"
                         )
                 else:
-                    provider_name = type(agent.client).__name__.replace("Client", "")
-                    ui.info(f"provider: {provider_name} (cloud — no local VRAM info)")
+                    _row("provider", f"{_client_provider(agent.client)} "
+                                     f"(cloud — no local VRAM info)")
                 mcp_servers = list(((cfg.get("mcp") or {}).get("servers") or {}).keys())
                 ui.info(
                     f"mcp:      {len(mcp_servers)} configured ({', '.join(mcp_servers) or 'none'})"
                 )
                 notes_n = len(_notes.list_all())
                 rems_n = len(_reminders.list_all())
-                ui.info(f"data:     {notes_n} notes · {rems_n} active reminders")
-                ui.info(f"github:   {'logged in' if agent.state.github_token else 'no token'}")
-                ui.info(f"input:    {prompt.backend}")
+                _row("data", f"{notes_n} notes · {rems_n} active reminders")
+                _row("github", "logged in" if agent.state.github_token else "no token")
+                _row("input", prompt.backend)
+                gw = gateway_holder.get("server")
+                _row("gateway", gw.url() if gw is not None and gw.running else "off")
+                print()
                 continue
             if cmd == "stream":
                 want = arg1.lower() if arg1 else ("off" if agent.engine.stream else "on")
@@ -1361,7 +1398,12 @@ def main(argv: list[str] | None = None) -> int:
 
     saved_groups = config.get_value(cfg, "tool_groups", None)
     if isinstance(saved_groups, list) and saved_groups:
-        agent.state.tool_groups = set(saved_groups)
+        # Ignore group names that no longer exist rather than silently sending
+        # the model an empty toolset from a stale config.
+        from .tools import TOOL_GROUPS
+        known = {g for g in saved_groups if g in TOOL_GROUPS}
+        if known:
+            agent.state.update(tool_groups=known)
 
     # Wire MCP manager onto state, but lazy-start servers
     if cfg.get("mcp", {}).get("servers"):

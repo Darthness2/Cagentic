@@ -6,13 +6,7 @@ Each session is JSON at ~/.config/cagentic/sessions/<id>.json with:
 
 from __future__ import annotations
 
-import json
-import logging
-import os
 import re
-import stat
-import tempfile
-import threading
 import time
 import uuid
 from pathlib import Path
@@ -20,12 +14,7 @@ from typing import Any
 
 from . import storage
 from .config import config_dir
-
-logger = logging.getLogger(__name__)
-
-# Serializes concurrent saves (gateway thread + REPL autosave) so the
-# write-temp-then-replace dance can't interleave and corrupt a session file.
-_SAVE_LOCK = threading.Lock()
+from .storage import atomic_write_json, fmt_ago, read_json
 
 
 def sessions_dir() -> Path:
@@ -172,13 +161,6 @@ def search(query: str, limit: int = 50) -> list[dict]:
 
 
 def fmt_time(ts: int) -> str:
-    if not ts:
-        return "?"
-    delta = int(time.time()) - ts
-    if delta < 60:
-        return f"{delta}s ago"
-    if delta < 3600:
-        return f"{delta // 60}m ago"
-    if delta < 86400:
-        return f"{delta // 3600}h ago"
-    return f"{delta // 86400}d ago"
+    """Relative time for the /sessions table. Kept as the module's own name
+    since callers import it from here; the ladder itself lives in storage."""
+    return fmt_ago(ts)

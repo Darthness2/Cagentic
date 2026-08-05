@@ -8,16 +8,14 @@ days/weeks until you mark them done.
 
 from __future__ import annotations
 
-import json
-import os
 import secrets
-import stat
 import time
 from dataclasses import asdict, dataclass, field
 from pathlib import Path
 
 from . import storage
 from .config import config_dir
+from .storage import atomic_write_json, fmt_duration, read_json, status_mark
 
 
 def _path() -> Path:
@@ -42,29 +40,18 @@ class Reminder:
         return asdict(self)
 
     def short(self) -> str:
-        mark = {"done": "✓", "pending": " ", "snoozed": "z", "cancelled": "✗"}.get(self.status, "?")
+        mark = status_mark(self.status)
         when = ""
         if self.due_at:
             d = self.due_at - time.time()
             if d < 0:
-                when = f"  (overdue {_fmt_dt(-d)})"
+                when = f"  (overdue {fmt_duration(-d)})"
             elif d < 86400 * 2:
-                when = f"  (in {_fmt_dt(d)})"
+                when = f"  (in {fmt_duration(d)})"
             else:
                 when = f"  (due {time.strftime('%a %b %d', time.localtime(self.due_at))})"
         tags = f"  [{','.join(self.tags)}]" if self.tags else ""
         return f"  [{mark}] {self.id}  {self.text}{tags}{when}"
-
-
-def _fmt_dt(seconds: float) -> str:
-    s = int(seconds)
-    if s < 60:
-        return f"{s}s"
-    if s < 3600:
-        return f"{s // 60}m"
-    if s < 86400:
-        return f"{s // 3600}h"
-    return f"{s // 86400}d"
 
 
 def _load_all() -> list[Reminder]:

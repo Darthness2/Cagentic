@@ -107,6 +107,28 @@ def _explain_http_error(status: int, body: str) -> str:
     return f"chat HTTP {status}: {body}"
 
 
+def _explain_connection_error(host: str, exc: Exception) -> str:
+    """Human-readable reason a request to Ollama never landed.
+
+    requests wraps the OS error in several layers, so str(exc) is a wall of
+    "HTTPConnectionPool(...): Max retries exceeded with url ... NewConnectionError
+    ... WinError 10061 ...". Nobody needs the pool internals to learn that
+    nothing is listening.
+    """
+    import requests as _requests
+
+    if isinstance(exc, _requests.ConnectTimeout):
+        return f"Ollama at {host} didn't answer in time — is it busy loading a model?"
+    if isinstance(exc, _requests.ReadTimeout):
+        return f"Ollama at {host} stopped responding mid-request."
+    if isinstance(exc, _requests.ConnectionError):
+        return (f"nothing is listening at {host} — start Ollama with "
+                f"`ollama serve`, or point Cagentic elsewhere with /host <url>.")
+    if isinstance(exc, _requests.exceptions.SSLError):
+        return f"TLS error talking to {host}: {exc}"
+    return f"could not reach Ollama at {host}: {exc}"
+
+
 def _looks_like_tools_error(body: str) -> bool:
     b = body.lower()
     return (
@@ -207,7 +229,7 @@ class OllamaClient:
             r = requests.get(f"{self.host}/api/tags", timeout=10)
             r.raise_for_status()
         except requests.RequestException as e:
-            raise OllamaError(f"could not reach Ollama at {self.host}: {e}") from e
+            raise OllamaError(_explain_connection_error(self.host, e)) from e
         models = r.json().get("models", [])
         # Guard against malformed entries (some proxies/custom builds omit
         # "name"); skip any entry we can't identify rather than crashing the
@@ -297,7 +319,7 @@ class OllamaClient:
                 timeout=(self.connect_timeout, self.nonstream_read_timeout),
             )
         except requests.RequestException as e:
-            raise OllamaError(f"chat request failed: {e}") from e
+            raise OllamaError(_explain_connection_error(self.host, e)) from e
         if r.status_code != 200:
             body = r.text[:500]
             if r.status_code == 400 and tools and _looks_like_tools_error(body):
@@ -352,7 +374,7 @@ class OllamaClient:
                     except json.JSONDecodeError:
                         continue
         except requests.RequestException as e:
-            raise OllamaError(f"streaming chat failed: {e}") from e
+            raise OllamaError(_explain_connection_error(self.host, e)) from e
 
     def chat_stream_assembled(
         self,

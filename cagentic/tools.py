@@ -2193,16 +2193,21 @@ def t_todo_write(args: dict, ctx: ToolContext) -> str:
 
 
 def t_tool_search(args: dict, ctx: ToolContext) -> str:
+    from .github import GITHUB_TOOL_SCHEMAS
     q = (args.get("query") or "").lower().strip()
+    # Search every schema, GitHub's included — searching only TOOL_SCHEMAS made
+    # the gh_* tools undiscoverable through the very tool meant to find them.
     out: list[str] = []
-    for s in TOOL_SCHEMAS:
+    for s in TOOL_SCHEMAS + GITHUB_TOOL_SCHEMAS:
         fn = s.get("function") or {}
         name = fn.get("name", "")
         desc = fn.get("description", "")
         hay = f"{name} {desc}".lower()
         if not q or q in hay:
             out.append(f"{name}  —  {desc.splitlines()[0][:140] if desc else ''}")
-    return _truncate("\n".join(out) if out else "(no matching tools)")
+    if not out:
+        return f"(no tool matches {q!r}) — call tool_search with no query to list them all"
+    return _truncate("\n".join(out))
 
 
 def t_config_get(args: dict, ctx: ToolContext) -> str:

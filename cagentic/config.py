@@ -7,20 +7,11 @@ File is chmod 600 since it can hold API tokens (GitHub PAT, MCP secrets, etc.).
 from __future__ import annotations
 
 import copy
-import json
-import logging
 import os
-import stat
-import tempfile
-import threading
 from pathlib import Path
 from typing import Any
 
-logger = logging.getLogger(__name__)
-
-# Serializes concurrent saves (gateway thread + REPL) so the atomic
-# write-temp-then-replace dance can't interleave and corrupt the file.
-_SAVE_LOCK = threading.Lock()
+from .storage import atomic_write_json, read_json
 
 
 def config_dir() -> Path:
@@ -83,48 +74,16 @@ def _merge(base: dict, override: dict) -> dict:
 
 
 def load() -> dict:
-    p = config_path()
-    if not p.exists():
-        return copy.deepcopy(_DEFAULTS)
-    try:
-        data = json.loads(p.read_text(encoding="utf-8"))
-    except (json.JSONDecodeError, OSError, UnicodeDecodeError):
-        return copy.deepcopy(_DEFAULTS)
+    data = read_json(config_path(), None)
     if not isinstance(data, dict):
         return copy.deepcopy(_DEFAULTS)
     return _merge(_DEFAULTS, data)
 
 
 def save(cfg: dict) -> None:
-    d = config_dir()
-    d.mkdir(parents=True, exist_ok=True)
-    p = config_path()
-    data = json.dumps(cfg, indent=2)
-    # Hold the lock for the whole create-write-replace so concurrent savers
-    # don't clobber each other's temp files or race the replace.
-    with _SAVE_LOCK:
-        # Create the temp file in the same dir with a unique name and 0600
-        # perms BEFORE writing, so secrets are never briefly world-readable.
-        fd, tmp_name = tempfile.mkstemp(dir=str(d), prefix=".config.", suffix=".tmp")
-        try:
-            # Tighten perms to 0600 before writing so secrets are never briefly
-            # world-readable. fchmod is POSIX-only; on Windows (FAT/NTFS ACLs)
-            # there's no equivalent, so skip it — the file lives in the user's
-            # own config dir, which is already user-private by default ACL.
-            if hasattr(os, "fchmod"):
-                os.fchmod(fd, stat.S_IRUSR | stat.S_IWUSR)
-            with os.fdopen(fd, "w", encoding="utf-8") as f:
-                f.write(data)
-                f.flush()
-                os.fsync(f.fileno())
-            os.replace(tmp_name, p)
-        except OSError:
-            logger.warning("config save failed for %s", p, exc_info=True)
-            try:
-                os.unlink(tmp_name)
-            except OSError:
-                logger.warning("could not clean up temp file %s", tmp_name, exc_info=True)
-            raise
+    """Persist the config. The file can hold API tokens, so it is written
+    privately (0600 before any bytes land) and replaced atomically."""
+    atomic_write_json(config_path(), cfg, private=True)
 
 
 def set_value(cfg: dict, dotted_key: str, value: Any) -> dict:

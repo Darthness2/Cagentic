@@ -28,6 +28,7 @@ Cagentic **remembers things about you** across sessions, keeps a persistent remi
 - Python 3.9+
 - [Ollama](https://ollama.com) running locally (`ollama serve`)
 - A model with native tool calling — good defaults:
+  - `llama3.2` — lightest of the four, ~2 GB (what `install.sh` pulls)
   - `llama3.1:8b` — good general-purpose, ~5 GB
   - `qwen2.5:7b` — solid all-rounder, ~5 GB
   - `mistral-nemo` — friendly chat style, ~7 GB
@@ -41,13 +42,13 @@ ollama pull llama3.1:8b
 ### One-liner (macOS & Linux)
 
 ```bash
-curl -fsSL https://raw.githubusercontent.com/YOUR_USERNAME/cagentic/main/install.sh | bash
+curl -fsSL https://raw.githubusercontent.com/Darthness2/Cagentic/main/install.sh | bash
 ```
 
 ### From source
 
 ```bash
-git clone https://github.com/YOUR_USERNAME/cagentic.git ~/cagentic
+git clone https://github.com/Darthness2/Cagentic.git ~/cagentic
 cd ~/cagentic
 pip install -e .
 ```
@@ -172,6 +173,8 @@ Cagentic launches each server as a subprocess on first use and keeps a long-live
 | `/resume [id]` | list / resume saved sessions |
 | `/sessions` | list saved sessions |
 | `/save [title]` | force-save |
+| `/rename <title>` | rename the current conversation |
+| `/delete <id>` | delete a saved conversation |
 | `/clear` | wipe history (keeps the saved session) |
 | `/retry` | re-run your last message |
 | `/exit`, `/quit` | leave |
@@ -203,6 +206,7 @@ Cagentic launches each server as a subprocess on first use and keeps a long-live
 | `/login github <token>` | save a GitHub PAT |
 | `/login openai <key>` | save OpenAI API key |
 | `/login anthropic <key>` | save Anthropic API key |
+| `/logout <service>` | remove a saved key |
 | `/whoami` | show authenticated GitHub user |
 | `/stream on\|off` | toggle token streaming |
 | `/help` | show this list in the REPL |
