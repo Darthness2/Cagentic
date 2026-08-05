@@ -144,6 +144,12 @@ def t_read_file(args: dict, ctx: ToolContext) -> str:
         return f"ERROR: not a file: {path}"
 
     abs_path = str(p.resolve())
+    # The cache key includes the requested range: re-reading the SAME slice is
+    # the wasteful repeat we want to suppress, but asking for a different range
+    # (paging through a long file, or fetching the tail after a truncated read)
+    # is legitimate — keying on the path alone made those later pages
+    # unreachable, since every one came back as "[CACHED]".
+    range_key = f"{abs_path}::{max(1, start)}-{'' if end is None else int(end)}"
     cache = ctx.read_cache if isinstance(ctx.read_cache, dict) else None
     state = getattr(ctx, "state", None)
     already_read = (cache is not None and abs_path in cache) or (
@@ -151,8 +157,9 @@ def t_read_file(args: dict, ctx: ToolContext) -> str:
     )
     if already_read:
         return (
-            f"[CACHED — you already read {path} earlier in this turn. "
-            f"Scroll back instead of re-reading.]"
+            f"[CACHED — you already read {path} (lines "
+            f"{max(1, start)}-{end if end is not None else 'end'}) earlier in "
+            f"this turn. Scroll back, or request a different line range.]"
         )
 
     # PDF / DOCX get their text extracted; everything else is read as text.
@@ -181,10 +188,10 @@ def t_read_file(args: dict, ctx: ToolContext) -> str:
         header = f"{path}  ({len(lines)} lines)"
     out = _truncate(f"{header}\n{numbered}")
     if cache is not None:
-        cache[abs_path] = out
+        cache[range_key] = out
     if state is not None:
         files_read = set(getattr(state, "files_read", set()) or set())
-        files_read.add(abs_path)
+        files_read.add(range_key)
         state.update(files_read=files_read)
     return out
 
@@ -209,15 +216,21 @@ def _record_edit(ctx: ToolContext, path: Path, before: str, after: str, op: str)
         )
         del hist[:-MAX_EDIT_HISTORY]
         state.update(edit_history=hist)
+    # Editing the file invalidates EVERY cached range of it, not just the one
+    # keyed by the whole file — read_file caches per requested line range.
     rp = str(path.resolve())
+    prefix = rp + "::"
+    def _stale(key: str) -> bool:
+        return key == rp or key.startswith(prefix)
     cache = getattr(ctx, "read_cache", None)
     if isinstance(cache, dict):
-        cache.pop(rp, None)
+        for key in [k for k in cache if _stale(k)]:
+            cache.pop(key, None)
     if state is not None:
         files_read = set(getattr(state, "files_read", set()) or set())
-        if rp in files_read:
-            files_read.discard(rp)
-            state.update(files_read=files_read)
+        remaining = {k for k in files_read if not _stale(k)}
+        if remaining != files_read:
+            state.update(files_read=remaining)
 
 
 def t_write_file(args: dict, ctx: ToolContext) -> str:
@@ -231,8 +244,12 @@ def t_write_file(args: dict, ctx: ToolContext) -> str:
         p = _resolve_contained(path, ctx.root)
     except PathEscapeError as e:
         return f"ERROR: {e}"
-    existed = p.exists()
-    old_text = p.read_text(errors="replace") if existed else ""
+    existed = p.is_file()
+    if p.exists() and not existed:
+        return f"ERROR: not a file: {path}"
+    # Read verbatim so the undo snapshot restores the original bytes, line
+    # endings included.
+    old_text = _read_text_robust(p) if existed else ""
     if existed and old_text.strip() and not content.strip() and not args.get("allow_empty"):
         return (
             f"ERROR: refusing to write empty content to existing file {path}. "
@@ -241,6 +258,10 @@ def t_write_file(args: dict, ctx: ToolContext) -> str:
     detail = f"{'overwrite' if existed else 'create'} {path} ({len(content)} bytes)"
     if not ctx.confirm("file write", detail):
         return "ERROR: user denied write"
+    if existed:
+        # Overwriting a CRLF file with the model's LF text would flip every
+        # line ending in it; keep the file's own convention.
+        content = _restore_eol(old_text, _norm_eol(content))
     p.parent.mkdir(parents=True, exist_ok=True)
     _write_text_raw(p, content)
     _record_edit(ctx, p, old_text, content, "write")
@@ -250,6 +271,24 @@ def t_write_file(args: dict, ctx: ToolContext) -> str:
 
 def _norm_eol(s: str) -> str:
     return s.replace("\r\n", "\n").replace("\r", "\n")
+
+
+def _restore_eol(original: str, normalized: str) -> str:
+    """Put `normalized` (all-LF) back onto the line endings `original` used.
+
+    The whitespace-tolerant edit paths work on an EOL-normalized copy of the
+    file. Writing that copy back verbatim rewrites EVERY line of a CRLF file to
+    LF — a one-line edit lands as a whole-file diff. Restore the dominant ending
+    so only the edited region actually changes.
+    """
+    crlf = original.count("\r\n")
+    bare_lf = original.count("\n") - crlf
+    if crlf and crlf >= bare_lf:
+        return normalized.replace("\n", "\r\n")
+    # Classic Mac (CR-only) files: no "\n" at all, but "\r" line breaks.
+    if "\r" in original and "\n" not in original:
+        return normalized.replace("\n", "\r")
+    return normalized
 
 
 def _fuzzy_span(text: str, old: str):
@@ -307,10 +346,20 @@ def _closest_region(text: str, old: str) -> str:
 
 
 def _read_text_robust(p: Path) -> str:
+    """Read a file for editing WITHOUT newline translation.
+
+    Path.read_text opens in universal-newline mode, which turns every "\\r\\n"
+    into "\\n" in the returned string. Paired with _write_text_raw (which writes
+    verbatim), that quietly converted every CRLF file to LF on the first edit —
+    a one-line change landed as a whole-file diff. Reading with newline="" keeps
+    the real line endings, so the edit tools can preserve them.
+    """
     try:
-        text = p.read_text(encoding="utf-8", errors="replace")
+        with p.open("r", encoding="utf-8", errors="replace", newline="") as f:
+            text = f.read()
     except (UnicodeDecodeError, OSError):
-        text = p.read_text(errors="replace")
+        with p.open("r", errors="replace", newline="") as f:
+            text = f.read()
     if text and text[0] == "﻿":
         text = text[1:]
     return text
@@ -323,8 +372,9 @@ def _write_text_raw(p: Path, text: str) -> None:
     os.linesep ("\\r\\n" on Windows). That silently turns every LF file into
     CRLF after an edit (noisy git diffs, broken LF-only repos) and corrupts
     already-CRLF content into "\\r\\r\\n". newline="" writes the string's
-    bytes verbatim, so files keep whatever line endings the in-memory text
-    has (LF, which is what the model emits and our normalized reads produce).
+    bytes verbatim, so files keep whatever line endings the in-memory text has.
+    Pair it with _read_text_robust, which reads verbatim too — the two together
+    are what keep a CRLF file CRLF across an edit.
     """
     p.write_text(text, encoding="utf-8", newline="")
 
@@ -346,6 +396,9 @@ def t_edit_file(args: dict, ctx: ToolContext) -> str:
     if count == 1 or (count > 1 and replace_all):
         if not ctx.confirm("file edit", f"{path}: replace {count} occurrence(s)"):
             return "ERROR: user denied edit"
+        # The model writes LF; splicing that into a CRLF file would leave mixed
+        # endings on the new lines. Match the replacement to the file.
+        new = _restore_eol(raw, _norm_eol(new))
         new_text = raw.replace(old, new) if replace_all else raw.replace(old, new, 1)
         if raw.strip() and not new_text.strip() and not args.get("allow_empty"):
             return f"ERROR: refusing to empty {path}. Pass allow_empty=true to confirm."
@@ -408,9 +461,10 @@ def t_edit_file(args: dict, ctx: ToolContext) -> str:
 
     if raw.strip() and not new_text.strip() and not args.get("allow_empty"):
         return f"ERROR: refusing to empty {path}. Pass allow_empty=true."
+    adds, dels = _diff.stats(text, new_text)
+    new_text = _restore_eol(raw, new_text)
     _write_text_raw(p, new_text)
     _record_edit(ctx, p, raw, new_text, "edit")
-    adds, dels = _diff.stats(text, new_text)
     return f"OK: edited {path} +{adds} -{dels}"
 
 
@@ -451,8 +505,16 @@ def t_replace_lines(args: dict, ctx: ToolContext) -> str:
         eol = "\n"
     elif raw and "\r\n" in raw and raw.count("\r\n") >= raw.count("\n") / 2:
         eol = "\r\n"
-    new_chunk = new_content if new_content.endswith(("\n", "\r")) else new_content + eol
-    new_lines = lines[:s] + [new_chunk] + lines[e:]
+    if new_content == "":
+        # Empty new_content means "delete these lines". Appending an EOL to it
+        # instead left a stray blank line behind, so the range could never
+        # actually be removed.
+        replacement: list[str] = []
+    else:
+        replacement = [
+            new_content if new_content.endswith(("\n", "\r")) else new_content + eol
+        ]
+    new_lines = lines[:s] + replacement + lines[e:]
     new_text = "".join(new_lines)
     if raw.strip() and not new_text.strip() and not args.get("allow_empty"):
         return f"ERROR: refusing to empty {path}. Pass allow_empty=true."
@@ -733,10 +795,10 @@ def t_reminder_add(args: dict, ctx: ToolContext) -> str:
         note = f"  (couldn't parse 'when' = {when_raw!r}; saved without due time)"
     else:
         note = ""
-    tags = args.get("tags") or []
+    tags = _as_tag_list(args.get("tags"))
     if not ctx.confirm("add reminder", text[:80] + (f" @ {when_raw}" if when_raw else "")):
         return "ERROR: user denied"
-    r = _reminders.add(text, due_at=due_at, tags=list(tags))
+    r = _reminders.add(text, due_at=due_at, tags=tags)
     return f"OK: {r.short().strip()}{note}"
 
 
@@ -754,7 +816,7 @@ def t_reminder_done(args: dict, ctx: ToolContext) -> str:
     if not rid:
         return "ERROR: reminder_done requires 'id'"
     r = _reminders.update(rid, status="done")
-    return f"OK: marked done — {r.short().strip()}" if r else f"ERROR: no reminder {rid}"
+    return f"OK: marked done — {r.short().strip()}" if r else _no_reminder(rid)
 
 
 def t_reminder_delete(args: dict, ctx: ToolContext) -> str:
@@ -763,7 +825,7 @@ def t_reminder_delete(args: dict, ctx: ToolContext) -> str:
         return "ERROR: reminder_delete requires 'id'"
     if not ctx.confirm("delete reminder", rid):
         return "ERROR: user denied"
-    return "OK: deleted" if _reminders.delete(rid) else f"ERROR: no reminder {rid}"
+    return "OK: deleted" if _reminders.delete(rid) else _no_reminder(rid)
 
 
 def t_reminder_update(args: dict, ctx: ToolContext) -> str:
@@ -779,11 +841,11 @@ def t_reminder_update(args: dict, ctx: ToolContext) -> str:
         due = _reminders.parse_when(args["when"]) if args["when"] else None
         changes["due_at"] = due
     if "tags" in args:
-        changes["tags"] = list(args["tags"] or [])
+        changes["tags"] = _as_tag_list(args["tags"])
     if not changes:
         return "ERROR: nothing to update"
     r = _reminders.update(rid, **changes)
-    return f"OK: {r.short().strip()}" if r else f"ERROR: no reminder {rid}"
+    return f"OK: {r.short().strip()}" if r else _no_reminder(rid)
 
 
 # ============================================================================
@@ -2039,6 +2101,23 @@ def t_ask_user_question(args: dict, ctx: ToolContext) -> str:
     if not question:
         return "ERROR: missing argument 'question'"
     options = args.get("options") or []
+
+    # This prompt reads the terminal's stdin, which only belongs to the REPL.
+    # The web gateway runs its own engine in this same process, on an HTTP
+    # worker thread: calling input() there either steals the line the REPL user
+    # is typing or blocks the request forever. The terminal resolver is what
+    # marks an engine as the one that owns the tty, so anything else gets told
+    # to ask in its reply instead.
+    engine = getattr(ctx, "engine", None)
+    if engine is not None:
+        from .permissions import terminal_resolver
+        if getattr(engine, "permission_resolver", None) is not terminal_resolver:
+            opts = ("  Options: " + " / ".join(str(o) for o in options)) if options else ""
+            return (
+                "ERROR: no terminal to prompt on. Ask the user directly in your "
+                f"reply and wait for their answer.\n  Question: {question}{opts}"
+            )
+
     # Yolo mode skips APPROVAL prompts — but asking the user a question
     # is a separate channel (the model needs information, not permission),
     # so it's allowed regardless. EOFError still handles non-interactive runs.
@@ -2228,8 +2307,14 @@ def t_skill(args: dict, ctx: ToolContext) -> str:
         if engine is None:
             return "ERROR: engine not available"
         body = candidate.read_text(errors="replace")
-        if engine.messages and engine.messages[0].get("role") == "system":
-            engine.messages[0]["content"] += f"\n\n=== SKILL: {name} ===\n{body}"
+        if not engine.messages or engine.messages[0].get("role") != "system":
+            # Nothing to attach to — reporting OK here made an attach that
+            # never happened look successful.
+            return "ERROR: no system prompt to attach the skill to"
+        marker = f"=== SKILL: {name} ==="
+        if marker in (engine.messages[0].get("content") or ""):
+            return f"OK: skill '{name}' is already attached"
+        engine.messages[0]["content"] += f"\n\n{marker}\n{body}"
         return f"OK: skill '{name}' attached ({len(body)} chars)"
     return f"ERROR: unknown op '{op}'"
 

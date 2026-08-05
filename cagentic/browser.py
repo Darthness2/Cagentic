@@ -218,6 +218,10 @@ class BrowserBridge:
         summary = _command_summary(action, params)
         if self._server is None:
             return {"ok": False, "error": "browser bridge is not running"}
+        # Bookkeeping (_record, is_connected) happens OUTSIDE the condition, so
+        # the wait loop only ever holds the one lock it needs.
+        timed_out = False
+        result: dict | None = None
         with self._cv:
             cmd_id = self._next_id
             self._next_id += 1
@@ -228,7 +232,8 @@ class BrowserBridge:
             while cmd_id not in self._results:
                 remaining = deadline - time.monotonic()
                 if remaining <= 0:
-                    # Give up: drop the command so the extension doesn't run it late.
+                    # Give up: drop the command so the extension doesn't run it
+                    # late, and mark the id so a late result isn't retained.
                     self._queue = [c for c in self._queue if c["id"] != cmd_id]
                     self._pending.discard(cmd_id)
                     self._record(action, summary, False)

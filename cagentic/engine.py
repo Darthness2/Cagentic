@@ -1204,6 +1204,25 @@ class QueryEngine:
         self._recent_results = self._recent_results[-30:]
         return self._recent_results.count(key)
 
+    def _record_unrun_call(self, name: str, role: str, reason: str) -> None:
+        """Append a stand-in result for a call we announced but never ran.
+
+        The assistant message already in self.messages lists EVERY tool call
+        the model emitted. OpenAI and Anthropic both require exactly one result
+        per call — an unanswered one makes the *next* request fail with a 400
+        ("must be followed by tool messages responding to each tool_call_id"),
+        which poisons the conversation permanently rather than just skipping a
+        call. So anything we drop (loop guard, early abort) still gets a result.
+        """
+        text = f"ERROR: {reason}"
+        if role == "tool":
+            self.messages.append({"role": "tool", "name": name, "content": text})
+        else:
+            self.messages.append({
+                "role": "user",
+                "content": f"Tool result for {name}:\n{text}",
+            })
+
     def _execute_and_record(self, calls):
         # New assistant turn → reset the per-turn dedup sets so a repeated
         # signature is counted once for THIS turn (genuine same-turn fan-out of
@@ -1216,14 +1235,24 @@ class QueryEngine:
         for name, args, role in calls:
             if self._check_loop(name, args):
                 yield Message("warn", {"text": f"loop detected on {name} — steered."})
+                self._record_unrun_call(
+                    name, role,
+                    "identical call repeated — suppressed by the loop guard. "
+                    "Try a different approach.",
+                )
                 continue
             cleaned_calls.append((name, args, role))
 
+        # Results arrive in call order (the executor parallelizes only adjacent
+        # concurrent-safe runs and collects them in submission order), so this
+        # counter tells us which calls are still unanswered if we bail early.
+        answered = 0
         for ev in self.executor.execute(cleaned_calls):
             if ev.kind == "tool_call":
                 _poke_browser(self.state, activity=f"running {ev.data.get('name', 'a tool')}")
             yield ev
             if ev.kind == "tool_result":
+                answered += 1
                 d = ev.data
                 name = d["name"]
                 result = d["result"]
@@ -1256,6 +1285,14 @@ class QueryEngine:
                         {"text": f"loop unbroken after {seen} identical results — ending turn"},
                     )
                     self._abort_turn = True
+                    # Abandoning the executor leaves the remaining calls of this
+                    # batch unanswered; give each one a result so the message
+                    # list stays well-formed for the cloud providers.
+                    for pending_name, _pending_args, pending_role in cleaned_calls[answered:]:
+                        self._record_unrun_call(
+                            pending_name, pending_role,
+                            "not run — the turn was ended after a repeated-result loop.",
+                        )
                     return
                 if seen >= LOOP_THRESHOLD and steer_key not in self._steered_result_keys:
                     # Fire on >= (not ==): counts can jump past the exact value

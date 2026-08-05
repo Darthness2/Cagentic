@@ -32,6 +32,26 @@ class TaskKind(str, Enum):
 VALID_STATUS = {"pending", "active", "done", "blocked", "failed", "cancelled"}
 
 
+_ID_RX = re.compile(r"^[A-Za-z0-9_-]+$")
+
+
+class InvalidTaskId(ValueError):
+    """Raised for an id that isn't a plain token."""
+
+
+def _safe_id(task_id: str) -> str:
+    """Validate an id before it is used to build a filename.
+
+    Task ids arrive from the model (task_get/task_output take one verbatim).
+    Generated ids are hex tokens, so anything with a path separator, a "..", or
+    a glob character is a probe rather than a real id — and left unchecked it
+    would escape the tasks directory or make the prefix glob match at random.
+    """
+    if not task_id or not _ID_RX.match(task_id):
+        raise InvalidTaskId(f"invalid task id: {task_id!r}")
+    return task_id
+
+
 def new_id(kind: TaskKind | str = TaskKind.TOOL) -> str:
     if isinstance(kind, TaskKind):
         kind = kind.value
@@ -123,7 +143,7 @@ class TaskGraph:
             return None
         if not p.exists():
             # Allow id prefixes ("t12ab..." → "t12ab*").
-            for q in self.root.glob(f"{task_id}*.json"):
+            for q in sorted(self.root.glob(f"{safe}*.json")):
                 p = q
                 break
             else:

@@ -94,8 +94,11 @@ class BackgroundExecutor:
             t.start()
         except BaseException:
             # Never leak a semaphore slot if we failed before the worker took
-            # ownership of releasing it.
+            # ownership of releasing it — nor a job stuck in "running" that
+            # task_status would report forever and task_wait would block on.
             self._slots.release()
+            with self._lock:
+                self._jobs.pop(job_id, None)
             raise
         with self._lock:
             self._threads.append(t)
@@ -122,6 +125,8 @@ class BackgroundExecutor:
             t.start()
         except BaseException:
             self._slots.release()
+            with self._lock:
+                self._jobs.pop(job_id, None)
             raise
         with self._lock:
             self._threads.append(t)

@@ -111,6 +111,22 @@ def add(text: str, *, due_at: float | None = None, tags: list[str] | None = None
     return r
 
 
+def _match(rems: list[Reminder], rid: str) -> Reminder | None:
+    """Find the one reminder `rid` identifies, or None.
+
+    An exact id always wins. A prefix is accepted only when it is unambiguous:
+    ids all start with "r", so a short prefix like "r" or "r1" can match several
+    reminders, and acting on "the first one" silently hit the wrong entry.
+    """
+    if not rid:
+        return None
+    for r in rems:
+        if r.id == rid:
+            return r
+    hits = [r for r in rems if r.id.startswith(rid)]
+    return hits[0] if len(hits) == 1 else None
+
+
 def update(rid: str, **changes) -> Reminder | None:
     # Guard against an empty id: every id starts with "", so startswith("")
     # would match the first reminder and silently mutate it.
