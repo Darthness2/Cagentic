@@ -105,17 +105,29 @@ def add(text: str, *, due_at: float | None = None, tags: list[str] | None = None
     return r
 
 
+def _match(rems: list[Reminder], rid: str) -> Reminder | None:
+    """Find the one reminder `rid` identifies, or None.
+
+    An exact id always wins. A prefix is accepted only when it is unambiguous:
+    ids all start with "r", so a short prefix like "r" or "r1" can match several
+    reminders, and acting on "the first one" silently hit the wrong entry.
+    """
+    if not rid:
+        return None
+    for r in rems:
+        if r.id == rid:
+            return r
+    hits = [r for r in rems if r.id.startswith(rid)]
+    return hits[0] if len(hits) == 1 else None
+
+
 def update(rid: str, **changes) -> Reminder | None:
     # Guard against an empty id: every id starts with "", so startswith("")
     # would match the first reminder and silently mutate it.
     if not rid:
         return None
     rems = _load_all()
-    target = None
-    for r in rems:
-        if r.id == rid or r.id.startswith(rid):
-            target = r
-            break
+    target = _match(rems, rid)
     if not target:
         return None
     for k, v in changes.items():
@@ -132,11 +144,13 @@ def delete(rid: str) -> bool:
     if not rid:
         return False
     rems = _load_all()
-    n = len(rems)
-    rems = [r for r in rems if not (r.id == rid or r.id.startswith(rid))]
-    if len(rems) == n:
+    # Delete exactly the one reminder the id identifies. Filtering by
+    # startswith() deleted EVERY match, so "/remind delete r" — a plausible
+    # typo, since every id begins with "r" — wiped the whole list.
+    target = _match(rems, rid)
+    if target is None:
         return False
-    _save_all(rems)
+    _save_all([r for r in rems if r.id != target.id])
     return True
 
 

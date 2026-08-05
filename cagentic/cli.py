@@ -121,6 +121,25 @@ def _pick_model_interactive(client: OllamaClient) -> str | None:
     return ans
 
 
+def _reminder_miss(rid: str) -> str:
+    """Why an id didn't resolve — genuinely absent, or an ambiguous prefix."""
+    matches = [r for r in _reminders.list_all(include_done=True) if r.id.startswith(rid)]
+    if len(matches) > 1:
+        return (f"'{rid}' matches {len(matches)} reminders "
+                f"({', '.join(r.id for r in matches[:5])}) — use the full id")
+    return f"no reminder {rid}"
+
+
+def _client_provider(client) -> str:
+    """Which provider an already-built client speaks to."""
+    name = type(client).__name__
+    if name.startswith("OpenAI"):
+        return "openai"
+    if name.startswith("Anthropic"):
+        return "anthropic"
+    return "ollama"
+
+
 def _redact(cfg: dict) -> dict:
     # Delegate to the single source of truth so every secret-bearing key
     # (github token, provider api_keys, smtp/email password, mcp env secrets)
@@ -396,14 +415,19 @@ def repl(agent: Agent, cfg: dict, gateway_holder: dict | None = None) -> int:
                         ui.warn("usage: /remind done <id>")
                         continue
                     r = _reminders.update(arg2, status="done")
-                    ui.info(f"marked done: {r.short().strip()}" if r else f"no reminder {arg2}")
+                    if r:
+                        ui.info(f"marked done: {r.short().strip()}")
+                    else:
+                        ui.warn(_reminder_miss(arg2))
                     continue
                 if arg1 == "delete":
                     if not arg2:
                         ui.warn("usage: /remind delete <id>")
                         continue
-                    ok = _reminders.delete(arg2)
-                    ui.info("deleted" if ok else f"no reminder {arg2}")
+                    if _reminders.delete(arg2):
+                        ui.info("deleted")
+                    else:
+                        ui.warn(_reminder_miss(arg2))
                     continue
                 if arg1 == "clear":
                     # Don't actually delete — just mark all done. Safer.
@@ -597,15 +621,20 @@ def repl(agent: Agent, cfg: dict, gateway_holder: dict | None = None) -> int:
                     ui.info(f"current model: {agent.model}")
                 else:
                     new_provider, new_model = _parse_model_provider(arg1)
-                    if new_provider != "ollama":
-                        # Switch to a cloud provider
+                    # Rebuild the client whenever the PROVIDER changes — including
+                    # cloud → ollama. Only rebuilding for cloud providers left the
+                    # OpenAI/Anthropic client in place when switching back to a
+                    # local model, so every request went to the cloud endpoint
+                    # with an Ollama model name and 404'd.
+                    current_provider = _client_provider(agent.client)
+                    if new_provider != current_provider:
                         try:
                             new_client = _build_client(cfg, new_provider)
-                            agent.client = new_client
-                            agent.engine.client = new_client
                         except RuntimeError as _e:
                             ui.error(str(_e))
                             continue
+                        agent.client = new_client
+                        agent.engine.client = new_client
                     agent.model = new_model
                     agent.engine.model = new_model
                     cfg["model"] = arg1  # save full provider:model
@@ -624,7 +653,14 @@ def repl(agent: Agent, cfg: dict, gateway_holder: dict | None = None) -> int:
                     ui.error(str(e))
                 continue
             if cmd == "host":
-                if not arg1:
+                # Only the Ollama client has a host; the cloud clients don't,
+                # so reading/setting .host on them raised AttributeError (bare
+                # /host) or silently set a dead attribute.
+                if not isinstance(agent.client, OllamaClient):
+                    ui.warn(f"/host applies to Ollama only — currently on "
+                            f"{_client_provider(agent.client)}. "
+                            f"Switch back with /model <ollama-model> first.")
+                elif not arg1:
                     ui.info(f"current host: {agent.client.host}")
                 else:
                     # The client's host setter normalizes (adds scheme/port,
@@ -750,7 +786,11 @@ def repl(agent: Agent, cfg: dict, gateway_holder: dict | None = None) -> int:
                 entry = hist.pop()
                 p = Path(entry["path"])
                 try:
-                    p.write_text(entry.get("before", ""))
+                    # Same raw write the edit tools use: Path.write_text would
+                    # translate "\n" to os.linesep and turn an LF file into CRLF
+                    # on Windows, so "undo" would leave a whole-file diff behind.
+                    from .tools import _write_text_raw
+                    _write_text_raw(p, entry.get("before", ""))
                 except OSError as e:
                     ui.error(f"undo failed: {e}")
                     continue

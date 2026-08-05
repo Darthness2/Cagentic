@@ -57,7 +57,23 @@ def _need_token(ctx: ToolContext) -> str | None:
     return None
 
 
+# Hosts the Authorization header may be sent to. The raw github_api tool takes
+# a caller-supplied path, and it accepts an absolute URL so GitHub's own
+# pagination links work — but an absolute URL pointing anywhere else would post
+# the user's Personal Access Token to that host. Since the "caller" here is a
+# model that may be acting on text it read from a web page, restrict it.
+_ALLOWED_API_HOSTS = frozenset({"api.github.com", "uploads.github.com"})
+
+
 def _request(method: str, path: str, ctx: ToolContext, **kw) -> tuple[int, Any]:
+    if path.startswith("http"):
+        from urllib.parse import urlparse
+        parsed = urlparse(path)
+        if parsed.scheme != "https" or (parsed.hostname or "").lower() not in _ALLOWED_API_HOSTS:
+            return 0, {"error": (
+                f"refusing to send GitHub credentials to {parsed.hostname or path!r}; "
+                f"absolute URLs must be https on {' or '.join(sorted(_ALLOWED_API_HOSTS))}"
+            )}
     url = path if path.startswith("http") else f"{API}{path}"
     if ctx.insecure_ssl:
         kw.setdefault("verify", False)

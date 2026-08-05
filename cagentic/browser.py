@@ -78,10 +78,18 @@ class BrowserBridge:
         self.token: str = ""
         self._server: ThreadingHTTPServer | None = None
         self._thread: threading.Thread | None = None
-        self._lock = threading.Lock()
+        # Reentrant: _cv is built on this lock, so any helper that takes _lock
+        # (e.g. _record) would deadlock forever if called from inside a
+        # `with self._cv` block. Callers still avoid nesting, but a plain Lock
+        # turns such a slip into a permanently wedged process rather than a bug
+        # you can notice.
+        self._lock = threading.RLock()
         self._cv = threading.Condition(self._lock)
         self._queue: list[dict] = []         # commands awaiting the extension
         self._results: dict[int, dict] = {}  # command id -> result
+        # Command ids whose caller has already given up. A result arriving for
+        # one of these is dropped instead of sitting in _results forever.
+        self._abandoned: set[int] = set()
         self._next_id = 1
         self._last_poll = 0.0                # monotonic time of last extension poll
         self.error: str | None = None        # set if start() failed
@@ -212,6 +220,10 @@ class BrowserBridge:
         summary = _command_summary(action, params)
         if self._server is None:
             return {"ok": False, "error": "browser bridge is not running"}
+        # Bookkeeping (_record, is_connected) happens OUTSIDE the condition, so
+        # the wait loop only ever holds the one lock it needs.
+        timed_out = False
+        result: dict | None = None
         with self._cv:
             cmd_id = self._next_id
             self._next_id += 1
@@ -221,17 +233,26 @@ class BrowserBridge:
             while cmd_id not in self._results:
                 remaining = deadline - time.monotonic()
                 if remaining <= 0:
-                    # Give up: drop the command so the extension doesn't run it late.
+                    # Give up: drop the command so the extension doesn't run it
+                    # late, and mark the id so a late result isn't retained.
                     self._queue = [c for c in self._queue if c["id"] != cmd_id]
-                    self._record(action, summary, False)
-                    if not self.is_connected():
-                        return {"ok": False, "error": (
-                            "the Cagentic Chrome extension isn't connected — "
-                            "install or enable it (run /browser for setup steps)"
-                        )}
-                    return {"ok": False, "error": f"browser command '{action}' timed out"}
+                    self._abandoned.add(cmd_id)
+                    timed_out = True
+                    break
                 self._cv.wait(remaining)
-            result = self._results.pop(cmd_id)
+            if not timed_out:
+                result = self._results.pop(cmd_id)
+
+        if timed_out:
+            self._record(action, summary, False)
+            if not self.is_connected():
+                return {"ok": False, "error": (
+                    "the Cagentic Chrome extension isn't connected — "
+                    "install or enable it (run /browser for setup steps)"
+                )}
+            return {"ok": False, "error": f"browser command '{action}' timed out"}
+
+        assert result is not None
         self._record(action, summary, bool(result.get("ok")))
         return result
 
@@ -250,6 +271,11 @@ class BrowserBridge:
 
     def _deliver_result(self, cmd_id: int, ok: bool, result) -> None:
         with self._cv:
+            if cmd_id in self._abandoned:
+                # Nobody is waiting for this any more — keeping it would grow
+                # _results without bound across a long session.
+                self._abandoned.discard(cmd_id)
+                return
             self._results[cmd_id] = {"ok": ok, "result": result}
             self._cv.notify_all()
 
