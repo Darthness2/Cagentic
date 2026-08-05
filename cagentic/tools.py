@@ -152,8 +152,11 @@ def t_read_file(args: dict, ctx: ToolContext) -> str:
     range_key = f"{abs_path}::{max(1, start)}-{'' if end is None else int(end)}"
     cache = ctx.read_cache if isinstance(ctx.read_cache, dict) else None
     state = getattr(ctx, "state", None)
-    already_read = (cache is not None and abs_path in cache) or (
-        state is not None and abs_path in getattr(state, "files_read", set())
+    # Look the cache up by the SAME key it is written with. The lookup was left
+    # keyed on abs_path while the write used range_key, so nothing ever matched
+    # and the re-read guard silently did nothing.
+    already_read = (cache is not None and range_key in cache) or (
+        state is not None and range_key in getattr(state, "files_read", set())
     )
     if already_read:
         return (
@@ -782,6 +785,36 @@ def t_chat_get(args: dict, ctx: ToolContext) -> str:
 # ============================================================================
 # Reminders — persistent to-do across sessions
 # ============================================================================
+
+
+def _no_reminder(rid: str) -> str:
+    """Message for an id that matched nothing — or matched too much.
+
+    A short prefix can be ambiguous (every id starts with "r"), and reminders
+    refuses to act on an ambiguous one, so say that rather than claiming the
+    reminder doesn't exist.
+    """
+    matches = [r for r in _reminders.list_all(include_done=True) if r.id.startswith(rid)]
+    if len(matches) > 1:
+        ids = ", ".join(r.id for r in matches[:5])
+        return f"ERROR: '{rid}' matches {len(matches)} reminders ({ids}) — use the full id"
+    return f"ERROR: no reminder {rid}"
+
+
+def _as_tag_list(raw) -> list[str]:
+    """Coerce a 'tags' argument into a list of strings.
+
+    Models routinely send a bare string ("work") or a comma-separated one
+    ("work, home") where the schema asks for an array. list("work") would
+    explode that into ['w','o','r','k'] and store four one-letter tags.
+    """
+    if not raw:
+        return []
+    if isinstance(raw, str):
+        return [t.strip() for t in raw.split(",") if t.strip()]
+    if isinstance(raw, (list, tuple, set)):
+        return [str(t).strip() for t in raw if str(t).strip()]
+    return [str(raw)]
 
 
 def t_reminder_add(args: dict, ctx: ToolContext) -> str:

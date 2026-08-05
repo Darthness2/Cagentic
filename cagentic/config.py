@@ -7,11 +7,21 @@ File is chmod 600 since it can hold API tokens (GitHub PAT, MCP secrets, etc.).
 from __future__ import annotations
 
 import copy
+import json
+import logging
 import os
+import stat
+import tempfile
+import threading
 from pathlib import Path
 from typing import Any
 
-from .storage import atomic_write_json, read_json
+logger = logging.getLogger(__name__)
+
+# config is the bottom of the import graph: storage.py (the SQLite store) imports
+# config_dir from here, so this module must not import storage back — that cycle
+# made `import cagentic` fail outright.
+_SAVE_LOCK = threading.Lock()
 
 
 def config_dir() -> Path:
@@ -74,16 +84,47 @@ def _merge(base: dict, override: dict) -> dict:
 
 
 def load() -> dict:
-    data = read_json(config_path(), None)
+    p = config_path()
+    if not p.exists():
+        return copy.deepcopy(_DEFAULTS)
+    try:
+        data = json.loads(p.read_text(encoding="utf-8"))
+    except (json.JSONDecodeError, OSError, UnicodeDecodeError):
+        return copy.deepcopy(_DEFAULTS)
     if not isinstance(data, dict):
         return copy.deepcopy(_DEFAULTS)
     return _merge(_DEFAULTS, data)
 
 
 def save(cfg: dict) -> None:
-    """Persist the config. The file can hold API tokens, so it is written
-    privately (0600 before any bytes land) and replaced atomically."""
-    atomic_write_json(config_path(), cfg, private=True)
+    """Persist the config atomically and privately.
+
+    The file can hold API tokens, so the temp file is created 0600 BEFORE any
+    bytes are written and fsynced before the replace.
+    """
+    d = config_dir()
+    d.mkdir(parents=True, exist_ok=True)
+    p = config_path()
+    data = json.dumps(cfg, indent=2)
+    with _SAVE_LOCK:
+        fd, tmp_name = tempfile.mkstemp(dir=str(d), prefix=".config.", suffix=".tmp")
+        try:
+            # fchmod is POSIX-only; on Windows the file inherits the user's own
+            # config-directory ACL, which is already user-private.
+            if hasattr(os, "fchmod"):
+                os.fchmod(fd, stat.S_IRUSR | stat.S_IWUSR)
+            with os.fdopen(fd, "w", encoding="utf-8") as f:
+                f.write(data)
+                f.flush()
+                os.fsync(f.fileno())
+            os.replace(tmp_name, p)
+        except OSError:
+            logger.warning("config save failed for %s", p, exc_info=True)
+            try:
+                os.unlink(tmp_name)
+            except OSError:
+                logger.warning("could not clean up temp file %s", tmp_name, exc_info=True)
+            raise
 
 
 def set_value(cfg: dict, dotted_key: str, value: Any) -> dict:

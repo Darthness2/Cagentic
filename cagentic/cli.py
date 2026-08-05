@@ -86,53 +86,6 @@ def parse_args(argv: list[str]) -> argparse.Namespace:
     return p.parse_args(argv)
 
 
-HELP_TEXT = """\
-Slash commands:
-  /help                  show this help
-  /tools                 list tools the model can call
-  /groups [en/disable G] show or change which tool groups are sent
-  /cd [path]             show or change the working dir
-  /notes                 list saved notes
-  /note <name>           show one note
-  /remind [add <text>]   list reminders or add one
-  /mcp [server]          list MCP servers, or list tools on one
-  /browser               Chrome extension status + setup steps
-  /gateway [off]         start (or stop) the Cagentic web UI
-                         (cagentic --install-service keeps it running 24/7)
-  /plan on|off           toggle plan mode (read-only)
-  /effort low|med|high   how hard the model works per turn
-  /todo [add|done|clear] session todo list
-  /stream on|off         toggle token streaming
-  /diag                  print model / workspace / tools / mcp status
-  /model [name]          show or switch model (saved)
-  /models                list installed Ollama models
-  /host [url]            show or change Ollama host
-  /config                show current config (tokens redacted)
-  /set <key> <value>     set a config value (e.g. user_name Alex)
-  /name <your name>      tell the assistant what to call you
-  /login github <token>   save a GitHub PAT
-  /login openai <key>     save OpenAI API key
-  /login anthropic <key>  save Anthropic API key
-  /logout github|openai|anthropic  remove a saved key
-  /whoami                show authenticated GitHub user
-  /clear                 reset conversation history
-  /diff [N]              show file edits this session
-  /undo                  revert the most recent file edit
-  /retry                 re-run your last message
-  /new [title]           start a new conversation
-  /resume [id|num]       list/resume saved conversations
-  /sessions              list saved conversations
-  /search <text>         search saved conversation titles and messages
-  /context               show current context usage
-  /compact               compact older context and keep recent turns
-  /save [title]          force-save current conversation
-  /rename <new title>    rename current conversation
-  /delete <id|num>       delete a saved conversation
-  /yolo [on|off]         toggle auto-approve
-  /exit, /quit           leave
-"""
-
-
 def _search_sessions(query: str) -> list[dict]:
     needle = query.casefold().strip()
     if not needle:
@@ -234,6 +187,35 @@ def _pick_model_interactive(client: OllamaClient) -> str | None:
         if 0 <= idx < len(models):
             return models[idx]
     return ans
+
+
+def print_help() -> None:
+    """Render the command catalog in the app's palette.
+
+    Built from prompt.COMMAND_GROUPS — the same source the completion popup
+    uses — so the two can't drift apart.
+    """
+    from .prompt import COMMAND_GROUPS
+
+    # Align the hint column across every section, so the whole list reads as
+    # one table rather than seven ragged ones.
+    usage = {
+        name: (f"{name} {args}" if args else name)
+        for _s, entries in COMMAND_GROUPS
+        for name, args, _h in entries
+    }
+    col = min(max(len(u) for u in usage.values()) + 2, 34)
+
+    print()
+    for section, entries in COMMAND_GROUPS:
+        print("  " + ui.color(section, ui.DUSK + ui.BOLD))
+        for name, _args, hint in entries:
+            u = usage[name]
+            pad = " " * max(1, col - len(u))
+            print("    " + ui.color(u, ui.GLOW) + pad + ui.color(hint, ui.MUTED))
+        print()
+    print("  " + ui.color("type / for completions · @path to attach a file", ui.SOFT))
+    print()
 
 
 def print_tools(agent: Agent) -> None:
@@ -808,15 +790,20 @@ def repl(agent: Agent, cfg: dict, gateway_holder: dict | None = None) -> int:
                     if agent.state.tool_groups is not None
                     else DEFAULT_GROUPS
                 )
-                ui.info(f"model:    {agent.model}")
-                ui.info(f"name:     {agent.state.user_name or '(not set — /name <your name>)'}")
-                ui.info(f"workspace: {agent.state.workspace}")
-                ui.info(f"home:     {Path.home()}")
-                ui.info(
-                    f"tools:    {'native' if agent.tools_enabled else 'text-protocol fallback'}"
-                )
-                ui.info(f"groups:   {', '.join(sorted(groups))}")
-                ui.info(f"stream:   {'on' if agent.engine.stream else 'off'}")
+                # Labels were hand-padded and drifted out of alignment
+                # ("workspace:" is a character wider than the rest); pad once.
+                def _row(label: str, value: str, warn: bool = False) -> None:
+                    line = f"{label + ':':<11}{value}"
+                    (ui.warn if warn else ui.info)(line)
+
+                print()
+                _row("model", agent.model)
+                _row("name", agent.state.user_name or "(not set — /name <your name>)")
+                _row("workspace", str(agent.state.workspace))
+                _row("home", str(Path.home()))
+                _row("tools", "native" if agent.tools_enabled else "text-protocol fallback")
+                _row("groups", ", ".join(sorted(groups)))
+                _row("stream", "on" if agent.engine.stream else "off")
                 if isinstance(agent.client, OllamaClient):
                     _row("host", agent.client.host)
                     _row("num_ctx", str(agent.client.num_ctx))
@@ -832,16 +819,14 @@ def repl(agent: Agent, cfg: dict, gateway_holder: dict | None = None) -> int:
                         size_gb = status["size"] / (1024**3)
                         cpu_gb = status["cpu_bytes"] / (1024**3)
                         pct = status["cpu_percent"]
-                        ui.warn(
-                            f"{label}:    {cpu_gb:.1f}/{size_gb:.1f} GB on CPU ({pct:.0f}% offloaded — slow)"
-                        )
+                        _row(label, f"{cpu_gb:.1f}/{size_gb:.1f} GB on CPU "
+                                    f"({pct:.0f}% offloaded — slow)", warn=True)
                 else:
                     _row("provider", f"{_client_provider(agent.client)} "
                                      f"(cloud — no local VRAM info)")
                 mcp_servers = list(((cfg.get("mcp") or {}).get("servers") or {}).keys())
-                ui.info(
-                    f"mcp:      {len(mcp_servers)} configured ({', '.join(mcp_servers) or 'none'})"
-                )
+                _row("mcp", f"{len(mcp_servers)} configured "
+                            f"({', '.join(mcp_servers) or 'none'})")
                 notes_n = len(_notes.list_all())
                 rems_n = len(_reminders.list_all())
                 _row("data", f"{notes_n} notes · {rems_n} active reminders")

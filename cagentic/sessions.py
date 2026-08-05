@@ -6,7 +6,13 @@ Each session is JSON at ~/.config/cagentic/sessions/<id>.json with:
 
 from __future__ import annotations
 
+import json
+import logging
+import os
 import re
+import stat
+import tempfile
+import threading
 import time
 import uuid
 from pathlib import Path
@@ -14,7 +20,13 @@ from typing import Any
 
 from . import storage
 from .config import config_dir
-from .storage import atomic_write_json, fmt_ago, read_json
+from .fmt import fmt_ago
+
+logger = logging.getLogger(__name__)
+
+# Serializes concurrent saves (gateway thread + REPL autosave) so the
+# write-temp-then-replace dance can't interleave and corrupt a session file.
+_SAVE_LOCK = threading.Lock()
 
 
 def sessions_dir() -> Path:

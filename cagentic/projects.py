@@ -20,7 +20,12 @@ from typing import Any
 
 from . import storage
 from .config import config_dir
-from .storage import atomic_write_json, read_json
+
+logger = logging.getLogger(__name__)
+
+# Serializes concurrent saves so the write-temp-then-replace dance can't
+# interleave and corrupt a project file.
+_SAVE_LOCK = threading.Lock()
 
 
 def projects_dir() -> Path:

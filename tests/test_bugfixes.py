@@ -40,7 +40,19 @@ class _PrivateConfigDir(unittest.TestCase):
         self._old_xdg = os.environ.get("XDG_CONFIG_HOME")
         os.environ["XDG_CONFIG_HOME"] = str(self.tmp / "config")
         self.addCleanup(self._restore_xdg)
-        self.addCleanup(self._tmp.cleanup)
+        self.addCleanup(self._cleanup_tmp)
+
+    def _cleanup_tmp(self) -> None:
+        """Remove the temp dir, tolerating files the app still holds open.
+
+        The SQLite store keeps a connection to state.sqlite3 for the life of the
+        process, and Windows refuses to unlink an open file — a leftover temp
+        directory must not turn a passing test into an error.
+        """
+        try:
+            self._tmp.cleanup()
+        except (OSError, PermissionError):
+            pass
 
     def _restore_xdg(self) -> None:
         if self._old_xdg is None:

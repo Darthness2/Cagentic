@@ -117,10 +117,21 @@ def snip_compact(messages: list[dict], keep_recent_think: int = 2) -> int:
             removed += 1
             continue
         # Drop exact-duplicate consecutive user/system frames.
+        #
+        # Only those two roles: this used to apply to EVERY role, which silently
+        # deleted the second of two identical consecutive `tool` results. The
+        # engine deliberately allows a same-turn fan-out of identical calls, so
+        # that pattern is normal — and dropping one result left its tool_call
+        # unanswered, which OpenAI and Anthropic both reject with a 400 on the
+        # next request. Assistant frames are excluded for the mirror-image
+        # reason: two may share content ("") but carry different tool_calls.
         if (
-            kept
+            role in ("user", "system")
+            and kept
             and kept[-1].get("role") == role
-            and (kept[-1].get("content") or "") == m.get("content")
+            and not kept[-1].get("tool_calls")
+            and not tool_calls
+            and (kept[-1].get("content") or "") == (m.get("content") or "")
         ):
             removed += 1
             continue

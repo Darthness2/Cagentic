@@ -18,7 +18,7 @@ from pathlib import Path
 
 from . import storage
 from .config import config_dir
-from .storage import atomic_write_json, status_mark
+from .fmt import status_mark
 
 
 class TaskKind(str, Enum):
@@ -121,9 +121,10 @@ class TaskGraph:
 
     def get(self, task_id: str) -> Task | None:
         try:
-            p = self._path(task_id)
+            safe = _safe_id(task_id)
         except ValueError:
             return None
+        p = self._path(safe)
         if self._sqlite:
             exact = storage.get("tasks", task_id)
             if isinstance(exact, dict):
