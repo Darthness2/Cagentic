@@ -15,16 +15,18 @@ from __future__ import annotations
 import errno
 import json
 import logging
+import math
 import re
 import secrets
 import threading
 import time
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
+from typing import TYPE_CHECKING
 from urllib.parse import parse_qs, urlparse
 
-from . import config as _config
 from . import (
     capabilities,
+    command_utils,
     inbox,
     integrations,
     personal_os,
@@ -34,6 +36,7 @@ from . import (
     routines,
     sessions,
 )
+from . import config as _config
 from .providers import (
     build_client as _build_client,
 )
@@ -50,10 +53,74 @@ from .services.compact import SUMMARY_MARKER, auto_compact
 from .token_count import count_messages
 from .workspaces import WorkspaceError, WorkspacePolicy
 
+if TYPE_CHECKING:
+    from .engine import QueryEngine
+
 _log = logging.getLogger(__name__)
 
 # Hostnames we treat as the loopback interface for Host/Origin checks.
 _LOCAL_HOSTS = frozenset({"localhost", "127.0.0.1", "::1", ""})
+
+# The web command catalog is intentionally smaller than the terminal catalog:
+# chat save/delete/resend already have dedicated controls, and terminal-only
+# Terminal-only commands such as /login and /gateway have no honest web equivalent.
+GATEWAY_COMMANDS: tuple[tuple[str, str, str], ...] = (
+    ("help", "", "show web slash commands"),
+    ("new", "[title]", "start a new chat"),
+    ("clear", "", "clear the current chat"),
+    ("retry", "", "regenerate the most recent reply"),
+    ("model", "[name]", "show or switch model"),
+    ("models", "", "list available models"),
+    ("effort", "[low|medium|high]", "set reasoning effort"),
+    ("stream", "[on|off]", "toggle provider token streaming"),
+    ("tools", "", "list active tools"),
+    ("groups", "[enable|disable <name>]", "show or change tool groups"),
+    ("plan", "[on|off]", "toggle read-only plan mode"),
+    ("yolo", "[on|off]", "toggle automatic tool approval"),
+    ("notes", "", "list saved notes"),
+    ("mcp", "[server]", "list MCP servers or one server's tools"),
+    ("name", "[name]", "show or set your name"),
+    ("host", "[url]", "show or change the Ollama host"),
+    ("config", "", "show redacted configuration"),
+    ("set", "<key> <value>", "set a validated config value"),
+    ("diag", "", "show runtime diagnostics"),
+)
+GATEWAY_COMMAND_NAMES = frozenset(name for name, _args, _hint in GATEWAY_COMMANDS)
+_GATEWAY_ARGUMENTS = {name: args for name, args, _hint in GATEWAY_COMMANDS}
+
+
+def _gateway_help_text() -> str:
+    usages = [f"/{name}{f' {args}' if args else ''}" for name, args, _ in GATEWAY_COMMANDS]
+    width = max(len(usage) for usage in usages) + 2
+    lines = ["Web slash commands:"]
+    for usage, (_name, _args, hint) in zip(usages, GATEWAY_COMMANDS):
+        lines.append(f"  {usage:<{width}}{hint}")
+    return "\n".join(lines)
+
+
+def _gateway_usage(name: str) -> str:
+    args = _GATEWAY_ARGUMENTS.get(name, "")
+    return f"usage: /{name}{f' {args}' if args else ''}"
+
+
+_HIDDEN_USER_PREFIXES = (
+    "Tool result for ",
+    "[background] ",
+    "STOP. ",
+    "You called ",
+    "[older context, compacted]",
+)
+
+
+def _visible_user_indices(messages: list[dict]) -> list[int]:
+    """Indices whose user messages are actually rendered in the web chat."""
+    return [
+        index
+        for index, message in enumerate(messages)
+        if message.get("role") == "user"
+        and bool(str(message.get("content") or "").strip())
+        and not str(message.get("content") or "").strip().startswith(_HIDDEN_USER_PREFIXES)
+    ]
 
 
 class _GatewayHTTPServer(ThreadingHTTPServer):
@@ -207,15 +274,18 @@ class Gateway:
         # and (with the Host/Origin checks) against DNS-rebinding / CSRF.
         # A stable token can be pinned via config gateway.token so paired
         # devices (the iOS app) survive gateway restarts.
-        gw_cfg = config.get("gateway") or {}
-        pinned = str(gw_cfg.get("token") or "").strip()
+        raw_gw_cfg = config.get("gateway")
+        gw_cfg = raw_gw_cfg if isinstance(raw_gw_cfg, dict) else {}
+        raw_token = gw_cfg.get("token")
+        pinned = raw_token.strip() if isinstance(raw_token, str) else ""
         self.token = pinned or secrets.token_urlsafe(32)
 
         # Opt-in LAN exposure (config gateway.lan=true): binds all interfaces
         # so phones/tablets on the network can connect. Every /api/* request
         # still requires the secret token — set gateway.token and enter it on
         # the device. Off by default: loopback only.
-        self.lan = bool(gw_cfg.get("lan", False))
+        raw_lan = gw_cfg.get("lan", False)
+        self.lan = raw_lan if isinstance(raw_lan, bool) else False
 
         # Restore the persisted effort dial (set live via /api/effort).
         effort = str(config.get("effort") or "").strip().lower()
@@ -269,13 +339,16 @@ class Gateway:
             temperature=agent.engine.temperature,
             config=config,
             permission_resolver=self._resolve,
-            stream=True,
+            stream=agent.engine.stream,
         )
         # Teach this engine (gateway only) to drive the holographic HUD. The
         # user's custom system prompt (if any) is kept separate from the HUD
         # instructions so the settings UI can edit one without clobbering the
         # other — both are composed into system_suffix by _rebuild_suffix().
-        self._user_system_prompt = (config.get("system_prompt") or "").strip()
+        configured_prompt = config.get("system_prompt")
+        self._user_system_prompt = (
+            configured_prompt.strip() if isinstance(configured_prompt, str) else ""
+        )
         self._rebuild_suffix()
         # Wire up phone action callback — will be activated when source=ios
         self._setup_phone_action()
@@ -290,12 +363,21 @@ class Gateway:
     def start(self) -> bool:
         if self._server is not None:
             return True
+        if (
+            isinstance(self.requested_port, bool)
+            or not isinstance(self.requested_port, int)
+            or not 1 <= self.requested_port <= 65535
+        ):
+            self.error = f"invalid gateway port {self.requested_port!r}; expected 1-65535"
+            return False
         # Loopback by default — the gateway exposes the full assistant
         # (shell, files, browser, MCP). LAN binding is an explicit opt-in
         # (config gateway.lan=true) and keeps the token requirement.
         bind = "0.0.0.0" if self.lan else "127.0.0.1"
-        gw_cfg = self.config.get("gateway") or {}
-        auto_port = bool(gw_cfg.get("auto_port", True))
+        raw_gw_cfg = self.config.get("gateway")
+        gw_cfg = raw_gw_cfg if isinstance(raw_gw_cfg, dict) else {}
+        raw_auto_port = gw_cfg.get("auto_port", True)
+        auto_port = raw_auto_port if isinstance(raw_auto_port, bool) else True
         ports = [self.requested_port]
         if auto_port:
             ports.extend(range(self.requested_port + 1, min(65535, self.requested_port + 20) + 1))
@@ -318,8 +400,7 @@ class Gateway:
         self.port_fallback = self.port != self.requested_port
         if self.port_fallback:
             self.start_notice = (
-                f"port {self.requested_port} was already in use; "
-                f"started on {self.port} instead"
+                f"port {self.requested_port} was already in use; started on {self.port} instead"
             )
         else:
             self.start_notice = None
@@ -502,11 +583,12 @@ IMPORTANT: When you use show_widget, do NOT repeat the widget title or type in y
 
     _DEVICE_PROMPT_PC = ""
 
-    def _inject_device_context(self, source: str) -> None:
+    def _inject_device_context(self, source: str, engine: QueryEngine | None = None) -> None:
         """Update the system prompt and tool groups based on who initiated the turn."""
         from .tools import DEFAULT_GROUPS
 
-        suffix = self.engine.system_suffix or ""
+        target = engine or self.engine
+        suffix = target.system_suffix or ""
         marker = "\n\n=== DEVICE CONTEXT ==="
         # Remove any previous device context injection
         if marker in suffix:
@@ -514,26 +596,22 @@ IMPORTANT: When you use show_widget, do NOT repeat the widget title or type in y
         if source == "ios":
             suffix += self._DEVICE_PROMPT_IOS
             # Enable phone tool group for iOS-originated turns
-            groups = self.engine.state.tool_groups
+            groups = target.state.tool_groups
             if groups is None:
                 groups = set(DEFAULT_GROUPS)
             groups = groups | {"phone"}
-            self.engine.state.tool_groups = groups
+            target.state.update(tool_groups=groups)
         else:
             # Disable phone tool group for PC-originated turns
-            groups = self.engine.state.tool_groups
+            groups = target.state.tool_groups
             if groups is not None:
                 groups = groups - {"phone"}
-                self.engine.state.tool_groups = groups
-        self.engine.system_suffix = suffix
-        self.engine.refresh_system_prompt()
+                target.state.update(tool_groups=groups)
+        target.system_suffix = suffix
+        target.refresh_system_prompt()
 
-    def _rebuild_suffix(self) -> None:
-        """Recompose system_suffix from the user's custom prompt + the HUD
-        instructions, without the device-context tail (that is re-injected by
-        _inject_device_context at the start of each turn). Keeping the user
-        prompt and the HUD block separate means the settings UI can edit one
-        without destroying the other."""
+    def _composed_suffix(self) -> str:
+        """Build the live gateway prompt without a per-turn device tail."""
         parts: list[str] = []
         if self._user_system_prompt:
             parts.append(self._user_system_prompt)
@@ -541,7 +619,11 @@ IMPORTANT: When you use show_widget, do NOT repeat the widget title or type in y
         parts.append(personal_os.system_context())
         parts.append(inbox.system_context())
         parts.append(routines.system_context())
-        self.engine.system_suffix = "\n\n".join(parts)
+        return "\n\n".join(parts)
+
+    def _rebuild_suffix(self) -> None:
+        """Refresh the primary gateway engine's live, device-neutral context."""
+        self.engine.system_suffix = self._composed_suffix()
         self.engine.refresh_system_prompt()
 
     def _setup_phone_action(self) -> None:
@@ -572,19 +654,56 @@ IMPORTANT: When you use show_widget, do NOT repeat the widget title or type in y
             if emit is None:
                 return None  # No active stream — tool returns text fallback
             emit("widget", {"type": widget_type, "title": title, "data": data})
-            return None  # Signal to tool that widget was emitted
+            return "emitted"
 
         self.engine.executor.widget_action = widget_action
 
+    def _refresh_shared_prompts(self) -> None:
+        """Refresh both engines after changing their shared AppState."""
+        self.engine.refresh_system_prompt()
+        if self.agent.engine is not self.engine:
+            self.agent.engine.refresh_system_prompt()
+
+    def _apply_shared_runtime_setting(self, key: str, value) -> bool:
+        """Apply one global setting to the web and terminal engines."""
+        applied = command_utils.apply_runtime_setting(self.agent.state, self.engine, key, value)
+        if self.agent.engine is not self.engine:
+            applied = (
+                command_utils.apply_runtime_setting(self.agent.state, self.agent.engine, key, value)
+                or applied
+            )
+        if key == "proactive.enabled":
+            self.proactive_monitor.enabled = value
+            if value and self.running:
+                self.proactive_monitor.start()
+            elif not value:
+                self.proactive_monitor.stop()
+            return True
+        if key == "proactive.desktop_notifications":
+            self.proactive_monitor.desktop_notifications = value
+            return True
+        if key == "proactive.interval":
+            self.proactive_monitor.interval = value
+            return True
+        return applied
+
+    def _persist_command_config(self) -> str | None:
+        try:
+            _config.save(self.config)
+            return None
+        except (OSError, TypeError, ValueError) as exc:
+            _log.warning("gateway command could not save config", exc_info=True)
+            return f"could not save config: {exc}; any live change lasts only until restart"
+
     # -- chats --------------------------------------------------------------
 
-    def _save_current(self) -> None:
+    def _save_current(self, *, allow_empty: bool = False) -> None:
         msgs = [
             m
             for m in self.engine.messages
             if m.get("role") != "system" or SUMMARY_MARKER in str(m.get("content") or "")
         ]
-        if not msgs:
+        if not msgs and not allow_empty:
             return  # don't persist empty chats
         self.session["model"] = self._model_spec
         self.session["messages"] = msgs
@@ -631,23 +750,14 @@ IMPORTANT: When you use show_widget, do NOT repeat the widget title or type in y
     def render_messages(self, messages: list[dict]) -> list[dict]:
         """Turn stored messages into display items for the web UI."""
         out: list[dict] = []
+        visible_users = set(_visible_user_indices(messages))
         for i, m in enumerate(messages):
             role = m.get("role")
             if role == "system":
                 continue
             content = (m.get("content") or "").strip()
             if role == "user":
-                if content.startswith(
-                    (
-                        "Tool result for ",
-                        "[background] ",
-                        "STOP. ",
-                        "You called ",
-                        "[older context, compacted]",
-                    )
-                ):
-                    continue
-                if content:
+                if i in visible_users:
                     out.append({"role": "user", "content": content})
             elif role == "assistant":
                 tool_calls = m.get("tool_calls") or []
@@ -940,9 +1050,7 @@ IMPORTANT: When you use show_widget, do NOT repeat the widget title or type in y
     # -- personal OS --------------------------------------------------------
 
     def personal_os_snapshot(self) -> dict:
-        data = personal_os.briefing(
-            self.config, browser_connected=self._browser_connected()
-        )
+        data = personal_os.briefing(self.config, browser_connected=self._browser_connected())
         managed = integrations.list_connections() + inbox.list_email_connections()
         if managed:
             data["integrations"] = managed + list(data.get("integrations") or [])
@@ -962,20 +1070,14 @@ IMPORTANT: When you use show_widget, do NOT repeat the widget title or type in y
 
         groups = self.agent.state.tool_groups
         active_groups = DEFAULT_GROUPS if groups is None else set(groups)
-        active_tools = {
-            name
-            for group in active_groups
-            for name in TOOL_GROUPS.get(group, ())
-        }
+        active_tools = {name for group in active_groups for name in TOOL_GROUPS.get(group, ())}
         data["architecture"] = capabilities.build_architecture(
             available_tools=_all_tools().keys(),
             active_tools=active_tools,
             routines=data["routines"],
             integrations=data.get("integrations") or [],
             installed_skills=[
-                path.stem
-                for path in (_config.config_dir() / "skills").glob("*")
-                if path.is_file()
+                path.stem for path in (_config.config_dir() / "skills").glob("*") if path.is_file()
             ],
             model=self._model_spec,
         )
@@ -1278,7 +1380,11 @@ IMPORTANT: When you use show_widget, do NOT repeat the widget title or type in y
         if not text:
             raise ValueError("deadline title is required")
         due_at = personal_os.parse_timestamp(data.get("due_at") or data.get("when"))
-        tags = [str(tag) for tag in (data.get("tags") or [])]
+        raw_tags = data.get("tags") or []
+        if isinstance(raw_tags, str):
+            tags = [tag.strip() for tag in raw_tags.split(",") if tag.strip()]
+        else:
+            tags = [str(tag).strip() for tag in raw_tags if str(tag).strip()]
         if "deadline" not in tags:
             tags.append("deadline")
         reminder = reminders.add(text, due_at=due_at, tags=tags)
@@ -1286,7 +1392,7 @@ IMPORTANT: When you use show_widget, do NOT repeat the widget title or type in y
 
     def update_deadline(self, data: dict) -> dict:
         reminder_id = str(data.get("id", ""))
-        changes = {}
+        changes: dict[str, object] = {}
         if "title" in data or "text" in data:
             changes["text"] = str(data.get("title") or data.get("text") or "").strip()
         if "due_at" in data or "when" in data:
@@ -1315,14 +1421,24 @@ IMPORTANT: When you use show_widget, do NOT repeat the widget title or type in y
         # Collect models from all configured providers, flattened to one list.
         all_provider_models = _all_models(self.config, cached_only=True)
         models: list[str] = []
-        for provider, mlist in all_provider_models.items():
+        for _provider, mlist in all_provider_models.items():
             models.extend(mlist)
-        if not models:
-            models = [self._model_spec]
         # Current model shown with provider prefix if cloud.
         current = self._model_spec
-        gw_cfg = self.config.get("gateway") or {}
-        proactive_cfg = self.config.get("proactive") or {}
+        models = list(dict.fromkeys(models))
+        if current not in models:
+            models.insert(0, current)
+        raw_gw_cfg = self.config.get("gateway")
+        gw_cfg = raw_gw_cfg if isinstance(raw_gw_cfg, dict) else {}
+        raw_proactive_cfg = self.config.get("proactive")
+        proactive_cfg = raw_proactive_cfg if isinstance(raw_proactive_cfg, dict) else {}
+        try:
+            raw_port = gw_cfg.get("port", 8700)
+            gateway_port = 0 if isinstance(raw_port, bool) else int(raw_port)
+        except (TypeError, ValueError):
+            gateway_port = 8700
+        if not 1 <= gateway_port <= 65535:
+            gateway_port = 8700
         return {
             "model": current,
             "models": models,
@@ -1330,11 +1446,13 @@ IMPORTANT: When you use show_widget, do NOT repeat the widget title or type in y
             "user_name": self.agent.state.user_name or "",
             "stream": self.engine.stream,
             "yolo": self.agent.state.yolo,
-            "gateway_port": int(gw_cfg.get("port", 8700)),
-            "gateway_auto_start": bool(gw_cfg.get("auto_start", True)),
-            "proactive_enabled": bool(proactive_cfg.get("enabled", True)),
-            "desktop_notifications": bool(
-                proactive_cfg.get("desktop_notifications", True)
+            "gateway_port": gateway_port,
+            "gateway_auto_start": command_utils.boolean_value(gw_cfg.get("auto_start", True), True),
+            "proactive_enabled": command_utils.boolean_value(
+                proactive_cfg.get("enabled", True), True
+            ),
+            "desktop_notifications": command_utils.boolean_value(
+                proactive_cfg.get("desktop_notifications", True), True
             ),
             "system_prompt": self._user_system_prompt or "",
         }
@@ -1348,6 +1466,15 @@ IMPORTANT: When you use show_widget, do NOT repeat the widget title or type in y
 
     def update_settings(self, data: dict) -> dict:
         cfg = self.config
+        errors: list[str] = []
+
+        def incoming_bool(field: str) -> bool | None:
+            value = data[field]
+            if isinstance(value, bool):
+                return value
+            errors.append(f"{field} must be true or false")
+            return None
+
         if data.get("model"):
             error = self._activate_model(str(data["model"]))
             if error:
@@ -1355,43 +1482,59 @@ IMPORTANT: When you use show_widget, do NOT repeat the widget title or type in y
             cfg["model"] = self._model_spec
         if "temperature" in data:
             try:
-                t = max(0.0, min(2.0, float(data["temperature"])))
-                self.engine.temperature = t
+                raw_temperature = data["temperature"]
+                if isinstance(raw_temperature, bool):
+                    raise ValueError
+                t = float(raw_temperature)
+                if not math.isfinite(t):
+                    raise ValueError
+                t = max(0.0, min(2.0, t))
+                self._apply_shared_runtime_setting("temperature", t)
                 cfg["temperature"] = t
             except (TypeError, ValueError):
                 _log.warning("ignoring invalid temperature %r", data.get("temperature"))
         if "user_name" in data:
-            name = (data.get("user_name") or "").strip() or None
-            self.agent.state.update(user_name=name)
-            self.engine.refresh_system_prompt()
+            name = str(data.get("user_name") or "").strip() or None
+            self._apply_shared_runtime_setting("user_name", name)
             cfg["user_name"] = name
         if "stream" in data:
-            self.engine.stream = bool(data["stream"])
-            _config.set_value(cfg, "ollama.stream", self.engine.stream)
+            enabled = incoming_bool("stream")
+            if enabled is not None:
+                self._apply_shared_runtime_setting("ollama.stream", enabled)
+                _config.set_value(cfg, "ollama.stream", self.engine.stream)
         if "yolo" in data:
-            self.agent.state.update(yolo=bool(data["yolo"]))
-            cfg["yolo"] = bool(data["yolo"])
+            enabled = incoming_bool("yolo")
+            if enabled is not None:
+                self.agent.state.update(yolo=enabled)
+                cfg["yolo"] = enabled
         if "gateway_port" in data:
             try:
-                port = int(data["gateway_port"])
+                raw_port = data["gateway_port"]
+                if isinstance(raw_port, bool):
+                    raise ValueError
+                port = int(raw_port)
                 if 1 <= port <= 65535:
                     _config.set_value(cfg, "gateway.port", port)
             except (TypeError, ValueError):
                 _log.warning("ignoring invalid gateway_port %r", data.get("gateway_port"))
         if "gateway_auto_start" in data:
-            _config.set_value(cfg, "gateway.auto_start", bool(data["gateway_auto_start"]))
+            enabled = incoming_bool("gateway_auto_start")
+            if enabled is not None:
+                _config.set_value(cfg, "gateway.auto_start", enabled)
         if "proactive_enabled" in data:
-            enabled = bool(data["proactive_enabled"])
-            _config.set_value(cfg, "proactive.enabled", enabled)
-            self.proactive_monitor.enabled = enabled
-            if enabled and self.running:
-                self.proactive_monitor.start()
-            elif not enabled:
-                self.proactive_monitor.stop()
+            enabled = incoming_bool("proactive_enabled")
+            if enabled is not None:
+                _config.set_value(cfg, "proactive.enabled", enabled)
+                self.proactive_monitor.enabled = enabled
+                if enabled and self.running:
+                    self.proactive_monitor.start()
+                elif not enabled:
+                    self.proactive_monitor.stop()
         if "desktop_notifications" in data:
-            enabled = bool(data["desktop_notifications"])
-            _config.set_value(cfg, "proactive.desktop_notifications", enabled)
-            self.proactive_monitor.desktop_notifications = enabled
+            enabled = incoming_bool("desktop_notifications")
+            if enabled is not None:
+                _config.set_value(cfg, "proactive.desktop_notifications", enabled)
+                self.proactive_monitor.desktop_notifications = enabled
         if "system_prompt" in data:
             self._user_system_prompt = str(data["system_prompt"]).strip()
             self._rebuild_suffix()
@@ -1400,7 +1543,10 @@ IMPORTANT: When you use show_widget, do NOT repeat the widget title or type in y
             _config.save(cfg)
         except Exception:
             _log.warning("failed to save config after settings update", exc_info=True)
-        return self.get_settings()
+        result = self.get_settings()
+        if errors:
+            result["error"] = "; ".join(errors)
+        return result
 
     def set_model(self, model: str) -> dict:
         """Switch the active model instantly (used by the header dropdown).
@@ -1415,10 +1561,9 @@ IMPORTANT: When you use show_widget, do NOT repeat the widget title or type in y
         if error:
             return {"error": error, "model": self._model_spec}
         self.config["model"] = self._model_spec
-        try:
-            _config.save(self.config)
-        except Exception:
-            _log.warning("failed to save config after model switch", exc_info=True)
+        save_error = self._persist_command_config()
+        if save_error:
+            return {"error": save_error, "model": self._model_spec}
         return {"model": self._model_spec}
 
     def _activate_model(self, model_spec: str) -> str | None:
@@ -1437,7 +1582,15 @@ IMPORTANT: When you use show_widget, do NOT repeat the widget title or type in y
         self.agent.model = model_name
         self.engine.model = model_name
         self._model_spec = model_spec if provider != "ollama" else model_name
-        self.agent.state.active_model_spec = self._model_spec
+        tools_supported = bool(
+            _config.get_model_capability(self.config, self._model_spec, "tools_supported", True)
+        )
+        self.agent.state.update(
+            active_model_spec=self._model_spec,
+            tools_enabled=tools_supported,
+        )
+        self.agent.engine.refresh_system_prompt()
+        self.engine.refresh_system_prompt()
         return None
 
     def bootstrap(self) -> dict:
@@ -1512,6 +1665,7 @@ IMPORTANT: When you use show_widget, do NOT repeat the widget title or type in y
 
             is_current = session_id == self.session.get("id")
             target: dict | None
+            actor: dict | None = None
             if is_current:
                 target = dict(self.session)
                 working = [dict(message) for message in self.engine.messages]
@@ -1537,11 +1691,7 @@ IMPORTANT: When you use show_widget, do NOT repeat the widget title or type in y
             if pinned != requested_project:
                 return {"error": "project does not match the session's pinned project"}, 409
 
-            try:
-                context_window = int((self.config.get("ollama") or {}).get("num_ctx", 8192))
-            except (TypeError, ValueError):
-                context_window = 8192
-            context_window = max(1, context_window)
+            context_window = command_utils.context_window(self.config)
             max_tokens = max(1, int(context_window * threshold_value))
             target_model = str(target.get("model") or self._model_spec)
             before = count_messages(working, target_model)
@@ -1567,6 +1717,7 @@ IMPORTANT: When you use show_widget, do NOT repeat the widget title or type in y
                     self.session = target
                     self.engine.messages = working
                 else:
+                    assert actor is not None
                     actor["engine"].messages = working
 
             return {
@@ -1614,14 +1765,13 @@ IMPORTANT: When you use show_widget, do NOT repeat the widget title or type in y
             return {"error": f"effort must be one of {', '.join(EFFORT_LEVELS)}"}
         self.agent.state.update(effort=level)
         try:
-            self.engine.refresh_system_prompt()
+            self._refresh_shared_prompts()
         except Exception:
             _log.warning("failed to refresh prompt after effort switch", exc_info=True)
         self.config["effort"] = level
-        try:
-            _config.save(self.config)
-        except Exception:
-            _log.warning("failed to save config after effort switch", exc_info=True)
+        save_error = self._persist_command_config()
+        if save_error:
+            return {"error": save_error}
         return {"ok": True, "effort": level}
 
     def list_sessions_compat(self) -> dict:
@@ -1646,7 +1796,9 @@ IMPORTANT: When you use show_widget, do NOT repeat the widget title or type in y
         import types
 
         state = self.agent.state
-        token = state.github_token or ((self.config.get("github") or {}).get("token"))
+        raw_github = self.config.get("github")
+        github = raw_github if isinstance(raw_github, dict) else {}
+        token = state.github_token or github.get("token")
         return types.SimpleNamespace(
             github_token=token,
             insecure_ssl=bool(getattr(state, "insecure_ssl", False)),
@@ -1749,7 +1901,7 @@ IMPORTANT: When you use show_widget, do NOT repeat the widget title or type in y
             emit("error", {"text": "Cagentic is still working on the previous message."})
             return
         # Find user messages in the engine's message list
-        user_indices = [i for i, m in enumerate(self.engine.messages) if m.get("role") == "user"]
+        user_indices = _visible_user_indices(self.engine.messages)
         if index < 0 or index >= len(user_indices):
             self._turn_lock.release()
             emit("error", {"text": f"invalid message index {index}"})
@@ -1761,6 +1913,8 @@ IMPORTANT: When you use show_widget, do NOT repeat the widget title or type in y
         self._thread_context.emit = emit
         self.engine.model = self.agent.model
         try:
+            self._rebuild_suffix()
+            self._inject_device_context("pc")
             for ev in self.engine.submit_message(message):
                 emit(ev.kind, ev.data)
         except _ClientGone:
@@ -1782,9 +1936,7 @@ IMPORTANT: When you use show_widget, do NOT repeat the widget title or type in y
         if not locked:
             return {"error": "Cagentic is still working on the previous message."}
         try:
-            user_indices = [
-                i for i, m in enumerate(self.engine.messages) if m.get("role") == "user"
-            ]
+            user_indices = _visible_user_indices(self.engine.messages)
             if index < 0 or index >= len(user_indices):
                 return {"error": f"invalid message index {index}"}
             target = user_indices[index]
@@ -1815,6 +1967,11 @@ IMPORTANT: When you use show_widget, do NOT repeat the widget title or type in y
         except Exception as e:
             emit("error", {"text": f"{type(e).__name__}: {e}"})
         finally:
+            if source == "ios":
+                try:
+                    self._inject_device_context("pc")
+                except Exception:
+                    _log.warning("failed to clear iOS device context", exc_info=True)
             self._active_emit = None
             self._thread_context.emit = None
             self._active_source = "pc"
@@ -1843,6 +2000,8 @@ IMPORTANT: When you use show_widget, do NOT repeat the widget title or type in y
             except RuntimeError:
                 return None
             shared = self.agent.state
+            shared_groups = set(shared.tool_groups) if shared.tool_groups else set()
+            shared_groups.discard("phone")
             state = AppState(
                 workspace=self._default_workspace,
                 home=shared.home,
@@ -1852,7 +2011,7 @@ IMPORTANT: When you use show_widget, do NOT repeat the widget title or type in y
                 insecure_ssl=shared.insecure_ssl,
                 tools_enabled=shared.tools_enabled,
                 effort=shared.effort,
-                tool_groups=set(shared.tool_groups) if shared.tool_groups else None,
+                tool_groups=shared_groups or None,
                 mcp=shared.mcp,
                 browser=shared.browser,
                 active_model_spec=model_spec,
@@ -1861,11 +2020,10 @@ IMPORTANT: When you use show_widget, do NOT repeat the widget title or type in y
             context = ""
             if project and project.get("kind") == "gatewayFolder":
                 folder = self.workspace_policy.validate(project.get("value"))
-                state.workspace = folder
-                state.workspace_boundary = folder
+                state.update(workspace=folder, workspace_boundary=folder)
                 context = f"Pinned gateway folder project: {folder}."
             elif project and project.get("kind") == "repository":
-                state.default_repository = project.get("value")
+                state.update(default_repository=project.get("value"))
                 context = f"Pinned GitHub repository project: {project.get('value')}."
             engine = QueryEngine(
                 client=client,
@@ -1878,7 +2036,7 @@ IMPORTANT: When you use show_widget, do NOT repeat the widget title or type in y
             )
             engine.executor.phone_action = self.engine.executor.phone_action
             engine.executor.widget_action = self.engine.executor.widget_action
-            engine.system_suffix = self.engine.system_suffix
+            engine.system_suffix = self._composed_suffix()
             engine.project_context = context
             engine.load_messages(data.get("messages", []))
             engine.session_id = session_id
@@ -1905,7 +2063,7 @@ IMPORTANT: When you use show_widget, do NOT repeat the widget title or type in y
             return {"error": "session is busy"}, 409
         return {"ok": True}, 200
 
-    def run_session_turn(self, session_id: str, message: str, emit) -> None:
+    def run_session_turn(self, session_id: str, message: str, emit, source: str = "pc") -> None:
         actor = self._session_actor(session_id)
         if actor is None or not actor["lock"].acquire(blocking=False):
             emit("error", {"text": "session is busy or unavailable"})
@@ -1913,6 +2071,8 @@ IMPORTANT: When you use show_widget, do NOT repeat the widget title or type in y
         engine = actor["engine"]
         self._thread_context.emit = emit
         try:
+            engine.system_suffix = self._composed_suffix()
+            self._inject_device_context(source, engine)
             for event in engine.submit_message(message):
                 emit(event.kind, event.data)
         except _ClientGone:
@@ -1920,6 +2080,11 @@ IMPORTANT: When you use show_widget, do NOT repeat the widget title or type in y
         except Exception as exc:
             emit("error", {"text": f"{type(exc).__name__}: {exc}"})
         finally:
+            if source == "ios":
+                try:
+                    self._inject_device_context("pc", engine)
+                except Exception:
+                    _log.warning("failed to clear actor iOS device context", exc_info=True)
             self._thread_context.emit = None
             data = actor["session"]
             data["model"] = actor["model_spec"]
@@ -1934,48 +2099,46 @@ IMPORTANT: When you use show_widget, do NOT repeat the widget title or type in y
     # -- slash command handler for web UI -----------------------------------
 
     def handle_cmd(self, cmd: str, arg1: str = "", arg2: str = "") -> dict:
+        """Run a web slash command without letting one failure drop the API connection."""
+        try:
+            return self._handle_cmd(cmd, arg1, arg2)
+        except Exception as exc:
+            _log.warning("gateway slash command failed: /%s", cmd, exc_info=True)
+            return {"ok": False, "text": f"command failed: {type(exc).__name__}: {exc}"}
+
+    def _handle_cmd(self, cmd: str, arg1: str = "", arg2: str = "") -> dict:
         """Execute a slash command from the web UI and return a result dict.
 
-        Supported commands mirror the CLI: /new, /clear, /model, /models,
-        /diag, /tools, /groups, /yolo, /help, /plan, /effort, /stream,
-        /name, /host, /retry, /undo, /save, /notes, /mcp, /config, /set.
+        GATEWAY_COMMANDS is the authoritative help/completion inventory. The
+        subset is deliberate: controls already cover save/delete/edit, while
+        interactive terminal commands do not have safe web equivalents.
         """
         from . import config as _cfg
-        from .tools import DEFAULT_GROUPS, _all_tools
+        from .tools import DEFAULT_GROUPS, TOOL_GROUPS, _all_tools
 
         cmd = cmd.lstrip("/").lower()
+        arg1 = arg1.strip()
+        arg2 = arg2.strip()
+        full_arg = command_utils.full_argument(arg1, arg2)
         agent = self.agent
         cfg = self.config
+        canonical_cmd = "help" if cmd == "?" else cmd
+        if canonical_cmd in GATEWAY_COMMAND_NAMES:
+            if not _GATEWAY_ARGUMENTS[canonical_cmd] and full_arg:
+                return {"ok": False, "text": _gateway_usage(canonical_cmd)}
+            if canonical_cmd in {"effort", "plan", "stream", "yolo"} and arg2:
+                return {"ok": False, "text": _gateway_usage(canonical_cmd)}
 
         if cmd in ("help", "?"):
-            return {
-                "ok": True,
-                "text": (
-                    "/new — start a new chat\n"
-                    "/clear — clear the current chat\n"
-                    "/model <name> — switch model\n"
-                    "/models — list available models\n"
-                    "/diag — show diagnostics\n"
-                    "/tools — list active tools\n"
-                    "/groups [enable|disable <name>] — show/change tool groups\n"
-                    "/yolo [on|off] — toggle auto-approve\n"
-                    "/plan [on|off] — toggle plan mode\n"
-                    "/effort [low|medium|high] — how hard the model works\n"
-                    "/stream [on|off] — toggle streaming\n"
-                    "/name <name> — set your name\n"
-                    "/host <url> — change Ollama host\n"
-                    "/save — save current chat\n"
-                    "/notes — list notes\n"
-                    "/mcp — list MCP servers\n"
-                    "/config — show config\n"
-                    "/set <key> <value> — set config value\n"
-                    "/undo — undo last exchange\n"
-                    "/retry — retry last turn\n"
-                ),
-            }
+            return {"ok": True, "text": _gateway_help_text()}
 
         if cmd == "new":
             cur = self.new_chat()
+            if cur.get("error"):
+                return {"ok": False, "text": cur["error"]}
+            if full_arg:
+                self.session["title"] = full_arg
+                cur = self.current_chat()
             return {"ok": True, "text": "new chat started", "current": cur}
 
         if cmd == "clear":
@@ -1985,16 +2148,20 @@ IMPORTANT: When you use show_widget, do NOT repeat the widget title or type in y
                     "text": "Cagentic is still working on the previous message.",
                 }
             try:
-                self.engine.messages.clear()
-                self._save_current()
-                return {"ok": True, "text": "chat cleared"}
+                self.engine.reset()
+                self._save_current(allow_empty=True)
+                return {
+                    "ok": True,
+                    "text": "chat cleared",
+                    "current": self.current_chat(),
+                }
             finally:
                 self._turn_lock.release()
 
         if cmd == "model":
-            if not arg1:
-                return {"ok": True, "text": f"current model: {agent.model}"}
-            result = self.set_model(arg1)
+            if not full_arg:
+                return {"ok": True, "text": f"current model: {self._model_spec}"}
+            result = self.set_model(full_arg)
             if "error" in result:
                 return {"ok": False, "text": result["error"]}
             return {
@@ -2008,43 +2175,56 @@ IMPORTANT: When you use show_widget, do NOT repeat the widget title or type in y
                 models = agent.client.list_models()
             except Exception as e:
                 return {"ok": False, "text": f"could not list models: {e}"}
-            return {
-                "ok": True,
-                "text": "available models:\n" + "\n".join(f"  {m}" for m in models),
-                "models": models,
-            }
+            if not models:
+                return {
+                    "ok": True,
+                    "text": "no models reported by the current provider",
+                    "models": [],
+                }
+            lines = ["available models:"]
+            for model in models:
+                _, bare_name = _parse_model(model)
+                active = model == self._model_spec or bare_name == self.engine.model
+                lines.append(f"  {model}{'  (active)' if active else ''}")
+            return {"ok": True, "text": "\n".join(lines), "models": models}
 
         if cmd == "diag":
             groups = (
                 agent.state.tool_groups if agent.state.tool_groups is not None else DEFAULT_GROUPS
             )
-            lines = [f"model:    {agent.model}"]
+            lines = [f"model:     {self._model_spec}"]
             lines.append(f"name:     {agent.state.user_name or '(not set)'}")
             lines.append(f"workspace: {agent.state.workspace}")
             lines.append(
                 f"tools:    {'native' if agent.tools_enabled else 'text-protocol fallback'}"
             )
             lines.append(f"groups:   {', '.join(sorted(groups))}")
-            lines.append(f"stream:   {'on' if agent.engine.stream else 'off'}")
-            try:
-                status = agent.client.model_vram_status(agent.model)
-                if status is None:
-                    lines.append("vram:     model not currently loaded")
-                elif status["fully_gpu"]:
-                    lines.append(
-                        f"vram:     {status['size_vram'] / (1024**3):.1f} GB · fully on GPU ✓"
-                    )
-                else:
-                    size_gb = status["size"] / (1024**3)
-                    cpu_gb = status["cpu_bytes"] / (1024**3)
-                    pct = status["cpu_percent"]
-                    lines.append(
-                        f"vram:     {cpu_gb:.1f}/{size_gb:.1f} GB on CPU ({pct:.0f}% offloaded — slow)"
-                    )
-            except Exception:
-                _log.warning("could not read VRAM status", exc_info=True)
-                lines.append("vram:     (not available)")
-            mcp_servers = list(((cfg.get("mcp") or {}).get("servers") or {}).keys())
+            lines.append(f"stream:   {'on' if self.engine.stream else 'off'}")
+            from .ollama_client import OllamaClient
+
+            if isinstance(self.engine.client, OllamaClient):
+                try:
+                    status = self.engine.client.model_vram_status(self.engine.model)
+                    if status is None:
+                        lines.append("vram:     model not currently loaded")
+                    elif status["fully_gpu"]:
+                        lines.append(
+                            f"vram:     {status['size_vram'] / (1024**3):.1f} GB · fully on GPU ✓"
+                        )
+                    else:
+                        size_gb = status["size"] / (1024**3)
+                        cpu_gb = status["cpu_bytes"] / (1024**3)
+                        pct = status["cpu_percent"]
+                        lines.append(
+                            f"vram:     {cpu_gb:.1f}/{size_gb:.1f} GB on CPU "
+                            f"({pct:.0f}% offloaded — slow)"
+                        )
+                except Exception:
+                    _log.warning("could not read VRAM status", exc_info=True)
+                    lines.append("vram:     (not available)")
+            else:
+                lines.append(f"provider: {_parse_model(self._model_spec)[0]}")
+            mcp_servers = list(command_utils.mcp_server_config(cfg))
             lines.append(
                 f"mcp:      {len(mcp_servers)} configured ({', '.join(mcp_servers) or 'none'})"
             )
@@ -2052,10 +2232,21 @@ IMPORTANT: When you use show_widget, do NOT repeat the widget title or type in y
 
         if cmd == "tools":
             mode = "native" if agent.tools_enabled else "text-protocol fallback"
-            tools = _all_tools()
-            lines = [f"{len(tools)} tools ({mode}):"]
-            for t in tools:
-                lines.append(f"  {t['function']['name']}")
+            known = set(_all_tools())
+            active_groups = (
+                agent.state.tool_groups if agent.state.tool_groups is not None else DEFAULT_GROUPS
+            )
+            active_names = {
+                name
+                for group in active_groups
+                for name in TOOL_GROUPS.get(group, ())
+                if name in known
+            }
+            lines = [f"{len(active_names)} of {len(known)} tools active ({mode}):"]
+            for group in sorted(active_groups):
+                names = sorted(name for name in TOOL_GROUPS.get(group, ()) if name in known)
+                if names:
+                    lines.append(f"  [{group}] {', '.join(names)}")
             return {"ok": True, "text": "\n".join(lines)}
 
         if cmd == "groups":
@@ -2063,34 +2254,42 @@ IMPORTANT: When you use show_widget, do NOT repeat the widget title or type in y
                 agent.state.tool_groups if agent.state.tool_groups is not None else DEFAULT_GROUPS
             )
             if not arg1:
-                from .tools import TOOL_GROUPS
-
                 lines = ["tool groups (✓ = sent to the model):"]
                 for g, names in sorted(TOOL_GROUPS.items()):
                     mark = "✓" if g in active else "✗"
                     lines.append(f"  {mark} {g} ({len(names)} tools)")
                 return {"ok": True, "text": "\n".join(lines)}
-            if arg1 == "enable" and arg2:
+            action = arg1.lower()
+            group = arg2.lower()
+            if action == "enable" and group:
+                if group not in TOOL_GROUPS:
+                    return {"ok": False, "text": f"unknown tool group '{arg2}'"}
                 groups = set(active)
-                groups.add(arg2)
-                agent.state.tool_groups = groups
+                groups.add(group)
+                agent.state.update(tool_groups=groups)
                 _cfg.set_value(cfg, "tool_groups", sorted(groups))
-                _cfg.save(cfg)
-                self.engine.refresh_system_prompt()
+                save_error = self._persist_command_config()
+                if save_error:
+                    return {"ok": False, "text": save_error}
+                self._refresh_shared_prompts()
                 return {
                     "ok": True,
-                    "text": f"enabled '{arg2}' — {len(groups)} group(s) active",
+                    "text": f"enabled '{group}' — {len(groups)} group(s) active",
                 }
-            if arg1 == "disable" and arg2:
+            if action == "disable" and group:
+                if group not in TOOL_GROUPS:
+                    return {"ok": False, "text": f"unknown tool group '{arg2}'"}
                 groups = set(active)
-                groups.discard(arg2)
-                agent.state.tool_groups = groups
+                groups.discard(group)
+                agent.state.update(tool_groups=groups)
                 _cfg.set_value(cfg, "tool_groups", sorted(groups))
-                _cfg.save(cfg)
-                self.engine.refresh_system_prompt()
+                save_error = self._persist_command_config()
+                if save_error:
+                    return {"ok": False, "text": save_error}
+                self._refresh_shared_prompts()
                 return {
                     "ok": True,
-                    "text": f"disabled '{arg2}' — {len(groups)} group(s) active",
+                    "text": f"disabled '{group}' — {len(groups)} group(s) active",
                 }
             return {
                 "ok": False,
@@ -2098,20 +2297,20 @@ IMPORTANT: When you use show_widget, do NOT repeat the widget title or type in y
             }
 
         if cmd == "yolo":
-            want = arg1.lower() if arg1 else ("off" if agent.state.yolo else "on")
-            if want not in ("on", "off"):
-                return {"ok": False, "text": "usage: /yolo on|off"}
-            agent.state.update(yolo=(want == "on"))
+            enabled = command_utils.switch_value(arg1, agent.state.yolo)
+            if enabled is None:
+                return {"ok": False, "text": "usage: /yolo [on|off]"}
+            agent.state.update(yolo=enabled)
             cfg["yolo"] = agent.state.yolo
-            _cfg.save(cfg)
+            save_error = self._persist_command_config()
+            if save_error:
+                return {"ok": False, "text": save_error}
             return {
                 "ok": True,
                 "text": f"yolo mode: {'ON (auto-approve)' if agent.state.yolo else 'OFF (ask every time)'}",
             }
 
         if cmd == "effort":
-            from .engine import EFFORT_LEVELS
-
             if not arg1:
                 return {
                     "ok": True,
@@ -2123,72 +2322,100 @@ IMPORTANT: When you use show_widget, do NOT repeat the widget title or type in y
             return {"ok": True, "text": f"effort: {res['effort']}"}
 
         if cmd == "plan":
-            want = arg1.lower() if arg1 else ("off" if agent.state.plan_mode else "on")
-            if want not in ("on", "off"):
-                return {"ok": False, "text": "usage: /plan on|off"}
-            agent.state.update(plan_mode=(want == "on"))
-            self.engine.refresh_system_prompt()
+            enabled = command_utils.switch_value(arg1, agent.state.plan_mode)
+            if enabled is None:
+                return {"ok": False, "text": "usage: /plan [on|off]"}
+            agent.state.update(plan_mode=enabled)
+            self._refresh_shared_prompts()
             return {
                 "ok": True,
                 "text": f"plan mode: {'ON (read-only)' if agent.state.plan_mode else 'OFF'}",
             }
 
         if cmd == "stream":
-            want = arg1.lower() if arg1 else ("off" if agent.engine.stream else "on")
-            if want not in ("on", "off"):
-                return {"ok": False, "text": "usage: /stream on|off"}
-            agent.engine.stream = want == "on"
-            _cfg.set_value(cfg, "ollama.stream", agent.engine.stream)
-            _cfg.save(cfg)
+            enabled = command_utils.switch_value(arg1, self.engine.stream)
+            if enabled is None:
+                return {"ok": False, "text": "usage: /stream [on|off]"}
+            self._apply_shared_runtime_setting("ollama.stream", enabled)
+            _cfg.set_value(cfg, "ollama.stream", self.engine.stream)
+            save_error = self._persist_command_config()
+            if save_error:
+                return {"ok": False, "text": save_error}
             return {
                 "ok": True,
-                "text": f"streaming: {'on' if agent.engine.stream else 'off'} (saved)",
+                "text": f"streaming: {'on' if self.engine.stream else 'off'} (saved)",
             }
 
         if cmd == "name":
-            if not arg1:
+            if not full_arg:
                 return {
                     "ok": True,
                     "text": f"your name: {agent.state.user_name or '(not set)'}",
                 }
-            agent.state.update(user_name=arg1)
-            self.engine.refresh_system_prompt()
-            _cfg.set_value(cfg, "user_name", arg1)
-            _cfg.save(cfg)
-            return {"ok": True, "text": f"name set to: {arg1}"}
+            self._apply_shared_runtime_setting("user_name", full_arg)
+            _cfg.set_value(cfg, "user_name", full_arg)
+            save_error = self._persist_command_config()
+            if save_error:
+                return {"ok": False, "text": save_error}
+            return {"ok": True, "text": f"name set to: {full_arg}"}
 
         if cmd == "host":
-            if not arg1:
+            from .ollama_client import OllamaClient
+
+            if not isinstance(agent.client, OllamaClient):
+                return {
+                    "ok": False,
+                    "text": "/host applies to Ollama only; switch to a local model first",
+                }
+            if not full_arg:
                 return {"ok": True, "text": f"ollama host: {agent.client.host}"}
             try:
-                agent.client.host = arg1.rstrip("/")
-                _cfg.set_value(cfg, "ollama.host", agent.client.host)
-                _cfg.save(cfg)
+                agent.client.host = full_arg
+                cfg["host"] = agent.client.host
+                save_error = self._persist_command_config()
+                if save_error:
+                    return {"ok": False, "text": save_error}
                 return {"ok": True, "text": f"host → {agent.client.host}"}
             except Exception as e:
                 return {"ok": False, "text": f"error: {e}"}
 
-        if cmd == "save":
-            self._save_current()
-            return {"ok": True, "text": "chat saved"}
-
         if cmd == "notes":
-            from .notes import _notes
+            from . import notes as _notes
 
             all_notes = _notes.list_all()
             if not all_notes:
                 return {"ok": True, "text": "no notes"}
-            lines = [f"{n['title']}  ({n['id']})" for n in all_notes]
+            lines = [note.short() for note in all_notes[:40]]
+            if len(all_notes) > 40:
+                lines.append(f"…and {len(all_notes) - 40} more")
             return {"ok": True, "text": "\n".join(lines)}
 
         if cmd == "mcp":
-            mcp_servers = list(((cfg.get("mcp") or {}).get("servers") or {}).keys())
-            if not mcp_servers:
-                return {"ok": True, "text": "no MCP servers configured"}
-            return {
-                "ok": True,
-                "text": "MCP servers:\n" + "\n".join(f"  {s}" for s in mcp_servers),
-            }
+            from .mcp_client import MCPManager
+
+            if agent.state.mcp is None:
+                agent.state.update(mcp=MCPManager(cfg))
+            manager = agent.state.mcp
+            if not full_arg:
+                names = manager.names()
+                if not names:
+                    return {"ok": True, "text": "no MCP servers configured"}
+                return {
+                    "ok": True,
+                    "text": "MCP servers:\n" + "\n".join(f"  {name}" for name in names),
+                }
+            try:
+                tools = manager.list_tools(full_arg)
+            except Exception as exc:
+                return {"ok": False, "text": str(exc)}
+            if not tools:
+                return {"ok": True, "text": f"server '{full_arg}' exposes no tools"}
+            lines = [f"{full_arg}: {len(tools)} tool(s)"]
+            for tool in tools[:40]:
+                name = tool.get("name", "?")
+                description = str(tool.get("description") or "").splitlines()[0][:140]
+                lines.append(f"  {name} — {description}")
+            return {"ok": True, "text": "\n".join(lines)}
 
         if cmd == "config":
             # Redact ALL secret-bearing values (github token, provider api_keys,
@@ -2199,48 +2426,37 @@ IMPORTANT: When you use show_widget, do NOT repeat the widget title or type in y
         if cmd == "set":
             if not arg1 or not arg2:
                 return {"ok": False, "text": "usage: /set <key> <value>"}
-            _cfg.set_value(cfg, arg1, arg2)
-            _cfg.save(cfg)
-            return {"ok": True, "text": f"set {arg1} = {arg2}"}
-
-        if cmd == "undo":
-            # Remove last user + assistant messages. Must hold the turn lock —
-            # a streaming turn appends to this list concurrently.
-            if not self._interrupt_turn():
-                return {
-                    "ok": False,
-                    "text": "Cagentic is still working on the previous message.",
-                }
-            try:
-                msgs = self.engine.messages
-                while msgs and msgs[-1].get("role") != "user":
-                    msgs.pop()
-                if msgs and msgs[-1].get("role") == "user":
-                    msgs.pop()
-                self._save_current()
-                return {"ok": True, "text": "undid last exchange"}
-            finally:
-                self._turn_lock.release()
+            key_error = command_utils.validate_config_key(arg1)
+            if key_error:
+                return {"ok": False, "text": key_error}
+            value = command_utils.parse_config_value(arg2)
+            value_error = command_utils.validate_config_value(arg1, value)
+            if value_error:
+                return {"ok": False, "text": value_error}
+            if arg1 == "tool_groups" and value is not None:
+                unknown = sorted(set(value) - set(TOOL_GROUPS))
+                if unknown:
+                    return {"ok": False, "text": f"unknown tool group(s): {', '.join(unknown)}"}
+            _cfg.set_value(cfg, arg1, value)
+            save_error = self._persist_command_config()
+            if save_error:
+                return {"ok": False, "text": save_error}
+            applied = self._apply_shared_runtime_setting(arg1, value)
+            shown = "••••" if _cfg.is_secret_key(arg1) else value
+            suffix = " (applied live)" if applied else " (saved for next launch)"
+            return {"ok": True, "text": f"set {arg1} = {shown}{suffix}"}
 
         if cmd == "retry":
-            # Remove last assistant message so the engine re-generates. Same
-            # turn-lock requirement as /undo.
-            if not self._interrupt_turn():
-                return {
-                    "ok": False,
-                    "text": "Cagentic is still working on the previous message.",
-                }
-            try:
-                msgs = self.engine.messages
-                while msgs and msgs[-1].get("role") == "assistant":
-                    msgs.pop()
-                self._save_current()
-                return {
-                    "ok": True,
-                    "text": "removed last reply — send a message to retry",
-                }
-            finally:
-                self._turn_lock.release()
+            user_indices = _visible_user_indices(self.engine.messages)
+            if not user_indices:
+                return {"ok": False, "text": "nothing to retry yet"}
+            visible_index = len(user_indices) - 1
+            content = str(self.engine.messages[user_indices[-1]].get("content") or "").strip()
+            return {
+                "ok": True,
+                "text": "retrying the most recent message",
+                "action": {"type": "retry", "index": visible_index, "message": content},
+            }
 
         return {
             "ok": False,
@@ -2396,10 +2612,7 @@ class _Handler(BaseHTTPRequestHandler):
             self._json(self._gw().personal_os_snapshot())
         elif path == "/api/os/integrations":
             self._json(
-                {
-                    "connections": integrations.list_connections()
-                    + inbox.list_email_connections()
-                }
+                {"connections": integrations.list_connections() + inbox.list_email_connections()}
             )
         elif path == "/api/os/inbox":
             self._json(
@@ -2442,11 +2655,12 @@ class _Handler(BaseHTTPRequestHandler):
             self._json(self._gw().github_repos())
         elif path == "/api/github/file":
             qs = parse_qs(urlparse(self.path).query)
+            ref = (qs.get("ref") or [""])[0] or None
             self._json(
                 self._gw().github_file_get(
                     (qs.get("repo") or [""])[0],
                     (qs.get("path") or [""])[0],
-                    (qs.get("ref") or [None])[0],
+                    ref,
                 )
             )
         else:
@@ -2779,7 +2993,7 @@ class _Handler(BaseHTTPRequestHandler):
             return
         try:
             if session_id and session_id != self._gw().session.get("id"):
-                self._gw().run_session_turn(session_id, message, emit)
+                self._gw().run_session_turn(session_id, message, emit, source=source)
             else:
                 self._gw().run_turn(message, emit, source=source, prelocked=prelocked)
             emit("end", {})

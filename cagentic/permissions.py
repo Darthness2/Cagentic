@@ -1,10 +1,12 @@
 """can_use_tool(): formal permission gate.
 
 Decision sources, in order:
-    1. Per-tool cache in AppState.permissions ('always'/'never').
-    2. Read-only tools — always allowed without prompting.
-    3. yolo mode — always allowed.
-    4. Resolver callback — interactive y/n/a prompt for the REPL,
+    1. Dry-run hard gate for every mutating tool.
+    2. Per-tool cache in AppState.permissions ('always'/'never').
+    3. Plan-mode gate.
+    4. Read-only tools — always allowed without prompting.
+    5. yolo mode — always allowed.
+    6. Resolver callback — interactive y/n/a prompt for the REPL,
        or auto-decide for the SDK / headless caller.
 """
 
@@ -65,6 +67,10 @@ READ_ONLY: set[str] = {
     "browser_read",
     "browser_screenshot",
     "browser_links",
+    # iOS inspection and presentation
+    "phone_clipboard_read",
+    "phone_screenshot",
+    "show_widget",
     # github read
     "gh_whoami",
     "gh_list_repos",
@@ -115,6 +121,11 @@ def can_use_tool(
     resolver: Resolver = auto_deny_resolver,
 ) -> tuple[bool, str]:
     """Returns (allowed, reason)."""
+    # Dry-run is stronger than every cached/session permission and cannot be
+    # bypassed by yolo mode or by leaving plan mode.
+    if getattr(state, "dry_run", False) and name not in READ_ONLY:
+        return False, "dry run active — mutating tools blocked"
+
     cached = state.permissions.get(name)
     if cached == "always":
         return True, "permission cache: always"
@@ -159,41 +170,59 @@ def terminal_resolver(name: str, args: dict, state: AppState) -> str:
     """
     from . import ui
 
-    ui.stop_all_spinners()
-    import sys as _sys
+    ui.prepare_for_input()
 
-    if _sys.stdout.isatty():
-        _sys.stdout.write("\033[?25h")
-        _sys.stdout.flush()
-
-    detail = ""
+    action = "Run tool"
+    detail: object = ""
+    command: object | None = None
     if name == "run_bash":
-        detail = f": {args.get('command', '')}"
+        action = "Run shell command"
+        command = args.get("command", "")
     elif name == "write_file":
-        detail = f": write {args.get('path', '')}"
+        action = "Write file"
+        detail = args.get("path", "")
     elif name == "edit_file":
-        detail = f": edit {args.get('path', '')}"
+        action = "Edit file"
+        detail = args.get("path", "")
     elif name == "note_write":
-        detail = f": note '{args.get('name', '')}'"
+        action = "Save persistent note"
+        detail = args.get("name", "")
     elif name == "reminder_add":
-        detail = f": '{args.get('text', '')[:60]}'"
+        action = "Create reminder"
+        detail = str(args.get("text", ""))[:80]
     elif name == "mcp_call":
-        detail = f": {args.get('server', '?')}/{args.get('tool', '?')}"
+        action = "Call connected service"
+        detail = f"{args.get('server', '?')}/{args.get('tool', '?')}"
+    elif name.startswith("browser_"):
+        action = "Control browser"
+        detail = args.get("url") or args.get("selector") or name.removeprefix("browser_")
     elif name.startswith("gh_") or name == "github_api":
-        detail = f": {name} {args}"
-    ui.warn(f"\nApprove {name}{detail}?")
+        action = "Change GitHub data"
+        detail = args.get("repo") or args.get("repository") or name
+
+    print()
+    ui.heading("Approval required")
+    print()
+    ui.list_item(action, detail=f"tool: {name}", marker="!")
+    if command is not None:
+        print()
+        ui.code_block(str(command))
+    if detail:
+        ui.field("target", detail)
+    ui.field("workspace", ui._short_path(str(state.workspace)))
+    print()
+    ui.meta(f"Enter or n deny · y allow once · a always allow {name}")
+    ui.meta("advanced: never deny this tool going forward · yolo auto-approves all changes")
     try:
-        ans = (
-            input("  [y]es / [n]o / [a]lways this tool / 'yolo' to approve all / never: ")
-            .strip()
-            .lower()
-        )
-    except EOFError:
+        ans = ui.input_prompt("Decision", "y/N/a").strip().lower()
+    except (EOFError, KeyboardInterrupt):
+        print()
+        ui.meta("approval cancelled · denied")
         return "no"
 
     if ans in ("yolo", "all"):
         state.update(yolo=True)
-        ui.info("yolo mode ON — no further approval prompts this session. Toggle with /yolo.")
+        ui.warn("yolo mode enabled for this session · disable with /yolo off")
         return "yes"
     if ans in ("a", "always"):
         return "always"
@@ -201,4 +230,6 @@ def terminal_resolver(name: str, args: dict, state: AppState) -> str:
         return "never"
     if ans in ("y", "yes"):
         return "yes"
+    if ans not in ("", "n", "no"):
+        ui.warn(f"unknown approval choice {ans!r} · denied")
     return "no"

@@ -98,6 +98,13 @@ class BrowserBridge:
         if the port can't be bound — typically another Cagentic is running."""
         if self._server is not None:
             return True
+        if (
+            isinstance(self.port, bool)
+            or not isinstance(self.port, int)
+            or not 1 <= self.port <= 65535
+        ):
+            self.error = f"invalid browser bridge port {self.port!r}; expected 1-65535"
+            return False
         self.token = self._load_or_create_token()
         try:
             server = ThreadingHTTPServer(("127.0.0.1", self.port), _Handler)
@@ -220,7 +227,6 @@ class BrowserBridge:
             return {"ok": False, "error": "browser bridge is not running"}
         # Bookkeeping (_record, is_connected) happens OUTSIDE the condition, so
         # the wait loop only ever holds the one lock it needs.
-        timed_out = False
         result: dict | None = None
         with self._cv:
             cmd_id = self._next_id

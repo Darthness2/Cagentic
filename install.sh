@@ -157,17 +157,17 @@ if [[ "$INSTALL_OLLAMA" == "true" && -n "$MODEL" ]]; then
   echo -e "  Start chatting:   ${BLD}cagentic${NC}"
   echo -e "  Web interface:    ${BLD}cagentic${NC}  then type  ${BLD}/gateway${NC}"
 else
+  echo -e "  Set up OpenAI:         ${BLD}cagentic --login openai${NC}"
   echo -e "  Start with OpenAI:     ${BLD}cagentic -m openai:gpt-4o${NC}"
-  echo -e "    (first run: set key) ${BLD}/login openai sk-...${NC}"
+  echo -e "  Set up Anthropic:      ${BLD}cagentic --login anthropic${NC}"
   echo -e "  Start with Anthropic:  ${BLD}cagentic -m anthropic:claude-opus-4-8${NC}"
-  echo -e "    (first run: set key) ${BLD}/login anthropic sk-ant-...${NC}"
   echo -e "  Web interface:         ${BLD}cagentic${NC}  then type  ${BLD}/gateway${NC}"
 fi
 echo ""
 echo -e "  Switch to a cloud model anytime:"
-echo -e "    /login openai sk-...                  (save OpenAI key)"
+echo -e "    /login openai                         (save OpenAI key securely)"
 echo -e "    /model openai:gpt-4o                  (switch model)"
-echo -e "    /login anthropic sk-ant-...            (save Anthropic key)"
+echo -e "    /login anthropic                      (save Anthropic key securely)"
 echo -e "    /model anthropic:claude-opus-4-8       (switch model)"
 echo ""
 hr

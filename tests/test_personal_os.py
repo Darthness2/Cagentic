@@ -91,13 +91,16 @@ def test_gateway_bootstrap_exposes_personal_os(tmp_path, monkeypatch):
     result = gateway.create_goal({"title": "Stay focused", "progress": 10})
     assert result["ok"] is True
     assert gateway.create_inbox_item({"title": "Review the brief"})["ok"] is True
-    assert gateway.create_routine(
-        {
-            "name": "Daily orientation",
-            "schedule_time": "08:00",
-            "days": [0, 1, 2, 3, 4],
-        }
-    )["ok"] is True
+    assert (
+        gateway.create_routine(
+            {
+                "name": "Daily orientation",
+                "schedule_time": "08:00",
+                "days": [0, 1, 2, 3, 4],
+            }
+        )["ok"]
+        is True
+    )
     bootstrap = gateway.bootstrap()
     assert bootstrap["os"]["goals"][0]["title"] == "Stay focused"
     assert bootstrap["os"]["stats"]["active_goals"] == 1
@@ -128,9 +131,7 @@ def test_capability_catalog_is_grounded_in_available_tools():
     )
     memory = next(branch for branch in catalog["branches"] if branch["id"] == "memory")
     vault = next(item for item in memory["capabilities"] if item["name"] == "Personal Vault")
-    recall = next(
-        item for item in memory["capabilities"] if item["name"] == "Conversation Recall"
-    )
+    recall = next(item for item in memory["capabilities"] if item["name"] == "Conversation Recall")
     assert vault["available"] is True
     assert vault["active"] is False
     assert recall["available"] is False

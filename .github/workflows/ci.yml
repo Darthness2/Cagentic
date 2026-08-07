@@ -16,9 +16,5 @@ jobs:
       - run: python -m pip install -e '.[dev]'
       - run: python -m ruff format --check cagentic tests
       - run: python -m ruff check cagentic tests
-      - run: >-
-          python -m mypy
-          cagentic/storage.py cagentic/sessions.py cagentic/projects.py
-          cagentic/reminders.py cagentic/workspaces.py cagentic/token_count.py
-          cagentic/completion.py cagentic/diagnostics.py
+      - run: python -m mypy cagentic
       - run: python -m pytest -q

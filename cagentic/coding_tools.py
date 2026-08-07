@@ -14,6 +14,7 @@ from __future__ import annotations
 
 import os
 import subprocess
+from typing import Any
 
 from . import diff as _diff
 from .tools import (
@@ -78,7 +79,7 @@ def _check_json(src: str, label: str) -> tuple[bool, str]:
 
 def _check_yaml(src: str, label: str) -> tuple[bool, str]:
     try:
-        import yaml  # type: ignore
+        import yaml
     except ImportError:
         return True, "skipped (PyYAML not installed)"
     try:
@@ -93,7 +94,7 @@ def _check_toml(src: str, label: str) -> tuple[bool, str]:
         import tomllib  # py311+
     except ImportError:
         try:
-            import tomli as tomllib  # type: ignore
+            import tomli as tomllib
         except ImportError:
             return True, "skipped (no tomllib/tomli)"
     try:
@@ -332,22 +333,22 @@ def t_multi_edit(args: dict, ctx: ToolContext) -> str:
         return "ERROR: 'edits' must be a non-empty list of {old_string, new_string} objects."
     try:
         p = _resolve_contained(path, ctx.root)
-    except PathEscapeError as e:
-        return f"ERROR: {e}"
+    except PathEscapeError as exc:
+        return f"ERROR: {exc}"
     if not p.exists():
         return f"ERROR: file not found: {path}"
     raw = _read_text_robust(p)
 
     text = raw
     notes: list[str] = []
-    for idx, e in enumerate(edits, start=1):
-        if not isinstance(e, dict):
+    for idx, edit in enumerate(edits, start=1):
+        if not isinstance(edit, dict):
             return f"ERROR: edit #{idx} is not an object. Nothing written."
-        old = e.get("old_string")
-        new = e.get("new_string")
+        old = edit.get("old_string")
+        new = edit.get("new_string")
         if old is None or new is None:
             return f"ERROR: edit #{idx} is missing old_string or new_string. Nothing written."
-        new_text, note = _apply_one_edit(text, old, new, bool(e.get("replace_all", False)))
+        new_text, note = _apply_one_edit(text, old, new, bool(edit.get("replace_all", False)))
         if new_text is None:
             return (
                 f"ERROR: edit #{idx} of {len(edits)} failed: {note}.\n"
@@ -386,26 +387,61 @@ def t_notebook_edit(args: dict, ctx: ToolContext) -> str:
     import json as _json
 
     path = args["path"]
-    op = args.get("op", "replace")  # replace | insert | delete | get
+    op = str(args.get("op", "replace")).strip().lower()  # replace | insert | delete | get
     cell_index = args.get("cell_index")
     new_source = args.get("source", "")
-    cell_type = args.get("cell_type", "code")  # code | markdown | raw
+    requested_cell_type = args.get("cell_type")
+    cell_type = (
+        ("code" if op == "insert" else None) if requested_cell_type is None else requested_cell_type
+    )
+    if op not in {"get", "replace", "insert", "delete"}:
+        return f"ERROR: unknown op '{op}'"
+    if cell_type is not None and cell_type not in {"code", "markdown", "raw"}:
+        return f"ERROR: invalid cell_type '{cell_type}'"
+    if not isinstance(new_source, (str, list)) or (
+        isinstance(new_source, list) and any(not isinstance(line, str) for line in new_source)
+    ):
+        return "ERROR: source must be a string or list of strings"
     try:
         p = _resolve_contained(path, ctx.root)
-    except PathEscapeError as e:
-        return f"ERROR: {e}"
+    except PathEscapeError as exc:
+        return f"ERROR: {exc}"
+    existed = p.exists()
+    raw = ""
     if not p.exists():
-        if op == "insert" and not cell_index:
+        if op == "insert" and cell_index in (None, 0, "0"):
             p.parent.mkdir(parents=True, exist_ok=True)
-            nb = {"cells": [], "metadata": {}, "nbformat": 4, "nbformat_minor": 5}
+            nb: dict[str, Any] = {
+                "cells": [],
+                "metadata": {},
+                "nbformat": 4,
+                "nbformat_minor": 5,
+            }
         else:
             return f"ERROR: file not found: {path}"
     else:
         try:
-            nb = _json.loads(p.read_text())
-        except _json.JSONDecodeError as e:
-            return f"ERROR: invalid notebook JSON: {e}"
-    cells = nb.setdefault("cells", [])
+            raw = _read_text_robust(p)
+            parsed = _json.loads(raw)
+        except _json.JSONDecodeError as exc:
+            return f"ERROR: invalid notebook JSON: {exc}"
+        if not isinstance(parsed, dict):
+            return "ERROR: notebook root must be a JSON object"
+        nb = parsed
+    raw_cells = nb.setdefault("cells", [])
+    if not isinstance(raw_cells, list) or any(not isinstance(cell, dict) for cell in raw_cells):
+        return "ERROR: notebook 'cells' must be a list of objects"
+    cells: list[dict[str, Any]] = raw_cells
+
+    def index_value(*, required: bool) -> tuple[int | None, str | None]:
+        if cell_index is None:
+            return (None, "cell_index is required") if required else (None, None)
+        if isinstance(cell_index, bool):
+            return None, f"cell_index must be an integer, got {cell_index!r}"
+        try:
+            return int(cell_index), None
+        except (TypeError, ValueError):
+            return None, f"cell_index must be an integer, got {cell_index!r}"
 
     if op == "get":
         if cell_index is None:
@@ -420,7 +456,9 @@ def t_notebook_edit(args: dict, ctx: ToolContext) -> str:
                     for i, c in enumerate(cells)
                 )
             )
-        i = int(cell_index)
+        i, error = index_value(required=True)
+        if error or i is None:
+            return f"ERROR: {error}"
         if not 0 <= i < len(cells):
             return f"ERROR: cell_index {i} out of range"
         c = cells[i]
@@ -434,28 +472,39 @@ def t_notebook_edit(args: dict, ctx: ToolContext) -> str:
         return "ERROR: user denied"
 
     if op == "replace":
-        i = int(cell_index)
+        i, error = index_value(required=True)
+        if error or i is None:
+            return f"ERROR: {error}"
         if not 0 <= i < len(cells):
             return f"ERROR: cell_index {i} out of range"
         cells[i]["source"] = new_source
         if cell_type:
             cells[i]["cell_type"] = cell_type
     elif op == "insert":
-        i = len(cells) if cell_index is None else int(cell_index)
-        new_cell = {"cell_type": cell_type, "source": new_source, "metadata": {}}
+        i, error = index_value(required=False)
+        if error:
+            return f"ERROR: {error}"
+        i = len(cells) if i is None else i
+        new_cell: dict[str, Any] = {
+            "cell_type": cell_type or "code",
+            "source": new_source,
+            "metadata": {},
+        }
         if cell_type == "code":
             new_cell["execution_count"] = None
             new_cell["outputs"] = []
         cells.insert(max(0, min(i, len(cells))), new_cell)
     elif op == "delete":
-        i = int(cell_index)
+        i, error = index_value(required=True)
+        if error or i is None:
+            return f"ERROR: {error}"
         if not 0 <= i < len(cells):
             return f"ERROR: cell_index {i} out of range"
         del cells[i]
-    else:
-        return f"ERROR: unknown op '{op}'"
 
-    p.write_text(_json.dumps(nb, indent=1), encoding="utf-8")
+    rendered = _json.dumps(nb, indent=1) + "\n"
+    _write_text_raw(p, rendered)
+    _record_edit(ctx, p, raw, rendered, "edit" if existed else "create")
     return f"OK: {op} on {path} (now {len(cells)} cells)"
 
 

@@ -147,12 +147,63 @@ def get_value(cfg: dict, dotted_key: str, default: Any = None) -> Any:
     return cur
 
 
+def get_model_capability(cfg: dict, model_spec: str, capability: str, default: Any = None) -> Any:
+    """Read model metadata without splitting dots that belong to model names."""
+    models = cfg.get("models")
+    if isinstance(models, dict):
+        entry = models.get(model_spec)
+        if isinstance(entry, dict) and capability in entry:
+            return entry[capability]
+
+    # Compatibility with older configs written through dotted set_value calls.
+    provider, sep, model_name = model_spec.partition(":")
+    legacy_name = (
+        model_name if sep and provider in {"ollama", "openai", "anthropic"} else model_spec
+    )
+    return get_value(cfg, f"models.{legacy_name}.{capability}", default)
+
+
+def set_model_capability(cfg: dict, model_spec: str, capability: str, value: Any) -> None:
+    """Store model metadata under the full, literal provider/model identifier."""
+    models = cfg.setdefault("models", {})
+    if not isinstance(models, dict):
+        models = {}
+        cfg["models"] = models
+    entry = models.setdefault(model_spec, {})
+    if not isinstance(entry, dict):
+        entry = {}
+        models[model_spec] = entry
+    entry[capability] = value
+
+
 def _mask(value: Any) -> str:
     """Mask a secret value for display, keeping a short hint of its shape."""
     s = str(value)
     if len(s) > 8:
         return s[:4] + "…" + s[-4:]
     return "••••"
+
+
+_SECRET_KEY_NAMES = {
+    "api_key",
+    "authorization",
+    "client_secret",
+    "credential",
+    "credentials",
+    "password",
+    "private_key",
+    "refresh_token",
+    "secret",
+    "token",
+}
+
+
+def is_secret_key(key: str) -> bool:
+    """Return whether a config key's final component conventionally holds a secret."""
+    name = str(key).rsplit(".", 1)[-1].strip().lower().replace("-", "_")
+    return name in _SECRET_KEY_NAMES or name.endswith(
+        ("_api_key", "_password", "_private_key", "_secret", "_token")
+    )
 
 
 def redact_secrets(cfg: dict) -> dict:
@@ -162,40 +213,19 @@ def redact_secrets(cfg: dict) -> dict:
     and MCP server env secrets. Safe to print (e.g. /config) or expose to
     the gateway. Never mutates the input.
     """
-    out = copy.deepcopy(cfg)
 
-    # GitHub token
-    gh = out.get("github")
-    if isinstance(gh, dict) and gh.get("token"):
-        gh["token"] = _mask(gh["token"])
+    def visit(value: Any) -> Any:
+        if isinstance(value, dict):
+            return {
+                key: (
+                    _mask(item)
+                    if is_secret_key(str(key)) and item not in (None, "")
+                    else visit(item)
+                )
+                for key, item in value.items()
+            }
+        if isinstance(value, list):
+            return [visit(item) for item in value]
+        return copy.deepcopy(value)
 
-    # Cloud provider API keys
-    providers = out.get("providers")
-    if isinstance(providers, dict):
-        for spec in providers.values():
-            if isinstance(spec, dict) and spec.get("api_key"):
-                spec["api_key"] = _mask(spec["api_key"])
-
-    # SMTP / email password
-    email = out.get("email")
-    if isinstance(email, dict):
-        for k in list(email.keys()):
-            if "password" in k.lower() and email.get(k):
-                email[k] = _mask(email[k])
-
-    # MCP server env secrets
-    mcp = out.get("mcp")
-    if isinstance(mcp, dict):
-        servers = mcp.get("servers")
-        if isinstance(servers, dict):
-            for spec in servers.values():
-                if not isinstance(spec, dict):
-                    continue
-                env = spec.get("env")
-                if not isinstance(env, dict):
-                    continue
-                for k, v in list(env.items()):
-                    if any(s in k.lower() for s in ("token", "secret", "key", "password")):
-                        env[k] = _mask(v) if v else "••••"
-
-    return out
+    return visit(cfg)

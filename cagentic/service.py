@@ -10,6 +10,7 @@ from __future__ import annotations
 import subprocess
 import sys
 from pathlib import Path
+from xml.sax.saxutils import escape as _xml_escape
 
 from . import ui
 
@@ -72,22 +73,34 @@ def _systemd_unit_path() -> Path:
 
 
 def install() -> int:
-    if sys.platform == "darwin":
-        return _install_launchd()
-    if sys.platform.startswith("linux"):
-        return _install_systemd()
-    ui.error("background service install is supported on macOS and Linux only.")
-    ui.info("On Windows, use Task Scheduler to run `cagentic --serve` at logon.")
-    return 1
+    try:
+        if sys.platform == "darwin":
+            return _install_launchd()
+        if sys.platform.startswith("linux"):
+            return _install_systemd()
+        ui.error("background service install is supported on macOS and Linux only.")
+        ui.info("On Windows, use Task Scheduler to run `cagentic --serve` at logon.")
+        return 1
+    except OSError as exc:
+        ui.error(f"could not install gateway service: {exc}")
+        target = _launchd_plist_path() if sys.platform == "darwin" else _systemd_unit_path()
+        ui.warn(f"installation stopped; inspect {target} before retrying")
+        return 1
 
 
 def uninstall() -> int:
-    if sys.platform == "darwin":
-        return _uninstall_launchd()
-    if sys.platform.startswith("linux"):
-        return _uninstall_systemd()
-    ui.error("no background service support on this platform.")
-    return 1
+    try:
+        if sys.platform == "darwin":
+            return _uninstall_launchd()
+        if sys.platform.startswith("linux"):
+            return _uninstall_systemd()
+        ui.error("no background service support on this platform.")
+        return 1
+    except OSError as exc:
+        ui.error(f"could not remove gateway service: {exc}")
+        target = _launchd_plist_path() if sys.platform == "darwin" else _systemd_unit_path()
+        ui.warn(f"removal stopped; inspect {target} and the service manager state")
+        return 1
 
 
 # ---------------------------------------------------------------- macOS --
@@ -100,17 +113,27 @@ def _install_launchd() -> int:
     path.write_text(
         _LAUNCHD_PLIST.format(
             label=LABEL,
-            python=sys.executable,
-            home=Path.home(),
-            log=log,
-        )
+            python=_xml_escape(sys.executable),
+            home=_xml_escape(str(Path.home())),
+            log=_xml_escape(str(log)),
+        ),
+        encoding="utf-8",
     )
 
     # Reload cleanly if a previous version is already running.
-    subprocess.run(["launchctl", "unload", str(path)], capture_output=True)
-    res = subprocess.run(["launchctl", "load", "-w", str(path)], capture_output=True, text=True)
+    try:
+        subprocess.run(["launchctl", "unload", str(path)], capture_output=True)
+        res = subprocess.run(["launchctl", "load", "-w", str(path)], capture_output=True, text=True)
+    except OSError as exc:
+        ui.error(f"could not run launchctl: {exc}")
+        ui.warn(f"partial state: {path} was written, but launchd was not loaded")
+        return 1
     if res.returncode != 0:
         ui.error(f"launchctl load failed: {res.stderr.strip() or res.stdout.strip()}")
+        ui.warn(
+            f"partial state: {path} was written, but launchd did not load it; "
+            "fix the reported error and retry `cagentic --install-service`"
+        )
         return 1
 
     ui.info("gateway service installed — running now, and at every login.")
@@ -124,7 +147,20 @@ def _uninstall_launchd() -> int:
     if not path.exists():
         ui.info("gateway service is not installed.")
         return 0
-    subprocess.run(["launchctl", "unload", str(path)], capture_output=True)
+    try:
+        result = subprocess.run(
+            ["launchctl", "unload", str(path)],
+            capture_output=True,
+            text=True,
+        )
+    except OSError as exc:
+        ui.error(f"could not run launchctl: {exc}")
+        ui.warn(f"no files were removed; the service definition remains at {path}")
+        return 1
+    if result.returncode != 0:
+        ui.error(f"launchctl unload failed: {result.stderr.strip() or result.stdout.strip()}")
+        ui.warn(f"no files were removed; the service definition remains at {path}")
+        return 1
     path.unlink()
     ui.info("gateway service removed.")
     return 0
@@ -136,15 +172,27 @@ def _uninstall_launchd() -> int:
 def _install_systemd() -> int:
     path = _systemd_unit_path()
     path.parent.mkdir(parents=True, exist_ok=True)
-    path.write_text(_SYSTEMD_UNIT.format(python=sys.executable))
+    path.write_text(_SYSTEMD_UNIT.format(python=_systemd_quote(sys.executable)), encoding="utf-8")
 
     for cmd in (
         ["systemctl", "--user", "daemon-reload"],
         ["systemctl", "--user", "enable", "--now", "cagentic-gateway.service"],
     ):
-        res = subprocess.run(cmd, capture_output=True, text=True)
+        try:
+            res = subprocess.run(cmd, capture_output=True, text=True)
+        except OSError as exc:
+            ui.error(f"could not run {' '.join(cmd)}: {exc}")
+            ui.warn(
+                f"partial state: {path} was written; inspect the service manager "
+                "before retrying `cagentic --install-service`"
+            )
+            return 1
         if res.returncode != 0:
             ui.error(f"{' '.join(cmd)} failed: {res.stderr.strip()}")
+            ui.warn(
+                f"partial state: {path} was written; inspect the service manager "
+                "before retrying `cagentic --install-service`"
+            )
             return 1
 
     ui.info("gateway service installed — running now, and at every login.")
@@ -158,10 +206,51 @@ def _uninstall_systemd() -> int:
     if not path.exists():
         ui.info("gateway service is not installed.")
         return 0
-    subprocess.run(
-        ["systemctl", "--user", "disable", "--now", "cagentic-gateway.service"], capture_output=True
-    )
-    path.unlink()
-    subprocess.run(["systemctl", "--user", "daemon-reload"], capture_output=True)
+    try:
+        result = subprocess.run(
+            ["systemctl", "--user", "disable", "--now", "cagentic-gateway.service"],
+            capture_output=True,
+            text=True,
+        )
+    except OSError as exc:
+        ui.error(f"could not run systemctl disable: {exc}")
+        ui.warn(f"the service definition remains at {path}; manager state may be partial")
+        return 1
+    if result.returncode != 0:
+        ui.error(f"systemctl disable failed: {result.stderr.strip() or result.stdout.strip()}")
+        ui.warn(f"the service definition remains at {path}; manager state may be partial")
+        return 1
+    try:
+        path.unlink()
+    except OSError as exc:
+        ui.error(f"service was disabled, but {path} could not be removed: {exc}")
+        ui.warn("partial state: the service is disabled but its definition remains")
+        return 1
+    try:
+        result = subprocess.run(
+            ["systemctl", "--user", "daemon-reload"], capture_output=True, text=True
+        )
+    except OSError as exc:
+        ui.error(f"could not run systemctl daemon-reload: {exc}")
+        ui.warn(
+            f"partial state: the service is disabled and {path} was removed, "
+            "but systemd still needs a successful daemon-reload"
+        )
+        return 1
+    if result.returncode != 0:
+        ui.error(
+            f"systemctl daemon-reload failed: {result.stderr.strip() or result.stdout.strip()}"
+        )
+        ui.warn(
+            f"partial state: the service is disabled and {path} was removed, "
+            "but systemd still needs a successful daemon-reload"
+        )
+        return 1
     ui.info("gateway service removed.")
     return 0
+
+
+def _systemd_quote(value: str) -> str:
+    """Quote an executable path for systemd's ExecStart grammar."""
+    escaped = value.replace("\\", "\\\\").replace('"', '\\"').replace("%", "%%")
+    return f'"{escaped}"'

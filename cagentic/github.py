@@ -31,7 +31,7 @@ def _suppress_insecure_warnings() -> None:
     """Silence urllib3's InsecureRequestWarning — only called when a request
     actually opts out of TLS verification, so normal usage still warns."""
     try:
-        from urllib3.exceptions import InsecureRequestWarning  # type: ignore
+        from urllib3.exceptions import InsecureRequestWarning
 
         requests.packages.urllib3.disable_warnings(InsecureRequestWarning)  # type: ignore
     except Exception:
@@ -77,12 +77,15 @@ _ALLOWED_API_HOSTS = frozenset({"api.github.com", "uploads.github.com"})
 def _request(method: str, path: str, ctx: ToolContext, **kw) -> tuple[int, Any]:
     if path.startswith("http"):
         from urllib.parse import urlparse
+
         parsed = urlparse(path)
         if parsed.scheme != "https" or (parsed.hostname or "").lower() not in _ALLOWED_API_HOSTS:
-            return 0, {"error": (
-                f"refusing to send GitHub credentials to {parsed.hostname or path!r}; "
-                f"absolute URLs must be https on {' or '.join(sorted(_ALLOWED_API_HOSTS))}"
-            )}
+            return 0, {
+                "error": (
+                    f"refusing to send GitHub credentials to {parsed.hostname or path!r}; "
+                    f"absolute URLs must be https on {' or '.join(sorted(_ALLOWED_API_HOSTS))}"
+                )
+            }
     url = path if path.startswith("http") else f"{API}{path}"
     if ctx.insecure_ssl:
         kw.setdefault("verify", False)

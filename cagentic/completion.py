@@ -1,19 +1,21 @@
-"""Shell completion script generation."""
+"""Shell completion scripts generated directly from the Click command tree."""
 
 from __future__ import annotations
 
-COMMANDS = "--doctor --setup --sessions --search --compact --context --serve --model --host --cwd --yolo --version"
+from click.shell_completion import get_completion_class
 
 
 def script(shell: str) -> str:
-    if shell == "bash":
-        return f"complete -W '{COMMANDS}' cagentic"
-    if shell == "zsh":
-        return f"#compdef cagentic\n_arguments '*:option:({COMMANDS})'"
-    if shell == "fish":
-        return "\n".join(
-            f"complete -c cagentic -l {item[2:]}"
-            for item in COMMANDS.split()
-            if item.startswith("--")
-        )
-    raise ValueError("shell must be bash, zsh, or fish")
+    """Return Click's native completion source for bash, zsh, or fish."""
+    from .cli import cli
+
+    completion_class = get_completion_class(shell)
+    if completion_class is None:
+        raise ValueError("shell must be bash, zsh, or fish")
+    completion = completion_class(
+        cli=cli,
+        ctx_args={},
+        prog_name="cagentic",
+        complete_var="_CAGENTIC_COMPLETE",
+    )
+    return completion.source()

@@ -6,12 +6,43 @@ provider-switching logic isn't duplicated.
 
 from __future__ import annotations
 
+import logging
+import math
 import os
 import threading
 import time
 from typing import Any
 
 from . import config as _config
+
+_log = logging.getLogger(__name__)
+
+
+def _positive_float(cfg: dict, key: str, default: float) -> float:
+    raw = _config.get_value(cfg, key, default)
+    try:
+        value = float(raw) if not isinstance(raw, bool) else 0.0
+    except (TypeError, ValueError):
+        value = 0.0
+    if value > 0 and math.isfinite(value):
+        return value
+    _log.warning("ignoring invalid %s=%r; using %s", key, raw, default)
+    return default
+
+
+def _integer(cfg: dict, key: str, default: int, *, positive: bool = False) -> int:
+    raw = _config.get_value(cfg, key, default)
+    try:
+        if isinstance(raw, bool):
+            raise ValueError
+        value = int(raw)
+    except (TypeError, ValueError):
+        _log.warning("ignoring invalid %s=%r; using %s", key, raw, default)
+        return default
+    if positive and value <= 0:
+        _log.warning("ignoring invalid %s=%r; using %s", key, raw, default)
+        return default
+    return value
 
 
 def parse_model(model_str: str) -> tuple[str, str]:
@@ -42,13 +73,16 @@ def build_client(cfg: dict, provider: str = "ollama") -> Any:
         api_key = os.environ.get("OPENAI_API_KEY") or _config.get_value(
             cfg, "providers.openai.api_key"
         )
-        if not api_key:
+        if not isinstance(api_key, str) or not api_key.strip():
             raise RuntimeError(
                 "OpenAI API key not set.\n"
                 "  Option 1: export OPENAI_API_KEY=sk-...\n"
-                "  Option 2: /login openai sk-..."
+                "  Option 2: run cagentic --login openai"
             )
         base_url = _config.get_value(cfg, "providers.openai.base_url", "https://api.openai.com/v1")
+        if not isinstance(base_url, str) or not base_url.strip():
+            _log.warning("ignoring invalid providers.openai.base_url=%r", base_url)
+            base_url = "https://api.openai.com/v1"
         return OpenAIClient(api_key=api_key, base_url=base_url)
 
     if provider == "anthropic":
@@ -57,11 +91,11 @@ def build_client(cfg: dict, provider: str = "ollama") -> Any:
         api_key = os.environ.get("ANTHROPIC_API_KEY") or _config.get_value(
             cfg, "providers.anthropic.api_key"
         )
-        if not api_key:
+        if not isinstance(api_key, str) or not api_key.strip():
             raise RuntimeError(
                 "Anthropic API key not set.\n"
                 "  Option 1: export ANTHROPIC_API_KEY=sk-ant-...\n"
-                "  Option 2: /login anthropic sk-ant-..."
+                "  Option 2: run cagentic --login anthropic"
             )
         return AnthropicClient(api_key=api_key)
 
@@ -69,16 +103,23 @@ def build_client(cfg: dict, provider: str = "ollama") -> Any:
         from .ollama_client import OllamaClient
 
         raw_host = os.environ.get("OLLAMA_HOST") or cfg.get("host", "http://localhost:11434")
+        if not isinstance(raw_host, str):
+            _log.warning("ignoring invalid host=%r; using localhost", raw_host)
+            raw_host = "http://localhost:11434"
+        keep_alive = _config.get_value(cfg, "ollama.keep_alive", "30m")
+        if isinstance(keep_alive, bool) or not isinstance(
+            keep_alive, (str, int, float, type(None))
+        ):
+            _log.warning("ignoring invalid ollama.keep_alive=%r; using 30m", keep_alive)
+            keep_alive = "30m"
         return OllamaClient(
             host=raw_host,
-            connect_timeout=float(_config.get_value(cfg, "ollama.connect_timeout", 15.0)),
-            read_timeout=float(_config.get_value(cfg, "ollama.read_timeout", 1800.0)),
-            nonstream_read_timeout=float(
-                _config.get_value(cfg, "ollama.nonstream_read_timeout", 1800.0)
-            ),
-            keep_alive=_config.get_value(cfg, "ollama.keep_alive", "30m"),
-            num_ctx=_config.get_value(cfg, "ollama.num_ctx", 8192),
-            num_predict=_config.get_value(cfg, "ollama.num_predict", -1),
+            connect_timeout=_positive_float(cfg, "ollama.connect_timeout", 15.0),
+            read_timeout=_positive_float(cfg, "ollama.read_timeout", 1800.0),
+            nonstream_read_timeout=_positive_float(cfg, "ollama.nonstream_read_timeout", 1800.0),
+            keep_alive=keep_alive,
+            num_ctx=_integer(cfg, "ollama.num_ctx", 8192, positive=True),
+            num_predict=_integer(cfg, "ollama.num_predict", -1),
         )
 
     raise RuntimeError(f"Unknown provider '{provider}'. Supported: ollama, openai, anthropic.")

@@ -4,6 +4,7 @@ These are the invariants that quietly rot — a command added to the REPL but no
 to the catalog, a glyph map copied for the third time. Cheap to assert,
 annoying to notice by hand.
 """
+
 from __future__ import annotations
 
 import re
@@ -11,6 +12,7 @@ import unittest
 from pathlib import Path
 
 from cagentic import fmt
+from cagentic.gateway import GATEWAY_COMMAND_NAMES
 from cagentic.prompt import ALL_COMMANDS, COMMAND_GROUPS, SLASH_COMMANDS
 
 
@@ -18,9 +20,23 @@ def _repl_commands() -> set[str]:
     """Every command name cli.repl() actually dispatches on."""
     src = Path("cagentic/cli.py").read_text(encoding="utf-8")
     names = set(re.findall(r'cmd == "([a-z]+)"', src))
-    for group in re.findall(r'cmd in \(([^)]*)\)', src):
+    for group in re.findall(r"cmd in \(([^)]*)\)", src):
         names.update(re.findall(r'"([a-z]+)"', group))
     return {f"/{n}" for n in names}
+
+
+def _gateway_commands() -> set[str]:
+    """Every command Gateway.handle_cmd() dispatches, excluding aliases."""
+    src = Path("cagentic/gateway.py").read_text(encoding="utf-8")
+    start = src.index("    def _handle_cmd(")
+    end = src.index(
+        "\n\n# ---------------------------------------------------------------- handler", start
+    )
+    body = src[start:end]
+    names = set(re.findall(r'cmd == "([a-z]+)"', body))
+    for group in re.findall(r"cmd in \(([^)]*)\)", body):
+        names.update(re.findall(r'"([a-z]+)"', group))
+    return names
 
 
 class TestCommandCatalog(unittest.TestCase):
@@ -36,8 +52,9 @@ class TestCommandCatalog(unittest.TestCase):
         self.assertEqual(missing, [], f"handled but never advertised: {missing}")
 
     def test_no_duplicate_entries(self) -> None:
-        names = [name for name, _args, _hint in
-                 (e for _s, entries in COMMAND_GROUPS for e in entries)]
+        names = [
+            name for name, _args, _hint in (e for _s, entries in COMMAND_GROUPS for e in entries)
+        ]
         self.assertEqual(len(names), len(set(names)), "a command is listed twice")
 
     def test_popup_entries_are_well_formed(self) -> None:
@@ -57,6 +74,14 @@ class TestCommandCatalog(unittest.TestCase):
         out = buf.getvalue()
         for name, _args, _hint in (e for _s, entries in COMMAND_GROUPS for e in entries):
             self.assertIn(name, out)
+
+
+class TestGatewayCommandCatalog(unittest.TestCase):
+    def test_every_gateway_catalog_command_is_dispatched(self) -> None:
+        self.assertEqual(set(GATEWAY_COMMAND_NAMES) - _gateway_commands(), set())
+
+    def test_every_gateway_dispatch_is_cataloged(self) -> None:
+        self.assertEqual(_gateway_commands() - set(GATEWAY_COMMAND_NAMES), set())
 
 
 class TestDurationFormatting(unittest.TestCase):

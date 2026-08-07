@@ -122,8 +122,10 @@ def _explain_connection_error(host: str, exc: Exception) -> str:
     if isinstance(exc, _requests.ReadTimeout):
         return f"Ollama at {host} stopped responding mid-request."
     if isinstance(exc, _requests.ConnectionError):
-        return (f"nothing is listening at {host} — start Ollama with "
-                f"`ollama serve`, or point Cagentic elsewhere with /host <url>.")
+        return (
+            f"nothing is listening at {host} — start Ollama with "
+            f"`ollama serve`, or point Cagentic elsewhere with /host <url>."
+        )
     if isinstance(exc, _requests.exceptions.SSLError):
         return f"TLS error talking to {host}: {exc}"
     return f"could not reach Ollama at {host}: {exc}"

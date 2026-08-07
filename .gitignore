@@ -9,7 +9,7 @@ build/
 dist/
 .pytest_cache/
 
-# Runtime output from `cagentic --serve` / daemon.py
+# Runtime output from `cagentic --serve`
 *.log
 keepalive.in
 

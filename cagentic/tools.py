@@ -6,6 +6,7 @@ fed back to the model as the tool's output.
 
 from __future__ import annotations
 
+import json
 import logging
 import os
 import re
@@ -19,8 +20,8 @@ from typing import Any, Callable
 
 from . import diff as _diff
 from . import documents as _documents
-from . import integrations as _integrations
 from . import inbox as _inbox
+from . import integrations as _integrations
 from . import notes as _notes
 from . import personal_os as _personal_os
 from . import proactive as _proactive
@@ -107,6 +108,8 @@ class ToolContext:
     tasks: object | None = None
     teams: object | None = None
     read_cache: dict | None = None
+    phone_action: Callable[[str, dict], dict | None] | None = None
+    widget_action: Callable[[str, str, dict], str | None] | None = None
     # A tool that produces an image (e.g. browser_screenshot) appends raw
     # base64 PNG data here; the engine attaches it to the tool result
     # message so vision-capable models actually see the picture.
@@ -169,21 +172,21 @@ def t_read_file(args: dict, ctx: ToolContext) -> str:
     if _documents.is_document(p):
         try:
             text = _documents.extract_text(p)
-        except _documents.DocumentError as e:
-            return f"ERROR: {e}"
-        except Exception as e:
-            return f"ERROR: could not read {path}: {type(e).__name__}: {e}"
+        except _documents.DocumentError as exc:
+            return f"ERROR: {exc}"
+        except Exception as exc:
+            return f"ERROR: could not read {path}: {type(exc).__name__}: {exc}"
         kind = p.suffix.lower().lstrip(".")
     else:
         try:
             text = p.read_text(errors="replace")
-        except Exception as e:
-            return f"ERROR: {e}"
+        except Exception as exc:
+            return f"ERROR: {exc}"
         kind = None
     lines = text.splitlines()
     s = max(1, start) - 1
-    e = len(lines) if end is None else min(len(lines), int(end))
-    selected = lines[s:e]
+    end_idx = len(lines) if end is None else min(len(lines), int(end))
+    selected = lines[s:end_idx]
     numbered = "\n".join(f"{i + s + 1:>5}  {ln}" for i, ln in enumerate(selected))
     if kind:
         header = f"{path}  ({len(lines)} lines of text extracted from {kind})"
@@ -223,8 +226,10 @@ def _record_edit(ctx: ToolContext, path: Path, before: str, after: str, op: str)
     # keyed by the whole file — read_file caches per requested line range.
     rp = str(path.resolve())
     prefix = rp + "::"
+
     def _stale(key: str) -> bool:
         return key == rp or key.startswith(prefix)
+
     cache = getattr(ctx, "read_cache", None)
     if isinstance(cache, dict):
         for key in [k for k in cache if _stale(k)]:
@@ -267,7 +272,7 @@ def t_write_file(args: dict, ctx: ToolContext) -> str:
         content = _restore_eol(old_text, _norm_eol(content))
     p.parent.mkdir(parents=True, exist_ok=True)
     _write_text_raw(p, content)
-    _record_edit(ctx, p, old_text, content, "write")
+    _record_edit(ctx, p, old_text, content, "write" if existed else "create")
     adds, dels = _diff.stats(old_text, content)
     return f"OK: wrote {path} +{adds} -{dels}"
 
@@ -514,9 +519,7 @@ def t_replace_lines(args: dict, ctx: ToolContext) -> str:
         # actually be removed.
         replacement: list[str] = []
     else:
-        replacement = [
-            new_content if new_content.endswith(("\n", "\r")) else new_content + eol
-        ]
+        replacement = [new_content if new_content.endswith(("\n", "\r")) else new_content + eol]
     new_lines = lines[:s] + replacement + lines[e:]
     new_text = "".join(new_lines)
     if raw.strip() and not new_text.strip() and not args.get("allow_empty"):
@@ -1004,8 +1007,7 @@ def t_personal_briefing(args: dict, ctx: ToolContext) -> str:
     if data["agenda"]:
         lines.append("Upcoming:")
         lines.extend(
-            f"- {time.strftime('%a %H:%M', time.localtime(item['start_at']))} "
-            f"{item['title']}"
+            f"- {time.strftime('%a %H:%M', time.localtime(item['start_at']))} {item['title']}"
             for item in data["agenda"][:12]
         )
     return "\n".join(lines)
@@ -1217,14 +1219,18 @@ def t_routine_update(args: dict, ctx: ToolContext) -> str:
         if key in args
     }
     routine = _routines.update_routine(routine_id, **changes)
-    return f"OK: {routine['id']} — {routine['name']}" if routine else f"ERROR: no routine {routine_id}"
+    return (
+        f"OK: {routine['id']} — {routine['name']}" if routine else f"ERROR: no routine {routine_id}"
+    )
 
 
 def t_routine_delete(args: dict, ctx: ToolContext) -> str:
     routine_id = str(args.get("id", ""))
     if not routine_id:
         return "ERROR: routine_delete requires 'id'"
-    return "OK: deleted" if _routines.delete_routine(routine_id) else f"ERROR: no routine {routine_id}"
+    return (
+        "OK: deleted" if _routines.delete_routine(routine_id) else f"ERROR: no routine {routine_id}"
+    )
 
 
 # ============================================================================
@@ -1242,7 +1248,7 @@ def _mcp_manager(ctx: ToolContext):
 
         engine = getattr(ctx, "engine", None)
         cfg = engine.config if engine is not None else {}
-        state.mcp = MCPManager(cfg or {})
+        state.update(mcp=MCPManager(cfg or {}))
     return state.mcp
 
 
@@ -1381,10 +1387,20 @@ def _browser(ctx: ToolContext):
 
         engine = getattr(ctx, "engine", None)
         cfg = (engine.config if engine is not None else {}) or {}
-        port = int((cfg.get("browser") or {}).get("port", 8765))
+        browser_cfg = cfg.get("browser")
+        if not isinstance(browser_cfg, dict):
+            browser_cfg = {}
+        raw_port = browser_cfg.get("port", 8765)
+        try:
+            port = 0 if isinstance(raw_port, bool) else int(raw_port)
+        except (TypeError, ValueError):
+            port = 8765
+        if not 1 <= port <= 65535:
+            port = 8765
         bridge = BrowserBridge(port=port)
-        bridge.start()
-        state.browser = bridge
+        if bridge.start():
+            state.update(browser=bridge)
+        return bridge
     return state.browser
 
 
@@ -1809,7 +1825,7 @@ def _host_is_blocked(host: str) -> tuple[bool, str]:
         logger.warning("web_fetch: DNS resolution failed for %r", host, exc_info=True)
         return True, f"could not resolve host {host!r}: {exc}"
     for info in infos:
-        ip = info[4][0]
+        ip = str(info[4][0])
         if _ip_is_blocked(ip):
             return True, f"host {host!r} resolves to blocked address {ip}"
     return False, ""
@@ -2144,6 +2160,7 @@ def t_ask_user_question(args: dict, ctx: ToolContext) -> str:
     engine = getattr(ctx, "engine", None)
     if engine is not None:
         from .permissions import terminal_resolver
+
         if getattr(engine, "permission_resolver", None) is not terminal_resolver:
             opts = ("  Options: " + " / ".join(str(o) for o in options)) if options else ""
             return (
@@ -2161,11 +2178,12 @@ def t_ask_user_question(args: dict, ctx: ToolContext) -> str:
         _sys.stdout.write("\033[?25h")
         _sys.stdout.flush()
     print()
-    ui.warn("? " + question)
+    ui.heading("Question")
+    ui.info(question)
     for i, opt in enumerate(options, 1):
-        print(f"  {i}. {opt}")
+        ui.list_item(opt, marker=str(i))
     try:
-        ans = input("  > ").strip()
+        ans = ui.input_prompt("Answer").strip()
     except EOFError:
         return "ERROR: no tty"
     if options and ans.isdigit():
@@ -2226,12 +2244,14 @@ def t_todo_write(args: dict, ctx: ToolContext) -> str:
 
 
 def t_tool_search(args: dict, ctx: ToolContext) -> str:
+    from .coding_tools import CODING_TOOL_SCHEMAS
     from .github import GITHUB_TOOL_SCHEMAS
+
     q = (args.get("query") or "").lower().strip()
-    # Search every schema, GitHub's included — searching only TOOL_SCHEMAS made
-    # the gh_* tools undiscoverable through the very tool meant to find them.
+    # Search every schema — searching only this module made optional coding and
+    # GitHub tools undiscoverable through the very tool meant to find them.
     out: list[str] = []
-    for s in TOOL_SCHEMAS + GITHUB_TOOL_SCHEMAS:
+    for s in TOOL_SCHEMAS + CODING_TOOL_SCHEMAS + GITHUB_TOOL_SCHEMAS:
         fn = s.get("function") or {}
         name = fn.get("name", "")
         desc = fn.get("description", "")
@@ -2358,6 +2378,140 @@ def t_skill(args: dict, ctx: ToolContext) -> str:
 
 
 # ============================================================================
+# Phone + widgets — available for iOS-originated gateway turns
+# ============================================================================
+
+
+def _phone_result(ctx: ToolContext, action: str, payload: dict) -> tuple[dict | None, str | None]:
+    callback = ctx.phone_action
+    if callback is None:
+        return None, "phone tools are available only during an active iOS gateway turn"
+    try:
+        response = callback(action, payload)
+    except Exception as exc:
+        logger.warning("phone action %s failed", action, exc_info=True)
+        return None, f"phone action failed: {exc}"
+    if response is None:
+        return None, "phone action timed out waiting for the iOS client"
+    if not isinstance(response, dict):
+        return None, "iOS client returned an invalid response"
+    if response.get("success") is False or response.get("ok") is False:
+        return None, str(response.get("error") or "phone action failed")
+    if (
+        response.get("error")
+        and response.get("success") is not True
+        and response.get("ok") is not True
+    ):
+        return None, str(response["error"])
+    nested = response.get("result")
+    if isinstance(nested, dict):
+        return nested, None
+    if nested is not None:
+        return {"value": nested}, None
+    return response, None
+
+
+def _phone_text(result: dict) -> str:
+    for key in ("output", "text", "value", "url", "app"):
+        if result.get(key) is not None:
+            return str(result[key])
+    if result and set(result) <= {"success", "ok"}:
+        return "completed"
+    return json.dumps(result, ensure_ascii=False, default=str)
+
+
+def t_phone_shell(args: dict, ctx: ToolContext) -> str:
+    command = str(args.get("command") or "").strip()
+    if not command:
+        return "ERROR: phone_shell requires 'command'"
+    result, error = _phone_result(ctx, "shell", {"command": command})
+    return f"ERROR: {error}" if error else _truncate(f"OK: {_phone_text(result or {})}")
+
+
+def t_phone_clipboard_read(args: dict, ctx: ToolContext) -> str:
+    result, error = _phone_result(ctx, "clipboard_read", {})
+    return f"ERROR: {error}" if error else _truncate(f"OK: {_phone_text(result or {})}")
+
+
+def t_phone_clipboard_write(args: dict, ctx: ToolContext) -> str:
+    text = args.get("text")
+    if not isinstance(text, str):
+        return "ERROR: phone_clipboard_write requires string 'text'"
+    _result, error = _phone_result(ctx, "clipboard_write", {"text": text})
+    return f"ERROR: {error}" if error else "OK: wrote the iPhone clipboard"
+
+
+def t_phone_open_app(args: dict, ctx: ToolContext) -> str:
+    target = str(args.get("target") or args.get("url") or args.get("scheme") or "").strip()
+    if not target:
+        return "ERROR: phone_open_app requires 'target'"
+    _result, error = _phone_result(ctx, "open_app", {"target": target})
+    return f"ERROR: {error}" if error else f"OK: opened {target} on the iPhone"
+
+
+def t_phone_open_url(args: dict, ctx: ToolContext) -> str:
+    url = str(args.get("url") or "").strip()
+    if not url.startswith(("http://", "https://")):
+        return "ERROR: phone_open_url requires an http:// or https:// URL"
+    _result, error = _phone_result(ctx, "open_url", {"url": url})
+    return f"ERROR: {error}" if error else f"OK: opened {url} on the iPhone"
+
+
+def t_phone_screenshot(args: dict, ctx: ToolContext) -> str:
+    result, error = _phone_result(ctx, "screenshot", {})
+    if error:
+        return f"ERROR: {error}"
+    result = result or {}
+    image = (
+        result.get("data")
+        or result.get("image")
+        or result.get("base64")
+        or result.get("image_data")
+        or result.get("imageData")
+    )
+    if not isinstance(image, str) or not image:
+        return "ERROR: iPhone screenshot returned no image data"
+    if image.startswith("data:") and "," in image:
+        image = image.split(",", 1)[1]
+    ctx.pending_images.append(image)
+    width = result.get("width") or "?"
+    height = result.get("height") or "?"
+    return f"OK: captured iPhone screenshot ({width}×{height})"
+
+
+_WIDGET_TYPES = {
+    "stocks",
+    "sports",
+    "weather",
+    "crypto",
+    "calendar",
+    "stats",
+    "progress",
+    "list",
+    "table",
+}
+
+
+def t_show_widget(args: dict, ctx: ToolContext) -> str:
+    widget_type = str(args.get("type") or "").strip().lower()
+    title = str(args.get("title") or "").strip()
+    data = args.get("data")
+    if widget_type not in _WIDGET_TYPES:
+        return f"ERROR: widget type must be one of {', '.join(sorted(_WIDGET_TYPES))}"
+    if not title:
+        return "ERROR: show_widget requires 'title'"
+    if not isinstance(data, dict):
+        return "ERROR: show_widget requires object 'data'"
+    emitted = ctx.widget_action(widget_type, title, data) if ctx.widget_action else None
+    if emitted == "emitted":
+        return f"OK: displayed {widget_type} widget '{title}'"
+    return _truncate(
+        f"OK: widget fallback — {title} ({widget_type})\n"
+        + json.dumps(data, indent=2, ensure_ascii=False, default=str)
+    )
+
+
+# ============================================================================
 # Registry + schemas
 # ============================================================================
 
@@ -2460,6 +2614,14 @@ TOOLS: dict[str, ToolFn] = {
     "config_set": t_config_set,
     "sleep": t_sleep,
     "skill": t_skill,
+    # iOS gateway actions and rich cards
+    "phone_shell": t_phone_shell,
+    "phone_clipboard_read": t_phone_clipboard_read,
+    "phone_clipboard_write": t_phone_clipboard_write,
+    "phone_open_app": t_phone_open_app,
+    "phone_open_url": t_phone_open_url,
+    "phone_screenshot": t_phone_screenshot,
+    "show_widget": t_show_widget,
 }
 
 
@@ -3099,9 +3261,15 @@ TOOL_SCHEMAS: list[dict[str, Any]] = [
                 "type": "object",
                 "properties": {
                     "name": {"type": "string"},
-                    "kind": {"type": "string", "enum": ["daily_plan", "inbox_digest", "weekly_review", "custom"]},
+                    "kind": {
+                        "type": "string",
+                        "enum": ["daily_plan", "inbox_digest", "weekly_review", "custom"],
+                    },
                     "schedule_time": {"type": "string", "description": "Local 24-hour HH:MM"},
-                    "days": {"type": "array", "items": {"type": "integer", "minimum": 0, "maximum": 6}},
+                    "days": {
+                        "type": "array",
+                        "items": {"type": "integer", "minimum": 0, "maximum": 6},
+                    },
                     "prompt": {"type": "string"},
                     "enabled": {"type": "boolean"},
                 },
@@ -3130,9 +3298,15 @@ TOOL_SCHEMAS: list[dict[str, Any]] = [
                 "properties": {
                     "id": {"type": "string"},
                     "name": {"type": "string"},
-                    "kind": {"type": "string", "enum": ["daily_plan", "inbox_digest", "weekly_review", "custom"]},
+                    "kind": {
+                        "type": "string",
+                        "enum": ["daily_plan", "inbox_digest", "weekly_review", "custom"],
+                    },
                     "schedule_time": {"type": "string"},
-                    "days": {"type": "array", "items": {"type": "integer", "minimum": 0, "maximum": 6}},
+                    "days": {
+                        "type": "array",
+                        "items": {"type": "integer", "minimum": 0, "maximum": 6},
+                    },
                     "prompt": {"type": "string"},
                     "enabled": {"type": "boolean"},
                 },
@@ -3606,6 +3780,87 @@ TOOL_SCHEMAS: list[dict[str, Any]] = [
             "parameters": {"type": "object", "properties": {"query": {"type": "string"}}},
         },
     },
+    # ---------- iOS phone + widgets ----------
+    {
+        "type": "function",
+        "function": {
+            "name": "phone_shell",
+            "description": "Run a shell command on the connected iPhone.",
+            "parameters": {
+                "type": "object",
+                "properties": {"command": {"type": "string"}},
+                "required": ["command"],
+            },
+        },
+    },
+    {
+        "type": "function",
+        "function": {
+            "name": "phone_clipboard_read",
+            "description": "Read text from the connected iPhone clipboard.",
+            "parameters": {"type": "object", "properties": {}},
+        },
+    },
+    {
+        "type": "function",
+        "function": {
+            "name": "phone_clipboard_write",
+            "description": "Write text to the connected iPhone clipboard.",
+            "parameters": {
+                "type": "object",
+                "properties": {"text": {"type": "string"}},
+                "required": ["text"],
+            },
+        },
+    },
+    {
+        "type": "function",
+        "function": {
+            "name": "phone_open_app",
+            "description": "Open an app, deep link, or URL on the connected iPhone.",
+            "parameters": {
+                "type": "object",
+                "properties": {"target": {"type": "string"}},
+                "required": ["target"],
+            },
+        },
+    },
+    {
+        "type": "function",
+        "function": {
+            "name": "phone_open_url",
+            "description": "Open an HTTP or HTTPS URL in Safari on the connected iPhone.",
+            "parameters": {
+                "type": "object",
+                "properties": {"url": {"type": "string"}},
+                "required": ["url"],
+            },
+        },
+    },
+    {
+        "type": "function",
+        "function": {
+            "name": "phone_screenshot",
+            "description": "Request a screenshot from the connected iPhone and attach it to the turn.",
+            "parameters": {"type": "object", "properties": {}},
+        },
+    },
+    {
+        "type": "function",
+        "function": {
+            "name": "show_widget",
+            "description": "Display structured data as a rich card on the connected iPhone.",
+            "parameters": {
+                "type": "object",
+                "properties": {
+                    "type": {"type": "string", "enum": sorted(_WIDGET_TYPES)},
+                    "title": {"type": "string"},
+                    "data": {"type": "object"},
+                },
+                "required": ["type", "title", "data"],
+            },
+        },
+    },
     # ---------- system ----------
     {
         "type": "function",
@@ -3768,6 +4023,16 @@ TOOL_GROUPS: dict[str, list[str]] = {
     "coding": ["check_syntax", "multi_edit", "notebook_edit"],
     "worktree": ["enter_worktree", "exit_worktree"],
     "subagent": ["agent_call", "agent_call_async"],
+    # Enabled dynamically for turns originating from the iOS gateway.
+    "phone": [
+        "phone_shell",
+        "phone_clipboard_read",
+        "phone_clipboard_write",
+        "phone_open_app",
+        "phone_open_url",
+        "phone_screenshot",
+        "show_widget",
+    ],
     # off by default
     "teams": [
         "team_create",

@@ -15,7 +15,6 @@ from typing import Callable
 
 from . import inbox, integrations, personal_os, routines, storage
 
-
 _log = logging.getLogger(__name__)
 _NS = "os_notifications"
 
@@ -143,7 +142,12 @@ def _fingerprint(insight: dict, now: float) -> str:
     # preventing a one-minute monitor loop from spamming the same alert.
     day = time.strftime("%Y-%m-%d", time.localtime(now))
     payload = "|".join(
-        (day, str(insight.get("id") or ""), str(insight.get("title") or ""), str(insight.get("body") or ""))
+        (
+            day,
+            str(insight.get("id") or ""),
+            str(insight.get("title") or ""),
+            str(insight.get("body") or ""),
+        )
     )
     return hashlib.sha256(payload.encode("utf-8")).hexdigest()[:24]
 
@@ -156,9 +160,7 @@ def scan(
 ) -> list[dict]:
     """Turn actionable briefing insights into durable, deduplicated alerts."""
     now = float(now or time.time())
-    briefing = personal_os.briefing(
-        config or {}, now=now, browser_connected=browser_connected
-    )
+    briefing = personal_os.briefing(config or {}, now=now, browser_connected=browser_connected)
     known = {
         str(item.get("fingerprint"))
         for item in storage.list_values(_NS)
@@ -223,11 +225,21 @@ class ProactiveMonitor:
         on_notification: Callable[[dict], None] | None = None,
         on_routine: Callable[[dict], str] | None = None,
     ) -> None:
-        proactive_cfg = config.get("proactive") or {}
+        raw_proactive_cfg = config.get("proactive")
+        proactive_cfg = raw_proactive_cfg if isinstance(raw_proactive_cfg, dict) else {}
         self.config = config
-        self.enabled = bool(proactive_cfg.get("enabled", True))
-        self.interval = max(30, min(3600, int(proactive_cfg.get("interval", 60))))
-        self.desktop_notifications = bool(proactive_cfg.get("desktop_notifications", True))
+        raw_enabled = proactive_cfg.get("enabled", True)
+        self.enabled = raw_enabled if isinstance(raw_enabled, bool) else True
+        try:
+            raw_interval = proactive_cfg.get("interval", 60)
+            interval = 0 if isinstance(raw_interval, bool) else int(raw_interval)
+        except (TypeError, ValueError):
+            interval = 0
+        self.interval = max(30, min(3600, interval or 60))
+        raw_notifications = proactive_cfg.get("desktop_notifications", True)
+        self.desktop_notifications = (
+            raw_notifications if isinstance(raw_notifications, bool) else True
+        )
         self.browser_connected = browser_connected or (lambda: False)
         self.on_notification = on_notification
         self.on_routine = on_routine
@@ -242,9 +254,7 @@ class ProactiveMonitor:
         if not self.enabled or self.running:
             return
         self._stop.clear()
-        self._thread = threading.Thread(
-            target=self._run, name="cagentic-proactive", daemon=True
-        )
+        self._thread = threading.Thread(target=self._run, name="cagentic-proactive", daemon=True)
         self._thread.start()
 
     def stop(self) -> None:
@@ -283,9 +293,7 @@ class ProactiveMonitor:
                 error = f"{type(exc).__name__}: {exc}"
                 output = routines.fallback_output(routine)
                 _log.warning("proactive routine failed", exc_info=True)
-            completed = routines.mark_run(
-                str(routine["id"]), output=output, error=error
-            )
+            completed = routines.mark_run(str(routine["id"]), output=output, error=error)
             notice = create_notification(
                 str(routine.get("name") or "Proactive routine"),
                 output,

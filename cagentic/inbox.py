@@ -14,7 +14,6 @@ from typing import Any
 
 from . import storage
 
-
 ITEM_NS = "os_inbox_items"
 CONNECTION_NS = "os_inbox_connections"
 ITEM_STATUSES = {"new", "read", "done", "archived"}
@@ -96,16 +95,19 @@ def create_item(
         )
         if existing:
             # Preserve local read/done state while refreshing provider metadata.
-            return update_item(
-                str(existing["id"]),
-                title=clean_title,
-                summary=summary,
-                sender=sender,
-                url=url,
-                priority=priority,
-                tags=tags or [],
-                received_at=received_at,
-            ) or existing
+            return (
+                update_item(
+                    str(existing["id"]),
+                    title=clean_title,
+                    summary=summary,
+                    sender=sender,
+                    url=url,
+                    priority=priority,
+                    tags=tags or [],
+                    received_at=received_at,
+                )
+                or existing
+            )
     now = time.time()
     try:
         received = float(received_at) if received_at is not None else now
@@ -319,11 +321,11 @@ def _sync_email_connection(connection_id: str, *, imap_factory=None) -> dict:
     client = None
     imported = updated = 0
     try:
-        factory = imap_factory or (imaplib.IMAP4_SSL if connection.get("use_ssl", True) else imaplib.IMAP4)
+        factory = imap_factory or (
+            imaplib.IMAP4_SSL if connection.get("use_ssl", True) else imaplib.IMAP4
+        )
         if imap_factory is None:
-            client = factory(
-                str(connection["host"]), int(connection["port"]), timeout=15
-            )
+            client = factory(str(connection["host"]), int(connection["port"]), timeout=15)
         else:
             client = factory(str(connection["host"]), int(connection["port"]))
         if not connection.get("use_ssl", True) and hasattr(client, "starttls"):
@@ -332,7 +334,9 @@ def _sync_email_connection(connection_id: str, *, imap_factory=None) -> dict:
         status, _ = client.select(str(connection.get("folder") or "INBOX"), readonly=True)
         if status != "OK":
             raise RuntimeError("could not open the configured mailbox")
-        status, data = client.uid("search", None, "UNSEEN")
+        # IMAP SEARCH uses a nullable charset argument; typeshed's variadic
+        # signature accepts only str even though imaplib documents None here.
+        status, data = client.uid("search", None, "UNSEEN")  # type: ignore[arg-type]
         if status != "OK":
             raise RuntimeError("mailbox search failed")
         uids = (data[0] if data else b"").split()
@@ -347,7 +351,11 @@ def _sync_email_connection(connection_id: str, *, imap_factory=None) -> dict:
             if status != "OK":
                 continue
             raw_header = next(
-                (part[1] for part in fetched or [] if isinstance(part, tuple) and isinstance(part[1], bytes)),
+                (
+                    part[1]
+                    for part in fetched or []
+                    if isinstance(part, tuple) and isinstance(part[1], bytes)
+                ),
                 None,
             )
             if not raw_header:

@@ -34,6 +34,7 @@ class Agent:
         stream: bool = True,
         compact_schemas: bool = True,
         user_name: Optional[str] = None,
+        dry_run: bool = False,
     ) -> None:
         self.state = AppState(
             workspace=root,
@@ -41,6 +42,8 @@ class Agent:
             yolo=yolo,
             tools_enabled=tools_enabled,
             user_name=user_name,
+            dry_run=dry_run,
+            plan_mode=dry_run,
         )
         from .permissions import terminal_resolver
 
@@ -57,6 +60,7 @@ class Agent:
         self.client = client
         self.on_turn_complete = on_turn_complete
         self.on_tools_disabled = on_tools_disabled
+        self.last_turn_failed = False
 
         if on_tools_disabled is not None:
 
@@ -92,7 +96,17 @@ class Agent:
 
     @property
     def ctx(self) -> ToolContext:
-        return ToolContext(**self.state.to_tool_ctx_kwargs())
+        return ToolContext(
+            **self.state.to_tool_ctx_kwargs(),
+            state=self.state,
+            engine=self.engine,
+            background=self.engine.background,
+            tasks=self.engine.task_graph,
+            teams=self.engine.teams,
+            read_cache=self.engine._read_cache,
+            phone_action=self.engine.executor.phone_action,
+            widget_action=self.engine.executor.widget_action,
+        )
 
     def reset(self) -> None:
         self.engine.reset()
@@ -106,6 +120,7 @@ class Agent:
     _refresh_system_prompt = refresh_system_prompt
 
     def turn(self, user_input: str) -> str:
+        self.last_turn_failed = False
         pre_ctx = sum(len(str(m.get("content") or "")) // 4 for m in self.engine.messages)
         bar = ui.StatusBar(ctx_tokens=pre_ctx)
         bar.start()
@@ -122,12 +137,16 @@ class Agent:
                     bar.on_done(post_ctx)
                 render_event(msg, rs)
         except KeyboardInterrupt:
-            gen.close()
+            close = getattr(gen, "close", None)
+            if callable(close):
+                close()
             ui.stop_all_spinners()
             print()
             ui.warn("turn interrupted — back to prompt")
+            rs.failed = True
         finally:
             bar.stop()
+            self.last_turn_failed = rs.failed or not rs.completed
             if self.on_turn_complete:
                 try:
                     self.on_turn_complete(self)
@@ -154,9 +173,11 @@ class _RenderState:
     streaming: bool = False
     streamed_any: bool = False
     streamed_visible: bool = False
-    md: object | None = None
+    md: ui.StreamMarkdown | None = None
     pending_tool_call: tuple[str, str] | None = None
     run: _ToolRun | None = None
+    failed: bool = False
+    completed: bool = False
 
 
 def _short_path(p: str) -> str:
@@ -193,62 +214,28 @@ def _extract_meta(first_line: str, summary: str) -> str:
     return s[:80]
 
 
-def _truncate_line(width: int, *segments) -> tuple[str, ...]:
-    """Trim each segment to fit total width. Segments are (text, weight)
-    tuples — weight 0 means 'fixed, don't trim'; positive means flexible."""
-    fixed = sum(len(t) for t, w in segments if w == 0)
-    flex_total = sum(len(t) for t, w in segments if w > 0)
-    budget = max(0, width - fixed)
-    if flex_total <= budget:
-        return tuple(t for t, _ in segments)
-    out = []
-    for t, w in segments:
-        if w == 0:
-            out.append(t)
-        else:
-            share = max(6, int(budget * len(t) / flex_total)) if flex_total else 0
-            if len(t) > share:
-                out.append(t[: max(1, share - 1)] + "…")
-            else:
-                out.append(t)
-    return tuple(out)
-
-
 def _print_tool_line(name: str, summary: str, meta: str, *, ok: bool, count: int) -> None:
     """Render a tool call as a single line. Successful runs of the same
     name update in place ('× N'); failures paint the whole line red."""
-    name_label = name + (f"  × {count}" if count > 1 else "")
-    term_w = max(40, ui.width()) - 2
+    name_label = ui.single_line(name) + (f"  × {count}" if count > 1 else "")
+    summary = ui.single_line(summary)
+    meta = ui.single_line(meta)
     if ok:
-        marker = "  ↳ "
-        check = "  ✓ " if meta else ""
-        name_seg, sum_seg, meta_seg = _truncate_line(
-            term_w - len(marker) - len(check),
-            (name_label, 0),
-            (summary, 2),
-            (meta, 1),
-        )
+        marker = "  → "
         line = (
             ui.color(marker, ui.DUSK)
-            + ui.color(name_seg, ui.DUSK)
-            + (("  " + ui.color(sum_seg, ui.MUTED)) if sum_seg else "")
-            + ((ui.color(check, ui.OK) + ui.color(meta_seg, ui.MUTED)) if meta_seg else "")
+            + ui.color(name_label, ui.DUSK)
+            + (("  " + ui.color(summary, ui.MUTED)) if summary else "")
+            + ((ui.color("  ✓ ", ui.OK) + ui.color(meta, ui.MUTED)) if meta else "")
         )
     else:
-        marker = "  ✗ "
-        name_seg, sum_seg, meta_seg = _truncate_line(
-            term_w - len(marker) - 3,
-            (name_label, 0),
-            (summary, 2),
-            (meta, 1),
-        )
-        bits = [name_seg]
-        if sum_seg:
-            bits.append(sum_seg)
-        if meta_seg:
-            bits.append(meta_seg)
-        line = ui.color(marker + "  ".join(bits), ui.ERR)
-    print(line)
+        bits = [name_label]
+        if summary:
+            bits.append(summary)
+        if meta:
+            bits.append(meta)
+        line = ui.color("  × " + "  ".join(bits), ui.ERR)
+    print(ui.truncate(line, ui.width()))
 
 
 def _end_stream_line(rs: _RenderState) -> None:
@@ -284,18 +271,19 @@ def render_event(event: Message, rs: _RenderState) -> None:
     elif k == "plan":
         ui.plan(d["steps"])
     elif k == "narration":
-        print(ui.color("  · ", ui.PLUM) + ui.color(d["text"], ui.MUTED))
+        ui.meta(d["text"])
     elif k == "delta":
         if not rs.streaming:
             rs.md = ui.StreamMarkdown(
                 emit=_stream_emit,
-                first_prefix=ui.color("  ✦ ", ui.GLOW),
+                first_prefix=ui.color("  ● ", ui.GLOW),
                 cont_prefix="    ",
-                dim_first_prefix=ui.color("  ◦ ", ui.SOFT),
+                dim_first_prefix=ui.color("  · ", ui.SOFT),
                 dim_cont_prefix=ui.color("    ", ui.SOFT),
             )
             rs.streaming = True
-        rs.md.feed(d["text"])
+        if rs.md is not None:
+            rs.md.feed(d["text"])
         rs.streamed_any = True
     elif k == "assistant":
         rs.final_text = d["text"]
@@ -333,25 +321,25 @@ def render_event(event: Message, rs: _RenderState) -> None:
             m = _re_edit.match(r"OK:\s+(\w+)\s+(.+?)\s+\+(\d+)\s+-(\d+)\s*$", result)
             if m:
                 op, path, adds, dels = m.group(1), m.group(2), m.group(3), m.group(4)
-                mark = ui.color("    ✓", ui.OK)
-                print(
-                    mark
+                line = (
+                    ui.color("  ✓ ", ui.OK)
                     + " "
                     + ui.color(op, ui.DUSK)
                     + " "
-                    + ui.color(_short_path(path), ui.SURFACE)
+                    + ui.color(ui.sanitize(_short_path(path)), ui.SURFACE)
                     + "  "
                     + ui.color(f"+{adds}", ui.OK)
                     + " "
                     + ui.color(f"-{dels}", ui.ERR)
                 )
+                print(ui.truncate(line, ui.width()))
                 rs.run = None
                 return
 
         meta = _extract_meta(first_line, summary)
         short_summary = _short_path(summary)
 
-        if ok and rs.run is not None and rs.run.name == name:
+        if ok and rs.run is not None and rs.run.name == name and ui.supports_cursor_control():
             # Continue an existing run — overwrite the line above instead
             # of printing a new one, so "read_file × 5" shows in place.
             rs.run.count += 1
@@ -365,6 +353,7 @@ def render_event(event: Message, rs: _RenderState) -> None:
     elif k == "warn":
         ui.warn(d["text"])
     elif k == "error":
+        rs.failed = True
         ui.error(d["text"])
     elif k == "compact":
         strategy = d.get("strategy", "compact")
@@ -377,12 +366,10 @@ def render_event(event: Message, rs: _RenderState) -> None:
         ui.warn(f"permission denied: {d['name']} ({d['reason']})")
         rs.run = None
     elif k == "done":
+        rs.completed = True
         usage = d.get("usage", {})
         if any(usage.values()):
-            print(
-                ui.color(
-                    f"  ↳ tokens in/out {usage.get('input', 0)}/{usage.get('output', 0)}"
-                    f"  · {usage.get('ms', 0)}ms",
-                    ui.SOFT,
-                )
+            ui.meta(
+                f"tokens {usage.get('input', 0):,} in · {usage.get('output', 0):,} out"
+                f" · {usage.get('ms', 0):,} ms"
             )

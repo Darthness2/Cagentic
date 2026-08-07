@@ -23,7 +23,6 @@ import requests
 
 from . import personal_os, storage
 
-
 KINDS = {"ical", "caldav"}
 DIRECTIONS = {"pull", "push", "both"}
 _NS = "os_integrations"
@@ -307,7 +306,9 @@ def event_to_ical(event: dict, *, calendar_name: str = "Cagentic") -> str:
         dtstart = "DTSTART;VALUE=DATE:" + time.strftime("%Y%m%d", time.localtime(start))
         dtend = "DTEND;VALUE=DATE:" + time.strftime("%Y%m%d", time.localtime(end))
     else:
-        dtstart = "DTSTART:" + datetime.fromtimestamp(start, timezone.utc).strftime("%Y%m%dT%H%M%SZ")
+        dtstart = "DTSTART:" + datetime.fromtimestamp(start, timezone.utc).strftime(
+            "%Y%m%dT%H%M%SZ"
+        )
         dtend = "DTEND:" + datetime.fromtimestamp(end, timezone.utc).strftime("%Y%m%dT%H%M%SZ")
     lines = [
         "BEGIN:VCALENDAR",
@@ -357,7 +358,11 @@ def _pull(connection: dict, session) -> tuple[list[dict], int]:
     verify = bool(connection.get("verify_ssl", True))
     if connection.get("kind") == "ical":
         response = session.get(
-            str(connection["url"]), auth=auth, timeout=20, verify=verify, headers={"Accept": "text/calendar"}
+            str(connection["url"]),
+            auth=auth,
+            timeout=20,
+            verify=verify,
+            headers={"Accept": "text/calendar"},
         )
         response.raise_for_status()
         return parse_ical(response.text), 1
@@ -393,7 +398,9 @@ def _push_caldav(connection: dict, session) -> int:
         if event.get("source") != "cagentic":
             continue
         uid = str(event.get("external_id") or f"{event['id']}@cagentic.local")
-        destination = urljoin(str(connection["url"]).rstrip("/") + "/", quote(uid, safe="@") + ".ics")
+        destination = urljoin(
+            str(connection["url"]).rstrip("/") + "/", quote(uid, safe="@") + ".ics"
+        )
         response = session.put(
             destination,
             data=event_to_ical(event).encode("utf-8"),

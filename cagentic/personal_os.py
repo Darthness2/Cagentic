@@ -16,7 +16,6 @@ from typing import Any
 
 from . import reminders, storage
 
-
 GOAL_STATUSES = {"active", "paused", "completed", "cancelled"}
 EVENT_STATUSES = {"confirmed", "tentative", "cancelled"}
 
@@ -206,16 +205,19 @@ def create_event(
                 and item.get("source") == clean_source
                 and item.get("external_id") == clean_external
             ):
-                return update_event(
-                    str(item["id"]),
-                    title=clean_title,
-                    start_at=start,
-                    end_at=end,
-                    description=description,
-                    location=location,
-                    all_day=all_day,
-                    color=color,
-                ) or item
+                return (
+                    update_event(
+                        str(item["id"]),
+                        title=clean_title,
+                        start_at=start,
+                        end_at=end,
+                        description=description,
+                        location=location,
+                        all_day=all_day,
+                        color=color,
+                    )
+                    or item
+                )
     event = CalendarEvent(
         id=_new_id("e"),
         title=clean_title[:240],
@@ -280,9 +282,7 @@ def update_event(event_id: str, **changes: Any) -> dict | None:
             raise ValueError(f"invalid event status: {status}")
         current["status"] = status
     if current.get("end_at") is None:
-        current["end_at"] = float(current["start_at"]) + (
-            86400 if current.get("all_day") else 3600
-        )
+        current["end_at"] = float(current["start_at"]) + (86400 if current.get("all_day") else 3600)
     if float(current["end_at"]) < float(current["start_at"]):
         raise ValueError("event end time must be after its start time")
     current["updated_at"] = time.time()

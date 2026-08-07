@@ -17,9 +17,10 @@ from pathlib import Path
 from .config import config_dir
 
 
-def notes_dir() -> Path:
+def notes_dir(*, create: bool = True) -> Path:
     d = config_dir() / "notes"
-    d.mkdir(parents=True, exist_ok=True)
+    if create:
+        d.mkdir(parents=True, exist_ok=True)
     return d
 
 
@@ -33,8 +34,8 @@ def slugify(name: str) -> str:
     return s or "untitled"
 
 
-def _path(name: str) -> Path:
-    return notes_dir() / f"{slugify(name)}.md"
+def _path(name: str, *, create: bool = True) -> Path:
+    return notes_dir(create=create) / f"{slugify(name)}.md"
 
 
 @dataclass
@@ -72,7 +73,7 @@ def write(name: str, body: str, *, append: bool = False) -> Note:
 
 
 def get(name: str) -> Note | None:
-    p = _path(name)
+    p = _path(name, create=False)
     if not p.exists():
         return None
     body = p.read_text(encoding="utf-8", errors="replace")
@@ -80,7 +81,7 @@ def get(name: str) -> Note | None:
 
 
 def delete(name: str) -> bool:
-    p = _path(name)
+    p = _path(name, create=False)
     if not p.exists():
         return False
     p.unlink()
@@ -89,7 +90,10 @@ def delete(name: str) -> bool:
 
 def list_all() -> list[Note]:
     out: list[Note] = []
-    for p in notes_dir().glob("*.md"):
+    directory = notes_dir(create=False)
+    if not directory.exists():
+        return out
+    for p in directory.glob("*.md"):
         try:
             body = p.read_text(encoding="utf-8", errors="replace")
         except OSError:

@@ -340,9 +340,12 @@ class MCPManager:
         self._load_from_config()
 
     def _load_from_config(self) -> None:
-        servers = (self.config.get("mcp") or {}).get("servers") or {}
+        mcp = self.config.get("mcp")
+        servers = mcp.get("servers") if isinstance(mcp, dict) else {}
+        if not isinstance(servers, dict):
+            return
         for name, spec in servers.items():
-            if not isinstance(spec, dict):
+            if not isinstance(name, str) or not isinstance(spec, dict):
                 continue
             if not spec.get("enabled", True):
                 continue
@@ -358,14 +361,17 @@ class MCPManager:
                 import shlex
 
                 command = shlex.split(command, posix=os.name != "nt")
-            else:
+            elif isinstance(command, (list, tuple)):
                 command = list(command)
+            else:
+                continue
             if not command:
                 continue
+            env = spec.get("env")
             self.servers[name] = MCPServer(
                 name=name,
                 command=command,
-                env=dict(spec.get("env") or {}),
+                env=dict(env) if isinstance(env, dict) else {},
             )
 
     def reload(self, config: dict) -> None:

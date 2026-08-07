@@ -6,7 +6,7 @@ import os
 import shutil
 from pathlib import Path
 
-from . import config, sessions
+from . import command_utils, config, sessions
 from .providers import build_client, parse_model
 from .storage import database_path
 
@@ -44,5 +44,8 @@ def run(cfg: dict) -> dict:
     add("sqlite", True, str(database_path()))
     add("sessions", True, f"{len(sessions.list_all())} saved")
     add("git", shutil.which("git") is not None, shutil.which("git") or "not installed")
-    add("browser", bool((cfg.get("browser") or {}).get("enabled", True)), "enabled in config")
+    raw_browser = cfg.get("browser")
+    browser = raw_browser if isinstance(raw_browser, dict) else {}
+    browser_enabled = command_utils.boolean_value(browser.get("enabled", True), True)
+    add("browser", browser_enabled, "enabled in config")
     return {"ok": all(item["ok"] for item in checks), "checks": checks}

@@ -19,7 +19,7 @@ import threading
 import time
 from dataclasses import dataclass, field
 from pathlib import Path
-from typing import Callable, Optional
+from typing import Callable, List, Optional
 
 from .tasks import TaskGraph, TaskKind, new_id
 
@@ -149,7 +149,7 @@ class BackgroundExecutor:
             time.sleep(0.1)
         return self.status(job_id)
 
-    def drain_notifications(self) -> list[dict]:
+    def drain_notifications(self) -> List[dict]:
         with self._lock:
             out = list(self._notifications)
             self._notifications.clear()

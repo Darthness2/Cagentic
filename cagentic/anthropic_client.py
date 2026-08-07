@@ -217,7 +217,7 @@ class AnthropicClient:
                         },
                     }
                 )
-        msg = {"role": "assistant", "content": text, "tool_calls": tcs}
+        msg: dict[str, Any] = {"role": "assistant", "content": text, "tool_calls": tcs}
         if data.get("stop_reason") == "max_tokens":
             # Response hit the output cap — surface so the engine warns and the
             # user knows the answer is cut short.

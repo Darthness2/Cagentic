@@ -1,4 +1,9 @@
-"""Terminal UI helpers — warm dusk palette, blocky panels, no external deps."""
+"""Terminal UI primitives for a quiet, responsive Cagentic CLI.
+
+The module intentionally has no rendering dependency.  Every public helper
+must remain useful in a narrow terminal, when color is disabled, and when its
+output is redirected to a file.
+"""
 
 from __future__ import annotations
 
@@ -6,9 +11,9 @@ import os
 import re
 import shutil
 import sys
-import textwrap
 import threading
 import time
+import unicodedata
 
 # ----- Windows ANSI passthrough --------------------------------------------
 # Older Windows shells don't process ANSI escape sequences by default; the
@@ -23,7 +28,7 @@ def _enable_windows_ansi() -> None:
     try:
         import ctypes
 
-        kernel32 = ctypes.windll.kernel32
+        kernel32 = getattr(ctypes, "windll").kernel32
         ENABLE_VIRTUAL_TERMINAL_PROCESSING = 0x0004
         for handle_id in (-11, -12):  # STD_OUTPUT_HANDLE, STD_ERROR_HANDLE
             handle = kernel32.GetStdHandle(handle_id)
@@ -78,32 +83,63 @@ MAGENTA = "\033[35m"
 CYAN = "\033[36m"
 GRAY = "\033[90m"
 
-# Palette — "warm dusk": a cohesive 256-color set built for a personal
-# assistant. Mauve + peach + gold instead of a cold tech teal. Degrades
-# gracefully when 256-color isn't available.
-#
-# DUSK / GLOW / PLUM are the three core accent tones; GOLD is a fourth used
-# sparingly for highlights worth noticing (success, the wordmark spark).
-DUSK = "\033[38;5;139m"  # muted orchid — primary accent
-GLOW = "\033[38;5;216m"  # warm peach — highlights, prompt, the wordmark
-PLUM = "\033[38;5;96m"  # dusk plum — borders, rules, quiet structure
-GOLD = "\033[38;5;179m"  # soft gold — sparks, accents worth a glance
-SURFACE = "\033[38;5;253m"  # near-white — body text
-MUTED = "\033[38;5;247m"  # warm grey — secondary text
-SOFT = "\033[38;5;240m"  # faint grey — timers, hints, rules
-WARN = "\033[38;5;215m"  # warm amber — warnings
-ERR = "\033[38;5;174m"  # dusty rose — errors
-OK = "\033[38;5;108m"  # sage — success marks
+# Semantic 256-color palette.  The graphite/indigo base is deliberately
+# restrained: color communicates hierarchy and state instead of decorating
+# every line.  The historical names stay public because other modules import
+# them, but each now maps to one semantic role.
+DUSK = "\033[38;5;111m"  # primary blue
+GLOW = "\033[38;5;147m"  # bright indigo; brand and prompt
+PLUM = "\033[38;5;60m"  # structural slate
+GOLD = "\033[38;5;180m"  # focused accent
+SURFACE = "\033[38;5;252m"  # primary text
+MUTED = "\033[38;5;245m"  # secondary text
+SOFT = "\033[38;5;242m"  # tertiary text and rules
+WARN = "\033[38;5;214m"  # warning amber
+ERR = "\033[38;5;203m"  # error red
+OK = "\033[38;5;114m"  # success green
 
 
-def _supports_color() -> bool:
-    if os.environ.get("NO_COLOR"):
+def _supports_color(stream=None) -> bool:
+    """Honor common color controls and only style an interactive stream."""
+    mode = os.environ.get("CAGENTIC_COLOR", "auto").strip().lower()
+    if mode in {"never", "0", "false", "off"}:
         return False
-    return sys.stdout.isatty()
+    if os.environ.get("NO_COLOR") is not None or os.environ.get("CLICOLOR") == "0":
+        return False
+    if os.environ.get("TERM", "").lower() == "dumb":
+        return False
+    if mode in {"always", "1", "true", "on"} or os.environ.get("CLICOLOR_FORCE"):
+        return True
+    target = stream or sys.stdout
+    return bool(getattr(target, "isatty", lambda: False)())
 
 
-def color(text: str, c: str) -> str:
-    if not _supports_color():
+def supports_cursor_control(stream=None) -> bool:
+    """Return whether transient cursor painting is safe for ``stream``.
+
+    Color and cursor movement are separate capabilities: a user may disable
+    color but still have a capable TTY, while ``TERM=dumb`` and redirected
+    output must never receive erase-line or cursor-up escape sequences.
+    """
+    target = stream or sys.stdout
+    if not bool(getattr(target, "isatty", lambda: False)()):
+        return False
+    if os.environ.get("TERM", "").strip().lower() == "dumb":
+        return False
+    configured = os.environ.get("CAGENTIC_CURSOR_CONTROL", "auto").strip().lower()
+    return configured not in {"never", "off", "0", "false", "no"}
+
+
+def motion_enabled(stream=None) -> bool:
+    """Honor a terminal-friendly reduced-motion preference."""
+    configured = os.environ.get("CAGENTIC_MOTION", "auto").strip().lower()
+    if configured in {"reduce", "reduced", "never", "off", "0", "false", "no"}:
+        return False
+    return supports_cursor_control(stream)
+
+
+def color(text: str, c: str, stream=None) -> str:
+    if not _supports_color(stream):
         return text
     return f"{c}{text}{RESET}"
 
@@ -112,7 +148,7 @@ def color(text: str, c: str) -> str:
 
 
 def clear_screen() -> None:
-    if not sys.stdout.isatty():
+    if not supports_cursor_control():
         return
     sys.stdout.write("\033[3J\033[2J\033[H")
     sys.stdout.flush()
@@ -120,31 +156,115 @@ def clear_screen() -> None:
 
 def width() -> int:
     try:
-        return min(shutil.get_terminal_size((80, 24)).columns, 120)
+        return max(1, min(shutil.get_terminal_size((80, 24)).columns, 120))
     except OSError:
         return 80
 
 
+_ANSI_RX = re.compile(r"\x1b(?:\[[0-?]*[ -/]*[@-~]|\][^\x07]*(?:\x07|\x1b\\)|[()][A-Z0-9]|[0-~])")
+
+
 def _strip_ansi(s: str) -> str:
-    out = []
-    i = 0
-    while i < len(s):
-        if s[i] == "\033":
-            while i < len(s) and s[i] != "m":
-                i += 1
-            i += 1
-            continue
-        out.append(s[i])
-        i += 1
-    return "".join(out)
+    return _ANSI_RX.sub("", s)
+
+
+def sanitize(text: object) -> str:
+    """Remove terminal control sequences from untrusted display text."""
+    stripped = _strip_ansi(str(text)).expandtabs(4)
+    return "".join(
+        char for char in stripped if char == "\n" or (ord(char) >= 32 and ord(char) != 127)
+    )
+
+
+def single_line(text: object) -> str:
+    """Sanitize and collapse a label or identifier onto one display line."""
+    return " ".join(sanitize(text).split())
+
+
+def _char_width(char: str) -> int:
+    if not char or unicodedata.combining(char):
+        return 0
+    if unicodedata.category(char) in {"Cc", "Cf"}:
+        return 0
+    return 2 if unicodedata.east_asian_width(char) in {"W", "F"} else 1
 
 
 def _vlen(s: str) -> int:
-    return len(_strip_ansi(s))
+    return sum(_char_width(char) for char in _strip_ansi(s))
 
 
 def _pad(s: str, w: int) -> str:
     return s + " " * max(0, w - _vlen(s))
+
+
+def truncate(text: str, max_width: int, suffix: str = "…") -> str:
+    """Truncate ANSI-styled text to visible columns without leaking styles."""
+    if max_width <= 0:
+        return ""
+    if _vlen(text) <= max_width:
+        return text
+    suffix_width = _vlen(suffix)
+    budget = max(0, max_width - suffix_width)
+    out: list[str] = []
+    visible = 0
+    pos = 0
+    had_ansi = False
+    while pos < len(text):
+        match = _ANSI_RX.match(text, pos)
+        if match:
+            out.append(match.group(0))
+            had_ansi = True
+            pos = match.end()
+            continue
+        char = text[pos]
+        char_width = _char_width(char)
+        if visible + char_width > budget:
+            break
+        out.append(char)
+        visible += char_width
+        pos += 1
+    out.append(suffix if suffix_width <= max_width else "")
+    if had_ansi:
+        out.append(RESET)
+    return "".join(out)
+
+
+def _split_visible(text: str, max_width: int) -> list[str]:
+    """Hard-wrap one unbroken token while retaining simple SGR styling."""
+    if max_width <= 0:
+        return [""]
+    pieces: list[str] = []
+    current: list[str] = []
+    current_width = 0
+    active_style = ""
+    pos = 0
+    while pos < len(text):
+        match = _ANSI_RX.match(text, pos)
+        if match:
+            sequence = match.group(0)
+            current.append(sequence)
+            if sequence.endswith("m"):
+                if sequence == RESET or re.search(r"(?:\[|;)0(?:;|m)", sequence):
+                    active_style = ""
+                else:
+                    active_style += sequence
+            pos = match.end()
+            continue
+        char = text[pos]
+        char_width = _char_width(char)
+        if current_width and current_width + char_width > max_width:
+            piece = "".join(current)
+            if active_style:
+                piece += RESET
+            pieces.append(piece)
+            current = [active_style] if active_style else []
+            current_width = 0
+        current.append(char)
+        current_width += char_width
+        pos += 1
+    if current or not pieces:
+        pieces.append("".join(current))
+    return pieces
 
 
 # ---------- markdown rendering ----------
@@ -165,14 +285,14 @@ _MD_LINK_RX = re.compile(r"\[([^\]\n]+)\]\(([^)\s]+)\)")
 
 
 def render_markdown(text: str) -> str:
-    """Convert a small subset of CommonMark to ANSI-styled text.
+    """Render a readable CommonMark subset with or without terminal color.
 
-    Handles fenced code blocks, inline code, **bold**, *italic*/_italic_,
-    headers (#), bullets, and inline links. Anything fancier passes through
-    as plain text.
+    Plain output is a real rendering path, not an early return.  This matters
+    for ``NO_COLOR``, logs, snapshots, and piped output: users should see clean
+    headings and code instead of raw formatting punctuation.
     """
-    if not _supports_color():
-        return text
+    text = sanitize(text)
+    styled = _supports_color()
 
     # Fenced code blocks first — pull them out and replace with placeholders
     # so we don't rewrite their interior with bold/italic rules.
@@ -180,9 +300,11 @@ def render_markdown(text: str) -> str:
 
     def _stash_block(m: re.Match) -> str:
         body = m.group(2)
-        rendered_lines = []
+        rendered_lines: list[str] = []
         for line in body.splitlines():
-            rendered_lines.append(color("  ┊ ", PLUM) + color(line, GOLD))
+            rail = color("│ ", PLUM) if styled else "│ "
+            code = color(line, GOLD) if styled else line
+            rendered_lines.append(rail + code)
         rendered = "\n".join(rendered_lines)
         placeholders.append(rendered)
         return f"\x00BLOCK{len(placeholders) - 1}\x00"
@@ -190,7 +312,7 @@ def render_markdown(text: str) -> str:
     out = _MD_FENCE_RX.sub(_stash_block, text)
 
     def _stash_inline(m: re.Match) -> str:
-        rendered = color(m.group(1), GOLD + BOLD)
+        rendered = color(m.group(1), GOLD + BOLD) if styled else m.group(1)
         placeholders.append(rendered)
         return f"\x00INL{len(placeholders) - 1}\x00"
 
@@ -200,37 +322,46 @@ def render_markdown(text: str) -> str:
     def _header(m: re.Match) -> str:
         level = len(m.group(1))
         body = m.group(2)
+        if not styled:
+            return body
         if level == 1:
-            return color("✦  " + body, GLOW + BOLD)
+            return color(body, GLOW + BOLD)
         if level == 2:
-            return color("❀  " + body, DUSK + BOLD)
-        return color("·  " + body, PLUM + BOLD)
+            return color(body, DUSK + BOLD)
+        return color(body, SURFACE + BOLD)
 
     out = _MD_HEADER_RX.sub(_header, out)
 
     # Bullets.
-    out = _MD_BULLET_RX.sub(lambda m: m.group(1) + color("– ", DUSK), out)
+    bullet = color("• ", DUSK) if styled else "• "
+    out = _MD_BULLET_RX.sub(lambda m: m.group(1) + bullet, out)
 
     # Step markers: '<step 2>' becomes a styled '→ step 2', '<step 2/4>'
     # becomes '→ step 2 of 4'. Wrapped in newlines so they always read as
     # their own visible line even if the model puts them inline.
     def _step(m: "re.Match[str]") -> str:
         n, total = m.group(1), m.group(2)
-        label = f"→ step {n} of {total}" if total else f"→ step {n}"
-        return "\n" + color(label, GOLD + BOLD) + "\n"
+        label = f"Step {n} of {total}" if total else f"Step {n}"
+        rendered = color(label, GOLD + BOLD) if styled else label
+        return "\n" + rendered + "\n"
 
     out = _MD_STEP_RX.sub(_step, out)
 
     # Bold and italic. (Order matters — bold first.)
-    out = _MD_BOLD_RX.sub(lambda m: color(m.group(1), BOLD), out)
-    out = _MD_ITALIC_AST_RX.sub(lambda m: color(m.group(1), ITALIC), out)
-    out = _MD_ITALIC_UND_RX.sub(lambda m: color(m.group(1), ITALIC), out)
+    out = _MD_BOLD_RX.sub(lambda m: color(m.group(1), BOLD) if styled else m.group(1), out)
+    out = _MD_ITALIC_AST_RX.sub(lambda m: color(m.group(1), ITALIC) if styled else m.group(1), out)
+    out = _MD_ITALIC_UND_RX.sub(lambda m: color(m.group(1), ITALIC) if styled else m.group(1), out)
 
     # Inline links: [text](url) → text (url, dimmed).
-    out = _MD_LINK_RX.sub(
-        lambda m: color(m.group(1), GLOW) + color(f" ({m.group(2)})", SOFT),
-        out,
-    )
+    def _link(m: re.Match) -> str:
+        label, url = m.group(1), m.group(2)
+        if label == url:
+            return color(url, GLOW) if styled else url
+        if styled:
+            return color(label, GLOW) + color(f" ({url})", SOFT)
+        return f"{label} ({url})"
+
+    out = _MD_LINK_RX.sub(_link, out)
 
     # Restore stashed code.
     def _restore(m: re.Match) -> str:
@@ -455,6 +586,7 @@ class StreamMarkdown:
 
 def _wrap_visible(text: str, width: int) -> list[str]:
     """Wrap `text` to `width` *visible* columns, leaving ANSI escapes intact."""
+    width = max(1, width)
     out: list[str] = []
     for raw in text.splitlines() or [""]:
         if not raw.strip():
@@ -463,21 +595,27 @@ def _wrap_visible(text: str, width: int) -> list[str]:
         if _vlen(raw) <= width:
             out.append(raw)
             continue
-        # Greedy word-wrap; break on spaces. Tracks visible length only.
-        words = raw.split(" ")
-        line = ""
-        for w in words:
-            wlen = _vlen(w)
-            if not line:
-                line = w
+        # Greedy word-wrap with a hard-wrap fallback for paths and URLs.
+        indent_width = min(len(raw) - len(raw.lstrip(" ")), max(0, width - 1))
+        indent = " " * indent_width
+        words = raw.strip().split()
+        line = indent
+        for word in words:
+            word_width = _vlen(word)
+            separator = "" if not line.strip() else " "
+            if _vlen(line) + len(separator) + word_width <= width:
+                line += separator + word
                 continue
-            if _vlen(line) + 1 + wlen <= width:
-                line = line + " " + w
-            else:
-                out.append(line)
-                line = w
+            if line.strip():
+                out.append(line.rstrip())
+                line = indent
+            available = max(1, width - _vlen(indent))
+            pieces = _split_visible(word, available)
+            for piece in pieces[:-1]:
+                out.append(indent + piece)
+            line = indent + pieces[-1]
         if line:
-            out.append(line)
+            out.append(line.rstrip())
     return out
 
 
@@ -501,39 +639,30 @@ def panel(
     inner_pad: int = 1,
     markdown: bool = False,
 ) -> None:
-    """Print a bordered panel containing wrapped body text.
-
-    If `markdown=True`, the body is run through render_markdown() and
-    wrapped with a visible-width-aware wrapper that preserves ANSI escapes.
-    """
+    """Print a width-safe bordered panel."""
     tl, tr, bl, br, h, v = _BX[style]
-    w = width()
-    inner = w - 2 - inner_pad * 2
+    w = max(4, width())
+    inner_pad = max(0, min(inner_pad, max(0, (w - 3) // 2)))
+    inner = max(1, w - 2 - inner_pad * 2)
 
     # body lines (allow either a string or a list of pre-formatted lines)
     if isinstance(body, str):
-        if markdown:
-            rendered = render_markdown(body)
-            lines = _wrap_visible(rendered, inner)
-        else:
-            lines = []
-            for raw in body.splitlines() or [""]:
-                if not raw.strip():
-                    lines.append("")
-                    continue
-                # preserve ANSI by wrapping the visible text only
-                lines.extend(textwrap.wrap(raw, width=inner) or [""])
+        rendered = render_markdown(body) if markdown else sanitize(body)
+        lines = _wrap_visible(rendered, inner)
     else:
-        lines = list(body)
+        lines = []
+        for raw in body:
+            lines.extend(_wrap_visible(raw, inner))
 
     # title bar
     if title:
-        title_visible = f" {title} "
-        bar_len = max(0, w - 2 - _vlen(title_visible))
+        title_text = truncate(single_line(title), max(1, w - 5))
+        title_visible = f" {title_text} "
+        bar_len = max(0, w - 3 - _vlen(title_visible))
         top = (
-            color(tl + h * 2, color_c)
+            color(tl + h, color_c)
             + color(title_visible, title_c)
-            + color(h * (bar_len - 2) + tr, color_c)
+            + color(h * bar_len + tr, color_c)
         )
     else:
         top = color(tl + h * (w - 2) + tr, color_c)
@@ -548,15 +677,16 @@ def panel(
 
 
 def hr(char: str = "─", c: str = PLUM) -> None:
-    print(color(char * width(), c))
+    columns = width()
+    unit_width = max(1, _vlen(char))
+    print(color(char * max(1, columns // unit_width), c))
 
 
 # ---------- spinner ----------
 
-# Default: a soft sparkle that breathes in and out — a calm "I'm with you"
-# pulse rather than a busy techy spinner. Appears on the line Cagentic is
-# currently working on. The braille frames stay as a fallback for terminals
-# without good unicode support (NO_COLOR or CAGENTIC_SPINNER=braille).
+# A compact braille spinner is the default.  The older spark animation remains
+# available through CAGENTIC_SPINNER=spark, and terminals that advertise
+# limited capabilities receive an ASCII fallback.
 _SPARK_FRAMES = (
     "·  ",
     "✦  ",
@@ -571,16 +701,19 @@ _SPARK_FRAMES = (
 )
 
 _BRAILLE_FRAMES = ("⠋", "⠙", "⠹", "⠸", "⠼", "⠴", "⠦", "⠧", "⠇", "⠏")
+_ASCII_FRAMES = ("-", "\\", "|", "/")
 
 
 def _default_frames() -> tuple[str, ...]:
-    style = os.environ.get("CAGENTIC_SPINNER", "spark").lower()
-    if style == "braille":
-        return _BRAILLE_FRAMES
-    return _SPARK_FRAMES
+    style = os.environ.get("CAGENTIC_SPINNER", "braille").strip().lower()
+    if style in {"off", "none", "0"}:
+        return ()
+    if style == "spark":
+        return _SPARK_FRAMES
+    if style == "ascii" or os.environ.get("TERM", "").lower() == "dumb":
+        return _ASCII_FRAMES
+    return _BRAILLE_FRAMES
 
-
-_SPIN_FRAMES = _default_frames()
 
 # Track any live spinner so we can force-stop it before reading user input.
 _active_spinners: list["Spinner"] = []
@@ -617,7 +750,7 @@ def stop_all_spinners() -> None:
 def prepare_for_input() -> None:
     """Call right before reading user input: stop spinners, show cursor, flush."""
     stop_all_spinners()
-    if sys.stdout.isatty():
+    if supports_cursor_control():
         sys.stdout.write("\033[?25h")  # show cursor
         sys.stdout.flush()
 
@@ -646,6 +779,7 @@ class Spinner:
         self._stop = threading.Event()
         self._thread: threading.Thread | None = None
         self._t0 = 0.0
+        self._frames = _default_frames()
 
     def set_label(self, label: str) -> None:
         self.label = label
@@ -660,7 +794,7 @@ class Spinner:
         return label
 
     def start(self) -> None:
-        if not sys.stdout.isatty() or self._thread is not None:
+        if not motion_enabled() or self._thread is not None or not self._frames:
             return
         self._stop.clear()
         self._t0 = time.monotonic()
@@ -687,7 +821,7 @@ class Spinner:
             return
         i = 0
         while not self._stop.is_set():
-            frame = _SPIN_FRAMES[i % len(_SPIN_FRAMES)]
+            frame = self._frames[i % len(self._frames)]
             elapsed = time.monotonic() - self._t0
             timer = f"({elapsed:0.1f}s)"
             # If the label would push the line past the terminal width, the
@@ -696,10 +830,9 @@ class Spinner:
             # the whole line always fits on one row.
             term_w = width()
             label_text = self._current_label(elapsed) + "…"
-            fixed = len(frame) + len(timer) + 6  # spaces + padding
-            avail = max(8, term_w - fixed)
-            if len(label_text) > avail:
-                label_text = label_text[: max(1, avail - 1)] + "…"
+            fixed = _vlen(frame) + _vlen(timer) + 6  # spaces + padding
+            avail = max(1, term_w - fixed)
+            label_text = truncate(label_text, avail)
             line = (
                 "  "
                 + color(frame, self.color_c)
@@ -794,7 +927,11 @@ class SilenceWatchdog:
             # fresh row even if stdout was mid-line.
             sys.stderr.write(
                 "\n"
-                + color(f"  ◦ {self.label} — {silent:0.0f}s since last token…", MUTED + ITALIC)
+                + color(
+                    f"  · {self.label} — {silent:0.0f}s since last token…",
+                    MUTED + ITALIC,
+                    sys.stderr,
+                )
                 + "\n"
             )
             sys.stderr.flush()
@@ -805,24 +942,118 @@ class SilenceWatchdog:
 # ---------- log helpers ----------
 #
 # Marker vocabulary, kept consistent so the transcript reads at a glance:
-#   ✦  Cagentic speaking (the assistant's own voice)
-#   ◦  quiet thinking
-#   ·  a small note / info
-#   ↳  a tool Cagentic reached for
-#   ✓ / ✗  how that tool turned out
-#   ❀  a plan / something organized
+#   ●  Cagentic speaking
+#   ·  quiet context or progress
+#   →  a tool call
+#   ✓ / ×  success or failure
+#   !  something needs attention
+
+
+def _message(marker: str, msg: str, marker_c: str, text_c: str, *, stream=None) -> None:
+    """Print a semantic message with aligned, width-safe continuation lines."""
+    target = stream or sys.stdout
+    prefix = f"  {marker} "
+    continuation = " " * _vlen(prefix)
+    available = max(1, width() - _vlen(prefix))
+    lines = _wrap_visible(sanitize(msg), available) or [""]
+    for index, line in enumerate(lines):
+        lead = color(prefix, marker_c, target) if index == 0 else continuation
+        print(lead + color(line, text_c, target), file=target)
+
+
+def heading(label: str) -> None:
+    """Print a compact section heading used by command output."""
+    print("  " + color(truncate(single_line(label).upper(), max(1, width() - 2)), DUSK + BOLD))
+
+
+def field(
+    label: str,
+    value: object,
+    *,
+    warning: bool = False,
+    label_width: int | None = None,
+) -> None:
+    """Print one responsive key/value row for diagnostics and configuration."""
+    label_text = f"{single_line(label)}:"
+    value_text = sanitize(value)
+    columns = width()
+    value_c = WARN if warning else SURFACE
+    label_width = label_width or min(14, max(9, len(label_text) + 1))
+    if columns >= 40:
+        prefix = "  " + label_text.ljust(label_width)
+        lines = _wrap_visible(value_text, max(1, columns - _vlen(prefix))) or [""]
+        for index, line in enumerate(lines):
+            lead = (
+                "  " + color(label_text.ljust(label_width), MUTED)
+                if index == 0
+                else " " * _vlen(prefix)
+            )
+            print(lead + color(line, value_c))
+        return
+    print("  " + color(truncate(label_text, max(1, columns - 2)), MUTED))
+    for line in _wrap_visible(value_text, max(1, columns - 4)) or [""]:
+        print("    " + color(line, value_c))
+
+
+def list_item(
+    text: object,
+    *,
+    detail: object | None = None,
+    marker: str = "•",
+    active: bool = True,
+) -> None:
+    """Print a compact list row with an optional secondary description."""
+    marker_c = {
+        "✓": OK,
+        "×": ERR,
+        "!": WARN,
+        "→": DUSK,
+        "●": GLOW,
+    }.get(marker, DUSK if active else SOFT)
+    text_c = SURFACE if active else MUTED
+    _message(marker, sanitize(text), marker_c, text_c)
+    if detail is not None:
+        for line in _wrap_visible(sanitize(detail), max(1, width() - 4)) or [""]:
+            print("    " + color(line, MUTED if active else SOFT))
+
+
+def code_block(text: str) -> None:
+    """Print preformatted command/config output with a subtle left rail."""
+    prefix = "  │ "
+    for raw in sanitize(text).splitlines() or [""]:
+        lines = _wrap_visible(raw, max(1, width() - _vlen(prefix))) or [""]
+        for line in lines:
+            print(color(prefix, PLUM) + color(line, MUTED))
+
+
+def input_prompt(label: str, default: str | None = None) -> str:
+    """Read one setup value using the same prompt language as the REPL."""
+    clean_label = single_line(label)
+    clean_default = single_line(default) if default else ""
+    suffix = f" [{clean_default}]" if clean_default else ""
+    prompt = color("  › ", GLOW + BOLD) + color(f"{clean_label}{suffix}: ", SURFACE)
+    return input(prompt)
+
+
+def prompt_prefix() -> str:
+    return color("› ", GLOW + BOLD)
 
 
 def info(msg: str) -> None:
-    print(color("  · ", DUSK) + color(msg, SURFACE))
+    _message("·", msg, DUSK, SURFACE)
+
+
+def meta(msg: str) -> None:
+    """Print low-priority progress or usage metadata."""
+    _message("·", msg, SOFT, MUTED)
 
 
 def warn(msg: str) -> None:
-    print(color("  ▲ ", WARN) + color(msg, WARN))
+    _message("!", msg, WARN, WARN)
 
 
 def error(msg: str) -> None:
-    print(color("  ✗ ", ERR) + color(msg, ERR), file=sys.stderr)
+    _message("×", msg, ERR, ERR, stream=sys.stderr)
 
 
 def assistant(msg: str) -> None:
@@ -830,107 +1061,116 @@ def assistant(msg: str) -> None:
     no box. (Streaming answers are already shown live; this is the
     non-streaming render and the /resume replay.)"""
     rendered = render_markdown(msg)
-    lines = _wrap_visible(rendered, max(20, width() - 4))
+    prefix = "  ● "
+    lines = _wrap_visible(rendered, max(1, width() - _vlen(prefix)))
     for i, line in enumerate(lines or [""]):
-        prefix = color("  ✦ ", GLOW) if i == 0 else "    "
-        print(prefix + line)
+        lead = color(prefix, GLOW) if i == 0 else " " * _vlen(prefix)
+        print(lead + line)
 
 
 def thinking(msg: str) -> None:
     """Print <think>…</think> content as faint italic indented text — no box."""
-    lines = _wrap_visible(msg, max(20, width() - 4))
+    prefix = "  · "
+    lines = _wrap_visible(sanitize(msg), max(1, width() - _vlen(prefix)))
     for i, line in enumerate(lines or [""]):
-        prefix = color("  ◦ ", SOFT) if i == 0 else "    "
-        print(prefix + color(line, SOFT + ITALIC))
+        lead = color(prefix, SOFT) if i == 0 else " " * _vlen(prefix)
+        print(lead + color(line, MUTED + ITALIC))
 
 
 def plan(items: list[str]) -> None:
-    """Render a numbered plan in a panel."""
+    """Render a compact numbered plan without consuming the full viewport."""
     if not items:
         return
-    body = []
+    print()
+    heading("Plan")
     for i, step in enumerate(items, 1):
-        body.append(color(f"  {i:>2}.", GOLD) + " " + color(step, SURFACE))
-    panel(body, title="❀ here's my plan", style="round", color_c=PLUM, title_c=DUSK)
+        prefix = f"  {i:>2}  "
+        lines = _wrap_visible(sanitize(step), max(1, width() - _vlen(prefix)))
+        for line_index, line in enumerate(lines or [""]):
+            lead = color(prefix, GOLD) if line_index == 0 else " " * _vlen(prefix)
+            print(lead + color(line, SURFACE))
+    print()
 
 
 def tool_call(name: str, summary: str) -> None:
-    head = color("  ↳ ", DUSK) + color(name, DUSK)
-    if summary:
-        head += color(f"  {summary}", MUTED)
-    print(head)
+    detail = f"{name}  {summary}" if summary else name
+    _message("→", detail, DUSK, MUTED)
 
 
 def tool_result(summary: str, ok: bool = True) -> None:
-    mark = color("    ✓", OK) if ok else color("    ✗", ERR)
-    print(mark + color(f" {summary}", MUTED))
+    _message("✓" if ok else "×", summary, OK if ok else ERR, MUTED if ok else ERR)
 
 
 # ---------- banner ----------
 
 
-def greeting_word(hour: int | None = None) -> str:
-    """Time-of-day greeting. Cagentic opens warm, not with a status dump."""
-    import time as _t
+def banner(
+    model: str,
+    cwd: str,
+    tools_enabled: bool = True,
+    user_name: str | None = None,
+    *,
+    version: str | None = None,
+    plan_mode: bool = False,
+    yolo: bool = False,
+    dry_run: bool = False,
+) -> None:
+    """Print a compact, responsive identity and runtime summary.
 
-    if hour is None:
-        hour = _t.localtime().tm_hour
-    if hour < 5:
-        return "you're up late"
-    if hour < 12:
-        return "good morning"
-    if hour < 18:
-        return "good afternoon"
-    if hour < 22:
-        return "good evening"
-    return "winding down"
-
-
-def banner(model: str, cwd: str, tools_enabled: bool = True, user_name: str | None = None) -> None:
-    """Cozy, compact welcome card — a lit window at dusk, not a tech splash.
-
-    No giant block-letter logo: a personal assistant should feel like a
-    note left on the counter, so the banner is a small rounded card with
-    a spark, the wordmark, a one-line greeting, and a quiet status row.
+    Startup no longer clears scrollback.  Users can opt into the old behavior
+    with ``CAGENTIC_CLEAR_SCREEN=1``.
     """
-    clear_screen()
-    w = width()
-    card_w = min(w, 62)
-    tl, tr, bl, br, h, v = _BX["round"]
+    if os.environ.get("CAGENTIC_CLEAR_SCREEN", "").lower() in {"1", "true", "on"}:
+        clear_screen()
 
-    inner = card_w - 4  # 2 border + 2 pad
-
-    def _row(content: str) -> None:
-        # `content` may carry ANSI; pad on visible width.
-        print(color(v, PLUM) + " " + _pad(content, inner) + " " + color(v, PLUM))
-
-    who = user_name or ""
-    hello = greeting_word()
-    if who:
-        hello = f"{hello}, {who}"
-
+    columns = width()
     print()
-    print(color(tl + h * (card_w - 2) + tr, PLUM))
-    _row("")
-    # Wordmark: a spark + spaced lowercase letters. Lowercase + letterspacing
-    # reads softer and more personal than an all-caps block.
-    wordmark = color("✦  ", GOLD) + color("c a g e n t i c", GLOW + BOLD)
-    _row(wordmark)
-    _row(color("your local personal assistant", MUTED))
-    _row("")
-    _row(color(hello + ".", DUSK))
-    _row("")
-    print(color(bl + h * (card_w - 2) + br, PLUM))
+    brand = color("Cagentic", GLOW + BOLD)
+    if version:
+        brand += color(f" {single_line(version)}", SOFT)
+    if user_name:
+        brand += color(f" · {single_line(user_name)}", MUTED)
+    header_width = max(1, columns - 4)
+    ready = color("ready", OK + BOLD)
+    if _vlen(brand) + _vlen(ready) + 3 <= header_width:
+        gap = " " * (header_width - _vlen(brand) - _vlen(ready))
+        print("  " + brand + gap + ready)
+    else:
+        print("  " + truncate(brand, max(1, columns - 2)))
+        print("  " + ready)
 
-    # Quiet status line — a single dim row, no boxed panel. Dot-separated.
-    badge = "ready" if tools_enabled else "text-protocol mode"
-    bits = [
-        color(model, GLOW),
-        color(_short_path(cwd), MUTED),
-        color(badge, OK if tools_enabled else WARN),
-        color("/ for commands", PLUM),
-    ]
-    print("  " + color("  ·  ", PLUM).join(bits))
+    print("  " + color("─" * max(1, columns - 4), PLUM))
+    field("model", single_line(model), label_width=12)
+    field("workspace", _short_path(single_line(cwd)), label_width=12)
+
+    if dry_run:
+        mode = "dry run · no changes"
+    elif plan_mode:
+        mode = "plan · read only"
+    elif yolo:
+        mode = "act · auto approve changes"
+    else:
+        mode = "act · ask before changes"
+    mode += " · " + ("tools on" if tools_enabled else "tools off")
+    if columns < 48:
+        mode = mode.replace("ask before changes", "ask").replace(
+            "auto approve changes", "auto approve"
+        )
+    field(
+        "mode",
+        mode,
+        warning=dry_run or yolo or not tools_enabled,
+        label_width=12,
+    )
+
+    available = max(1, columns - 4)
+    hint = (
+        "Type / for commands · @ to attach files · Esc+Enter for newline"
+        if columns >= 48
+        else "/ commands · @ files · Esc+Enter newline"
+    )
+    for line in _wrap_visible(hint, available):
+        print("    " + color(line, SOFT))
     print()
 
 
@@ -965,8 +1205,9 @@ class StatusBar:
     naturally above the bar without overwriting it.  The bar itself lives
     on row N and is painted every 200 ms from a daemon thread.
 
-    Disabled automatically when stdout is not a tty or when the env var
-    COLLAMA_STATUS_BAR=off is set.
+    Disabled automatically for redirected/small terminals or when
+    CAGENTIC_STATUS_BAR=off is set.  COLLAMA_STATUS_BAR remains a compatibility
+    alias for existing installations.
 
     Lifecycle (called from agent.turn()):
         bar = StatusBar(ctx_tokens=pre_turn_ctx)
@@ -993,9 +1234,14 @@ class StatusBar:
     # ------------------------------------------------------------------
 
     def start(self) -> None:
-        if not sys.stdout.isatty() or os.environ.get("COLLAMA_STATUS_BAR") == "off":
-            return
+        configured = (
+            os.environ.get("CAGENTIC_STATUS_BAR", os.environ.get("COLLAMA_STATUS_BAR", "on"))
+            .strip()
+            .lower()
+        )
         rows = shutil.get_terminal_size((80, 24)).lines
+        if not motion_enabled() or configured in {"off", "0", "false", "no"} or rows < 4:
+            return
         self._last_rows = rows
         # Reserve the last row from the scroll region. DECSTBM (ESC [ t;b r)
         # homes the cursor to (1,1) per the VT spec, so it MUST be bracketed
@@ -1068,25 +1314,23 @@ class StatusBar:
             step_m = self._step_m
 
         if elapsed < 60:
-            time_str = f"⏱ {elapsed:.1f}s"
+            time_str = f"working {elapsed:.1f}s"
         else:
             mins = int(elapsed) // 60
             secs = int(elapsed) % 60
-            time_str = f"⏱ {mins}m{secs:02d}s"
+            time_str = f"working {mins}m {secs:02d}s"
 
         parts = [time_str]
         if step_n is not None:
             parts.append(f"step {step_n}/{step_m}" if step_m else f"step {step_n}")
         if tok > 0:
-            parts.append(f"~{tok:,} tok")
+            parts.append(f"output ~{tok:,}")
         if ctx > 0:
-            parts.append(f"ctx ~{ctx:,}")
+            parts.append(f"context ~{ctx:,}")
 
         row = "  " + " · ".join(parts)
         cols = shutil.get_terminal_size((80, 24)).columns
-        if len(row) > cols - 1:
-            row = row[: max(0, cols - 2)] + "…"
-        return row
+        return truncate(row, max(1, cols - 1))
 
     def _paint(self) -> None:
         text = self._compose()
@@ -1104,7 +1348,7 @@ class StatusBar:
                 + resize_seq  # re-reserve bottom row on resize
                 + f"\033[{rows};1H"  # move to bottom row
                 + "\033[2K"  # clear line
-                + f"\033[38;5;246m{text}\033[0m"  # muted gray (256-color 246)
+                + color(text, MUTED)
                 + "\0338"  # ESC 8: restore cursor
             )
             sys.stdout.flush()

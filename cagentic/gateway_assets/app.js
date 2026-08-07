@@ -1602,6 +1602,10 @@ function truncateAfter(row, includeSelf){
     if(cutting) toRemove.push(ch);
   }
   toRemove.forEach(ch=>ch.remove());
+  // Backend edit/delete endpoints address visible user messages by their
+  // current zero-based position. Keep the next locally assigned index aligned
+  // after truncating an earlier branch of the conversation.
+  _userMsgIdx=thread.querySelectorAll('.msg-row.user').length;
 }
 
 function resendMsg(idx,row){
@@ -2237,6 +2241,15 @@ async function send(text){
       const d=await r.json();
       if(d.current) setCurrent(d.current);
       if(d.model) { state.settings.model=d.model; setModelBadge(d.model); renderModelMenu(); }
+      if(d.ok && d.action && d.action.type==='retry'){
+        clearThinking(); setBusy(false);
+        const rows=[...getThread().querySelectorAll('.msg-row.user')];
+        const idx=Number(d.action.index), row=rows[idx];
+        if(!Number.isInteger(idx)||!row){ addNote('Nothing to retry in this chat.',true); return; }
+        truncateAfter(row,false);
+        streamEdit(idx,String(d.action.message||''));
+        return;
+      }
       addNote(d.text||'Done',!d.ok);
     }catch(e){ addNote('Command failed: '+e,true); }
     clearThinking(); setBusy(false);

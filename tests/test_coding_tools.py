@@ -35,6 +35,7 @@ from cagentic.tools import (
     dispatch,
     t_task_get,
     t_task_list,
+    t_tool_search,
 )
 
 
@@ -61,6 +62,11 @@ def test_every_grouped_tool_has_a_schema():
     for group, gnames in TOOL_GROUPS.items():
         for name in gnames:
             assert name in names, f"{group}/{name} has no schema"
+
+
+def test_tool_search_includes_split_registries(ctx):
+    assert "notebook_edit" in t_tool_search({"query": "notebook"}, ctx)
+    assert "gh_list_pulls" in t_tool_search({"query": "pull requests"}, ctx)
 
 
 def test_collama_coding_groups_are_default_enabled():
@@ -148,6 +154,25 @@ def test_notebook_edit_roundtrip(ctx, tmp_path):
     assert nb["cells"][0]["source"] == "print(1)"
     got = t_notebook_edit({"path": "nb.ipynb", "op": "get", "cell_index": 0}, ctx)
     assert "print(1)" in got
+
+
+def test_notebook_replace_preserves_cell_type_by_default(ctx, tmp_path):
+    t_notebook_edit(
+        {
+            "path": "nb.ipynb",
+            "op": "insert",
+            "cell_type": "markdown",
+            "source": "before",
+        },
+        ctx,
+    )
+    result = t_notebook_edit(
+        {"path": "nb.ipynb", "op": "replace", "cell_index": 0, "source": "after"},
+        ctx,
+    )
+    assert result.startswith("OK: replace")
+    notebook = json.loads((tmp_path / "nb.ipynb").read_text())
+    assert notebook["cells"][0]["cell_type"] == "markdown"
 
 
 # ---------------------------------------------------------------- worktree --

@@ -19,7 +19,7 @@ import sys
 from pathlib import Path
 
 REPO_ROOT = Path(__file__).resolve().parent
-VENV_DIR  = REPO_ROOT / ".venv"
+VENV_DIR = REPO_ROOT / ".venv"
 
 
 # ---------------------------------------------------------------------------
@@ -28,6 +28,7 @@ VENV_DIR  = REPO_ROOT / ".venv"
 # Python.  This handles PEP 668 "externally-managed" environments (Homebrew,
 # Debian/Ubuntu system Python, etc.) transparently.
 # ---------------------------------------------------------------------------
+
 
 def _venv_python() -> Path:
     """Return the path to the venv's Python binary."""
@@ -48,18 +49,36 @@ def _ensure_venv() -> None:
     """Create the project venv if it doesn't exist yet, ensuring pip is present."""
     if not VENV_DIR.exists():
         print(f"Creating virtual environment in {VENV_DIR} …")
-        subprocess.check_call([sys.executable, "-m", "venv", str(VENV_DIR)])
+        try:
+            subprocess.check_call([sys.executable, "-m", "venv", str(VENV_DIR)])
+        except subprocess.CalledProcessError as exc:
+            raise SystemExit(
+                f"ERROR: could not create {VENV_DIR} (exit {exc.returncode}). "
+                "Install Python's venv support and try again."
+            ) from None
+
+    venv_python = _venv_python()
+    if not venv_python.is_file():
+        raise SystemExit(
+            f"ERROR: {VENV_DIR} exists but is not a usable virtual environment "
+            f"({venv_python} is missing). Rename or remove that directory and retry."
+        )
 
     # On Debian/Ubuntu (and WSL), pip is not included in the venv by default.
     # Bootstrap it with ensurepip if it's missing.
-    venv_py = str(_venv_python())
-    if subprocess.call(
-        [venv_py, "-m", "pip", "--version"],
-        stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL,
-    ) != 0:
+    venv_py = str(venv_python)
+    if (
+        subprocess.call(
+            [venv_py, "-m", "pip", "--version"],
+            stdout=subprocess.DEVNULL,
+            stderr=subprocess.DEVNULL,
+        )
+        != 0
+    ):
         result = subprocess.run(
             [venv_py, "-m", "ensurepip", "--upgrade"],
-            stderr=subprocess.PIPE, text=True,
+            stderr=subprocess.PIPE,
+            text=True,
         )
         if result.returncode != 0:
             sys.exit(
@@ -81,9 +100,10 @@ def _reexec_in_venv() -> None:
 # Dependency helpers — only used once we're inside the venv
 # ---------------------------------------------------------------------------
 
+
 def _deps_satisfied() -> bool:
     """Return True if all required packages are importable."""
-    for pkg in ("requests", "prompt_toolkit", "pypdf"):
+    for pkg in ("click", "requests", "prompt_toolkit", "pypdf"):
         try:
             __import__(pkg)
         except ImportError:
@@ -91,24 +111,34 @@ def _deps_satisfied() -> bool:
     return True
 
 
-def _install_deps() -> None:
+def _install_deps() -> bool:
     """Install this package (with all dependencies) in editable mode."""
     print("Installing Cagentic dependencies…")
-    subprocess.check_call(
-        [sys.executable, "-m", "pip", "install", "-e", str(REPO_ROOT), "--quiet"]
-    )
+    try:
+        subprocess.check_call(
+            [sys.executable, "-m", "pip", "install", "-e", str(REPO_ROOT), "--quiet"]
+        )
+    except subprocess.CalledProcessError as exc:
+        print(
+            f"ERROR: dependency installation failed (exit {exc.returncode}).",
+            file=sys.stderr,
+        )
+        return False
     print("Dependencies installed.\n")
+    return True
 
 
 def _run_cagentic(args: list[str]) -> int:
     """Invoke the Cagentic CLI entry point."""
     from cagentic.cli import main
+
     return main(args)
 
 
 # ---------------------------------------------------------------------------
 # Entry point
 # ---------------------------------------------------------------------------
+
 
 def main() -> int:
     # --- venv gate ---
@@ -119,7 +149,14 @@ def main() -> int:
 
     args = sys.argv[1:]
 
+    if "--check" in args and "--install" in args:
+        print("ERROR: --check and --install cannot be used together.", file=sys.stderr)
+        return 2
+
     if "--check" in args:
+        if len(args) != 1:
+            print("ERROR: --check does not accept CLI arguments.", file=sys.stderr)
+            return 2
         if _deps_satisfied():
             print("All dependencies are satisfied.")
             return 0
@@ -128,10 +165,13 @@ def main() -> int:
 
     force_install = "--install" in args
     if force_install:
-        args.remove("--install")
+        args = [arg for arg in args if arg != "--install"]
 
     if force_install or not _deps_satisfied():
-        _install_deps()
+        if not _install_deps():
+            return 1
+        if force_install and not args:
+            return 0
 
     return _run_cagentic(args)
 

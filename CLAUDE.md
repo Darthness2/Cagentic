@@ -10,7 +10,7 @@ tool-calling loop against Ollama, OpenAI, or Anthropic. It has since absorbed a
 full coding agent (Collama) and a "personal OS" layer — goals, calendar,
 deadlines, inbox, routines.
 
-Runtime dependencies are deliberately three (`requests`, `prompt_toolkit`,
+Runtime dependencies are deliberately four (`click`, `requests`, `prompt_toolkit`,
 `pypdf`) — no LLM SDKs, no web framework. The provider clients, the JSON-RPC MCP
 client, the HTTP gateway and the browser bridge are all hand-rolled on the
 stdlib. `tiktoken` is an optional extra (`.[performance]`) that only sharpens
@@ -31,36 +31,44 @@ The installed entry point (`pip install -e .`) is `cagentic` → `cagentic.cli:m
 
 ```bash
 cagentic -m qwen2.5:7b -C ~/work --yolo
-cagentic --serve --port 8700      # headless gateway, no REPL (daemon.py does the same)
-cagentic --doctor --json          # scriptable install/connectivity diagnostics
-cagentic --setup                  # interactive first-run wizard
-cagentic --sessions --search TEXT --context ID --compact ID
+cagentic -p "hello" --json         # noninteractive one-shot
+cagentic --serve --port 8700       # headless gateway, no REPL
+cagentic --doctor --json           # scriptable install/connectivity diagnostics
+cagentic --setup                   # explicit interactive first-run wizard
+cagentic --sessions                # list sessions without starting a provider
+cagentic --search TEXT             # search saved conversations
+cagentic --context ID              # inspect one session's context usage
+cagentic --compact ID --dry-run    # preview compacting one saved session
 ```
 
-Tests are `unittest` (pytest is a dev extra but nothing depends on it):
+Pytest is the full-suite runner; it collects both `unittest.TestCase` tests and
+plain pytest regressions:
 
 ```bash
-python -m unittest discover -s tests
+.venv/bin/pytest -q
 ```
 
 ```bash
-python -m unittest tests.test_bugfixes -v
+.venv/bin/pytest tests/test_bugfixes.py -q
 ```
 
 ```bash
-python -m unittest tests.test_bugfixes.TestReadFileRangeCache.test_second_range_is_served
+.venv/bin/pytest tests/test_bugfixes.py::TestReadFileRangeCache::test_second_range_is_served -q
 ```
 
 Lint and types are configured but their tools are dev extras — install them
 before relying on them:
 
 ```bash
-pip install -e ".[dev]" && ruff check cagentic tests && mypy cagentic
+.venv/bin/python -m pip install -e ".[dev]"
+.venv/bin/ruff format --check cagentic tests
+.venv/bin/ruff check cagentic tests
+.venv/bin/mypy cagentic
 ```
 
 Ruff is line-length 100 with `E,F,W,I` and a deliberate ignore baseline
-(`E402,E501,E701,E702,E741,F401,F541`) for the older large modules; mypy excludes
-the same set (see `[tool.mypy]`). **Run `ruff check` before pushing** — `F821`
+(`E402,E501,E701,E702,E741,F401,F541`) for the older large modules. Mypy checks
+the full `cagentic` package. **Run `ruff check` before pushing** — `F821`
 (undefined name) is *not* ignored, and a merge that drops a definition while
 keeping its call sites is exactly the failure this repo has hit before.
 
@@ -106,15 +114,15 @@ runs on an HTTP worker thread and would steal or block the REPL's input.
 
 ### Tools
 
-`tools.py` (~3.9k lines) plus `coding_tools.py` hold the tool bodies as
+`tools.py` plus `coding_tools.py` hold the tool bodies as
 `t_<name>(args, ctx) -> str`, with `TOOL_GROUPS` deciding which schemas reach the
-model (17 groups, ~118 tools; `teams` and `github` are off by default —
-`/groups`). Contracts the rest of the system depends on:
+model (`teams` and `github` are off by default; `phone` is enabled only for iOS
+gateway turns). Contracts the rest of the system depends on:
 
 - A tool returns a **string**. Failure is a leading `ERROR:` — the engine keys
   `ok` off that prefix, and `dispatch()` converts exceptions into it.
-- `ToolContext` carries `state`, `engine`, `background`, `tasks`, and the
-  per-turn `read_cache`. `ctx.confirm()` is a no-op `True`: approval already
+- `ToolContext` carries `state`, `engine`, `background`, `tasks`, phone/widget
+  callbacks, and the per-turn `read_cache`. `ctx.confirm()` is a no-op `True`: approval already
   happened in `can_use_tool`, and re-prompting would deadlock the gateway.
 - Path arguments go through `_resolve_contained()`; ids that become filenames
   go through a validator (see `tasks._safe_id`).
@@ -222,3 +230,6 @@ and LAN exposure is opt-in (`gateway.lan` + `gateway.token`).
 - A new slash command needs an entry in `prompt.COMMAND_GROUPS` (the single
   catalog feeding both `/help` and the completion popup) *and* a branch in
   `cli.repl()`. `tests/test_polish.py` asserts the two match.
+- Web slash commands use `gateway.GATEWAY_COMMANDS`; keep that catalog,
+  `Gateway._handle_cmd()`, and the command-matrix tests in sync. Do not add a
+  web command when an existing chat control is the clearer interaction.

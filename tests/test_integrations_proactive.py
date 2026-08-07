@@ -129,7 +129,9 @@ def test_remote_event_removal_is_reflected_locally(tmp_path, monkeypatch):
     )
     second = integrations.sync_connection(connection["id"], session=FakeSession(only_one))
     assert second["removed"] == 1
-    cancelled = [e for e in personal_os.list_events(include_cancelled=True) if e["status"] == "cancelled"]
+    cancelled = [
+        e for e in personal_os.list_events(include_cancelled=True) if e["status"] == "cancelled"
+    ]
     assert cancelled[0]["external_id"] == "holiday-1"
 
     integrations.sync_connection(connection["id"], session=FakeSession())
@@ -192,9 +194,7 @@ class FakeIMAP:
         return "BYE", []
 
 
-def test_email_headers_sync_into_unified_inbox_without_exposing_credentials(
-    tmp_path, monkeypatch
-):
+def test_email_headers_sync_into_unified_inbox_without_exposing_credentials(tmp_path, monkeypatch):
     isolate(tmp_path, monkeypatch)
     connection = inbox.create_email_connection(
         "Work mail",

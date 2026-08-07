@@ -3,6 +3,7 @@
 Each test names the behaviour that was wrong before, so a future change that
 reintroduces it fails here rather than in front of a user.
 """
+
 from __future__ import annotations
 
 import os
@@ -103,8 +104,7 @@ class TestDroppedToolCallsStayAnswered(_PrivateConfigDir):
             events = list(eng._execute_and_record([("task_list", {}, "tool")]))
 
         self.assertTrue(
-            any(e.kind == "warn" and "loop detected" in e.data.get("text", "")
-                for e in events),
+            any(e.kind == "warn" and "loop detected" in e.data.get("text", "") for e in events),
             "expected the last repeat to be steered",
         )
         tool_msgs = [m for m in eng.messages if m.get("role") == "tool"]
@@ -121,14 +121,16 @@ class TestDroppedToolCallsStayAnswered(_PrivateConfigDir):
         # crosses the hard-abort threshold.
         eng._recent_results = [("note_search", result)] * (LOOP_THRESHOLD * 2 - 1)
 
-        eng.messages.append({
-            "role": "assistant",
-            "content": "",
-            "tool_calls": [
-                {"function": {"name": "note_search", "arguments": args}},
-                {"function": {"name": "note_search", "arguments": args}},
-            ],
-        })
+        eng.messages.append(
+            {
+                "role": "assistant",
+                "content": "",
+                "tool_calls": [
+                    {"function": {"name": "note_search", "arguments": args}},
+                    {"function": {"name": "note_search", "arguments": args}},
+                ],
+            }
+        )
         calls = [("note_search", args, "tool"), ("note_search", args, "tool")]
         list(eng._execute_and_record(calls))
 
@@ -144,8 +146,9 @@ class TestReadFileRangeCache(_PrivateConfigDir):
     def test_second_range_is_served(self) -> None:
         target = self.tmp / "long.txt"
         target.write_text("\n".join(f"line {i}" for i in range(1, 101)))
-        ctx = ToolContext(root=self.tmp, read_cache={},
-                          state=AppState(workspace=self.tmp, home=self.tmp))
+        ctx = ToolContext(
+            root=self.tmp, read_cache={}, state=AppState(workspace=self.tmp, home=self.tmp)
+        )
 
         first = t_read_file({"path": str(target), "start_line": 1, "end_line": 10}, ctx)
         self.assertIn("line 1", first)
@@ -161,13 +164,12 @@ class TestReadFileRangeCache(_PrivateConfigDir):
     def test_editing_invalidates_every_cached_range(self) -> None:
         target = self.tmp / "edit-me.txt"
         target.write_text("alpha\nbravo\ncharlie\n")
-        ctx = ToolContext(root=self.tmp, read_cache={},
-                          state=AppState(workspace=self.tmp, home=self.tmp))
+        ctx = ToolContext(
+            root=self.tmp, read_cache={}, state=AppState(workspace=self.tmp, home=self.tmp)
+        )
 
         t_read_file({"path": str(target), "start_line": 1, "end_line": 2}, ctx)
-        t_edit_file(
-            {"path": str(target), "old_string": "bravo", "new_string": "BRAVO"}, ctx
-        )
+        t_edit_file({"path": str(target), "old_string": "bravo", "new_string": "BRAVO"}, ctx)
         after = t_read_file({"path": str(target), "start_line": 1, "end_line": 2}, ctx)
         self.assertNotIn("CACHED", after)
         self.assertIn("BRAVO", after)
@@ -184,8 +186,7 @@ class TestLineEndingsSurviveEdits(_PrivateConfigDir):
         # old_string spans a line break with a bare LF, so the exact-match path
         # misses and the EOL-normalizing recovery path handles it.
         result = t_edit_file(
-            {"path": str(target), "old_string": "alpha\nbravo",
-             "new_string": "alpha\nBRAVO"},
+            {"path": str(target), "old_string": "alpha\nbravo", "new_string": "alpha\nBRAVO"},
             ctx,
         )
         self.assertTrue(result.startswith("OK:"), result)
@@ -198,8 +199,7 @@ class TestLineEndingsSurviveEdits(_PrivateConfigDir):
         ctx = ToolContext(root=self.tmp, state=AppState(workspace=self.tmp, home=self.tmp))
 
         t_edit_file(
-            {"path": str(target), "old_string": "alpha\nbravo",
-             "new_string": "alpha\nBRAVO"},
+            {"path": str(target), "old_string": "alpha\nbravo", "new_string": "alpha\nBRAVO"},
             ctx,
         )
         self.assertEqual(target.read_bytes(), b"alpha\nBRAVO\ncharlie\n")
@@ -286,10 +286,14 @@ class TestCompactionKeepsToolResults(unittest.TestCase):
         messages = [
             {"role": "system", "content": "sys"},
             {"role": "user", "content": "search twice"},
-            {"role": "assistant", "content": "", "tool_calls": [
-                {"function": {"name": "grep", "arguments": {}}},
-                {"function": {"name": "grep", "arguments": {}}},
-            ]},
+            {
+                "role": "assistant",
+                "content": "",
+                "tool_calls": [
+                    {"function": {"name": "grep", "arguments": {}}},
+                    {"function": {"name": "grep", "arguments": {}}},
+                ],
+            },
             {"role": "tool", "name": "grep", "content": "(no matches)"},
             {"role": "tool", "name": "grep", "content": "(no matches)"},
         ]
@@ -343,7 +347,7 @@ class TestBrowserBridgeTimeout(unittest.TestCase):
 
         bridge = BrowserBridge(port=0)
         bridge._server = object()
-        bridge.send("read", {}, timeout=0.05)      # times out, abandons id 1
+        bridge.send("read", {}, timeout=0.05)  # times out, abandons id 1
         bridge._deliver_result(1, True, {"text": "late"})
         self.assertEqual(bridge._results, {})
 

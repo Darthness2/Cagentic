@@ -10,7 +10,6 @@ from typing import Any
 
 from . import inbox, personal_os, storage
 
-
 _NS = "os_routines"
 KINDS = {"daily_plan", "inbox_digest", "weekly_review", "custom"}
 DEFAULT_PROMPTS = {
@@ -167,7 +166,9 @@ def due_routines(now: float | None = None) -> list[dict]:
             continue
         if current.weekday() not in set(routine.get("days") or range(7)):
             continue
-        hour, minute = (int(part) for part in str(routine.get("schedule_time") or "08:00").split(":"))
+        hour, minute = (
+            int(part) for part in str(routine.get("schedule_time") or "08:00").split(":")
+        )
         if current_minutes < hour * 60 + minute:
             continue
         if routine.get("last_run_key") == current_key:
@@ -176,7 +177,9 @@ def due_routines(now: float | None = None) -> list[dict]:
     return due
 
 
-def mark_run(routine_id: str, *, output: str = "", error: str = "", now: float | None = None) -> dict | None:
+def mark_run(
+    routine_id: str, *, output: str = "", error: str = "", now: float | None = None
+) -> dict | None:
     routine = _match(routine_id)
     if routine is None:
         return None
@@ -193,7 +196,10 @@ def mark_run(routine_id: str, *, output: str = "", error: str = "", now: float |
 def build_prompt(routine: dict) -> str:
     return "\n\n".join(
         (
-            str(routine.get("prompt") or DEFAULT_PROMPTS.get(str(routine.get("kind")), DEFAULT_PROMPTS["custom"])),
+            str(
+                routine.get("prompt")
+                or DEFAULT_PROMPTS.get(str(routine.get("kind")), DEFAULT_PROMPTS["custom"])
+            ),
             personal_os.system_context(),
             inbox.system_context(),
             "Return a short proactive briefing with concrete next actions. Do not claim you changed anything unless you actually did.",

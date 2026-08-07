@@ -5,7 +5,7 @@ from pathlib import Path
 
 from cagentic import projects, reminders, sessions
 from cagentic.agent import Agent
-from cagentic.cli import main, parse_args
+from cagentic.cli import main
 from cagentic.completion import script
 from cagentic.gateway import Gateway
 from cagentic.ollama_client import OllamaClient
@@ -38,12 +38,12 @@ def test_sqlite_reminder_roundtrip(tmp_path, monkeypatch):
     assert reminders.delete(reminder.id)
 
 
-def test_cli_management_flags_parse_and_completion():
-    args = parse_args(["--doctor", "--json"])
-    assert args.doctor and args.json
+def test_cli_management_commands_and_completion(capsys):
+    assert main(["--help"]) == 0
+    assert "--doctor" in capsys.readouterr().out
     assert "complete" in script("bash")
     assert "#compdef" in script("zsh")
-    assert "complete -c cagentic" in script("fish")
+    assert "complete --no-files --command cagentic" in script("fish")
 
 
 def test_module_entrypoint_propagates_exit_status():

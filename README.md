@@ -21,7 +21,7 @@ Cagentic **remembers things about you** across sessions, keeps a persistent remi
 - **Full coding agent** (absorbed from Collama) — atomic `multi_edit` batches, parser-only `check_syntax` for 12+ languages, Jupyter `notebook_edit`, a worktree stack for sub-projects, PowerShell support, sub-agents (`agent_call` / `agent_call_async`), a persistent cross-session task graph, and an `/effort low|medium|high` dial for how hard the model works.
 - **Agent teams** (optional, `/groups enable teams`) — long-lived teammate personas with mailboxes; a coordinator processes each teammate's mail by forking sub-agents and can auto-claim matching tasks from the task graph.
 - **Multi-provider** — use Ollama locally, or connect OpenAI and Anthropic for cloud models when you need more power.
-- **iOS companion** — the Cagentic iOS app's chat *and* coding tabs both connect to the same `/gateway`. To reach it from your phone, set `"gateway": {"lan": true, "token": "<secret>"}` in `~/.config/cagentic/config.json` (LAN exposure is off by default; the token is required on every request).
+- **iOS companion** — the Cagentic iOS app's chat *and* coding tabs both connect to the same `/gateway`, with phone actions and native cards for structured results. To reach it from your phone, set `"gateway": {"lan": true, "token": "<secret>"}` in `~/.config/cagentic/config.json` (LAN exposure is off by default; the token is required on every request).
 
 ## Requirements
 
@@ -62,15 +62,20 @@ pip install cagentic
 ## Quickstart
 
 ```bash
-cagentic                                      # interactive REPL
-cagentic -p "remind me to call mom tonight"   # one-shot
-cagentic --name Sam                           # tell it who you are
-cagentic -m qwen2.5:7b                        # pick a model
+cagentic                                           # interactive REPL
+cagentic -p "remind me to call mom tonight"        # one-shot
+cagentic --name Sam                                # save your name
+cagentic -m qwen2.5:7b                             # pick a model for this session
+cagentic --no-yolo                                 # require tool approval
 ```
 
-First launch lists installed Ollama models and asks which to use; your choice is saved to `~/.config/cagentic/config.json`.
+Running `cagentic` opens the conversational prompt. On the first run, installed
+Ollama models are listed and your selection is saved to
+`~/.config/cagentic/config.json`.
 
 Type `/` in the REPL to see slash-command completions (`/notes`, `/remind`, `/mcp`, etc.).
+Type `@` anywhere in a prompt to complete files from the active workspace.
+Use `Esc+Enter` for a newline and Enter to send.
 
 ## How it remembers you
 
@@ -156,6 +161,8 @@ Cagentic launches each server as a subprocess on first use and keeps a long-live
 | `/remind add <text>` | add one (use `text @ in 2h` for time) |
 | `/remind done <id>` | mark done |
 | `/remind delete <id>` | delete |
+| `/remind all` | include completed reminders |
+| `/remind clear` | mark every active reminder done |
 | `/name <your name>` | tell the assistant what to call you |
 
 ### MCP, browser & web
@@ -180,7 +187,7 @@ Cagentic launches each server as a subprocess on first use and keeps a long-live
 | `/delete <id>` | delete a saved conversation |
 | `/clear` | wipe history (keeps the saved session) |
 | `/retry` | re-run your last message |
-| `/exit`, `/quit` | leave |
+| `/quit` | leave |
 
 ### Files
 | | |
@@ -193,11 +200,11 @@ Cagentic launches each server as a subprocess on first use and keeps a long-live
 | | |
 |---|---|
 | `/tools` | list every tool the model can call |
-| `/groups` | manage which tool groups are sent (default: files, web, notes, reminders, life, mcp, browser, shell, tasks, interaction, planning, system, coding, worktree, subagent; opt-in: teams, github) |
+| `/groups [enable\|disable <name>]` | manage which tool groups are sent (default: files, web, notes, reminders, life, mcp, browser, shell, tasks, interaction, planning, system, coding, worktree, subagent; opt-in: teams, github; phone is enabled for iOS turns) |
 | `/plan on\|off` | read-only mode |
 | `/effort low\|medium\|high` | how hard the model works per turn |
-| `/todo` | per-session todo list |
-| `/yolo` | toggle auto-approve for tool calls |
+| `/todo [add <text>\|done <n>\|clear]` | manage the per-session todo list |
+| `/yolo [on\|off]` | toggle auto-approve for tool calls |
 
 ### System
 | | |
@@ -206,9 +213,9 @@ Cagentic launches each server as a subprocess on first use and keeps a long-live
 | `/model [name]`, `/models` | switch / list models |
 | `/host [url]` | switch Ollama host |
 | `/config`, `/set <key> <value>` | view / edit saved config |
-| `/login github <token>` | save a GitHub PAT |
-| `/login openai <key>` | save OpenAI API key |
-| `/login anthropic <key>` | save Anthropic API key |
+| `/login github` | save a GitHub PAT using a hidden prompt |
+| `/login openai` | save an OpenAI API key using a hidden prompt |
+| `/login anthropic` | save an Anthropic API key using a hidden prompt |
 | `/logout <service>` | remove a saved key |
 | `/whoami` | show authenticated GitHub user |
 | `/stream on\|off` | toggle token streaming |
@@ -221,9 +228,14 @@ Reference files directly in your prompt — Cagentic inlines them before sending
 ```
 help me plan a trip — see @~/trip-ideas.md
 fix the typo in @~/Documents/letter.txt:42
+compare @"release notes.md":10-30 with @src/changelog.md
 ```
 
-Supports `@path`, `@path:N`, and `@path:N-M`. Works for PDFs and Word docs too — `@~/Documents/contract.pdf` inlines the extracted text.
+Type `@` to open workspace-aware file completion; it follows `/cd` changes and
+quotes paths containing spaces automatically. Supports `@path`, `@path:N`,
+`@path:N-M`, and quoted paths. Works for PDFs and Word docs too —
+`@~/Documents/contract.pdf` inlines the extracted text. Cagentic prints an
+attachment count before the model starts so the context is never ambiguous.
 
 ## Reading PDFs & Word documents
 
@@ -249,7 +261,7 @@ Cagentic ships with a companion Chrome extension (in the `extension/` folder). O
 
 Run `/browser` in the REPL any time to check the connection or get the exact folder path. Then just ask: *"what's on this page?"*, *"open my email"*, *"click the login button"*, *"fill the search box with "weekend trips" and submit"*.
 
-Browser tools: `browser_status`, `browser_tabs`, `browser_read`, `browser_open`, `browser_navigate`, `browser_click`, `browser_fill`, `browser_eval`, `browser_close`. The bridge port is configurable (`browser.port` in config, default `8765`); set the matching port in the extension's popup if you change it.
+Browser tools include `browser_status`, `browser_tabs`, `browser_read`, `browser_open`, `browser_navigate`, `browser_click`, `browser_fill`, `browser_screenshot`, `browser_links`, `browser_download`, `browser_eval`, and `browser_close`. The bridge port is configurable (`browser.port` in config, default `8765`); set the matching port in the extension's popup if you change it.
 
 ## The web UI — `/gateway`
 
@@ -262,6 +274,8 @@ Browser tools: `browser_status`, `browser_tabs`, `browser_read`, `browser_open`,
 ```
 
 It runs its own conversation (separate from the terminal session) but shares your notes, reminders, and connected services. The port is `gateway.port` in config (default `8700`). Like everything else, it's bound to localhost only.
+
+Type `/help` in the web composer for its focused command list. Chat saving is automatic, and the message **resend**, **edit**, and **delete** controls replace redundant web-only `/save` and `/undo` commands; `/retry` regenerates the latest reply.
 
 If the configured port is already occupied, Cagentic automatically tries the next 20 ports and prints the URL it selected. Set `gateway.auto_port` to `false` if you prefer startup to fail instead.
 
@@ -288,15 +302,24 @@ The frontend is shipped as package assets rather than embedded in Python. API ch
 ## Setup, diagnostics, and saved context
 
 ```bash
-cagentic --setup                  # guided model/name/workspace/gateway setup
-cagentic --doctor                # readable health report
-cagentic --doctor --json         # automation-friendly health report
-cagentic --completion bash       # also zsh or fish
-cagentic --sessions              # list conversations without starting a model
-cagentic --search "auth bug"      # search titles and message content
-cagentic --context SESSION_ID    # token usage
-cagentic --compact SESSION_ID    # compact older context, keep recent turns
+cagentic setup --interactive                       # guided setup
+cagentic doctor                                    # readable health report
+cagentic doctor --format json                      # machine-readable report
+cagentic completion bash                           # also zsh or fish
+cagentic sessions                                  # list conversations
+cagentic search "auth bug"                         # search saved context
+cagentic context SESSION_ID                        # inspect token usage
+cagentic compact SESSION_ID --dry-run              # preview compaction
 ```
+
+Use `-h`/`--help` for the complete flag reference and `--version` for the
+installed version. Commands use `--format json`; top-level compatibility modes
+also accept `--json`. Mutating modes offer `--dry-run`. Exit status is `0` for
+success, `1` for a runtime failure, and `2` for invalid usage.
+
+The earlier top-level forms such as `cagentic --doctor` and
+`cagentic -p "prompt"` remain supported for scripts and muscle memory; the
+command forms shown above are the discoverable interface for new usage.
 
 Inside the REPL, `/search`, `/context`, and `/compact` provide the same core workflows. Unknown slash commands suggest the closest known command.
 
@@ -321,18 +344,35 @@ Sessions, projects, tasks, and reminders are indexed transactionally in `~/.conf
 
 ## Look & feel
 
-Cagentic has its own visual identity — a warm "dusk" palette (mauve, peach, gold, plum) instead of a cold tech teal. The welcome screen is a small cozy card rather than a giant logo, it greets you by time of day, and the markers are consistent throughout:
+Cagentic uses a restrained graphite-and-indigo terminal system with a compact
+startup summary that preserves scrollback. Help, sessions, diagnostics, tool
+activity, and Markdown responses reflow for narrow terminals; `NO_COLOR=1`
+produces clean plain text rather than exposing Markdown syntax.
+
+The startup block makes the active model, workspace, tool state, and safety
+mode explicit. With `prompt_toolkit` available, the footer keeps that context
+live as you use `/cd`, `/model`, `/plan`, or `/yolo`, then progressively
+shortens itself in split panes. Permission requests use a dedicated approval
+surface with a plain-language action, target workspace, visible deny-by-default
+choice, and separately disclosed session-wide options.
 
 | | |
 |---|---|
-| `✦` | Cagentic speaking |
-| `◦` | quiet thinking |
-| `·` | a small note |
-| `↳` | a tool it reached for |
-| `✓` / `✗` | how that turned out |
-| `❀` | a plan |
+| `›` | your prompt |
+| `●` | Cagentic speaking |
+| `·` | context or progress |
+| `→` | a tool call |
+| `✓` / `×` | success or failure |
+| `!` | something needs attention |
 
-The working spinner is a soft sparkle that breathes in and out. Set `CAGENTIC_SPINNER=braille` for a plainer one, or `NO_COLOR=1` to drop colors entirely.
+The default working indicator is a compact braille spinner. Set
+`CAGENTIC_SPINNER=ascii` for an ASCII fallback, `CAGENTIC_SPINNER=spark` for
+the decorative animation, or `CAGENTIC_SPINNER=off` to disable it. Use
+`CAGENTIC_STATUS_BAR=off` to hide the per-turn footer and
+`CAGENTIC_CLEAR_SCREEN=1` to clear scrollback at startup. Set
+`CAGENTIC_MOTION=reduce` to disable animated cursor painting everywhere; dumb
+terminals, redirected output, and CI logs automatically receive stable output
+without cursor-control escapes.
 
 ## Personality
 
@@ -345,15 +385,21 @@ You can amend it for a given workspace by dropping a `CAGENTIC.md` or `AGENTS.md
 Cagentic works with Ollama by default, but you can also use cloud models:
 
 ```bash
-# Set your API key
-cagentic -p "/login openai sk-..."
+# Save a key at a hidden prompt (never pass the key as an argument)
+cagentic --login openai
+cagentic --login anthropic
 
 # Switch to a cloud model
 cagentic -m openai:gpt-4o
 cagentic -m anthropic:claude-sonnet-4-20250514
+
+# Remove a saved key
+cagentic --logout openai
 ```
 
-Keys are stored in `~/.config/cagentic/config.json` (chmod 600). You can also use environment variables: `OPENAI_API_KEY`, `ANTHROPIC_API_KEY`.
+Keys are stored in `~/.config/cagentic/config.json` (chmod 600). In an active
+session, `/login openai`, `/login anthropic`, and `/logout <service>` provide
+the same controls. You can also use `OPENAI_API_KEY` or `ANTHROPIC_API_KEY`.
 
 ## Support & Licensing
 

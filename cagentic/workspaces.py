@@ -26,7 +26,7 @@ class WorkspacePolicy:
         for raw in roots:
             try:
                 root = Path(raw).expanduser().resolve(strict=True)
-            except (OSError, RuntimeError):
+            except (OSError, RuntimeError, TypeError, ValueError):
                 continue
             if root.is_dir() and os.access(root, os.R_OK | os.X_OK):
                 unique[str(root)] = root
@@ -35,7 +35,9 @@ class WorkspacePolicy:
     @classmethod
     def from_config(cls, config: dict, initial: Path) -> "WorkspacePolicy":
         env = os.environ.get("CAGENTIC_WORKSPACE_ROOTS")
-        configured = (config.get("gateway") or {}).get("workspace_roots")
+        raw_gateway = config.get("gateway")
+        gateway = raw_gateway if isinstance(raw_gateway, dict) else {}
+        configured = gateway.get("workspace_roots")
         if env is not None:
             roots: list[str | Path] = [p for p in env.split(os.pathsep) if p]
         elif configured:

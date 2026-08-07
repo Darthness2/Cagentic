@@ -38,20 +38,27 @@ def render(
     out = []
     shown = diff_lines[:max_lines]
     for line in shown:
+        line = ui.sanitize(line)
         if line.startswith("+++") or line.startswith("---"):
-            out.append(ui.color(line, ui.BOLD))
+            rendered = ui.color(line, ui.BOLD)
         elif line.startswith("@@"):
-            out.append(ui.color(line, ui.DUSK))
+            rendered = ui.color(line, ui.DUSK)
         elif line.startswith("+"):
-            out.append(ui.color(line, ui.GREEN))
+            rendered = ui.color(line, ui.GREEN)
         elif line.startswith("-"):
-            out.append(ui.color(line, ui.RED))
+            rendered = ui.color(line, ui.RED)
         else:
-            out.append(ui.color(line, ui.SOFT))
+            rendered = ui.color(line, ui.SOFT)
+        out.append(ui.truncate(rendered, ui.width()))
 
     remaining = len(diff_lines) - len(shown)
     if remaining > 0:
-        out.append(ui.color(f"  … +{remaining} more diff line(s) (truncated)", ui.SOFT))
+        out.append(
+            ui.truncate(
+                ui.color(f"  … +{remaining} more diff line(s) (truncated)", ui.SOFT),
+                ui.width(),
+            )
+        )
     return "\n".join(out)
 
 

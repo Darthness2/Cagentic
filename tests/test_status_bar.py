@@ -63,12 +63,28 @@ class StatusBarCursorSafetyTests(unittest.TestCase):
         self._fake = _FakeTTY()
         sys.stdout = self._fake
         # Force the bar on regardless of the environment running the tests.
-        self._prev_env = os.environ.pop("COLLAMA_STATUS_BAR", None)
+        self._prev_env = {
+            name: os.environ.pop(name, None)
+            for name in (
+                "CAGENTIC_STATUS_BAR",
+                "COLLAMA_STATUS_BAR",
+                "CAGENTIC_MOTION",
+                "CAGENTIC_CURSOR_CONTROL",
+                "TERM",
+            )
+        }
+        # The lifecycle assertions exercise real cursor painting. CI commonly
+        # exports TERM=dumb, which the production UI now correctly treats as
+        # incapable even when this test swaps in a fake TTY.
+        os.environ["TERM"] = "xterm-256color"
 
     def tearDown(self) -> None:
         sys.stdout = self._real_stdout
-        if self._prev_env is not None:
-            os.environ["COLLAMA_STATUS_BAR"] = self._prev_env
+        for name, value in self._prev_env.items():
+            if value is not None:
+                os.environ[name] = value
+            else:
+                os.environ.pop(name, None)
 
     def _run_lifecycle(self) -> str:
         bar = ui.StatusBar(ctx_tokens=1234)
@@ -103,6 +119,13 @@ class StatusBarCursorSafetyTests(unittest.TestCase):
             "scroll region was changed AFTER the last cursor restore — the "
             "cursor ends up homed and output overwrites the screen",
         )
+
+    def test_cagentic_environment_switch_disables_the_bar(self) -> None:
+        os.environ["CAGENTIC_STATUS_BAR"] = "off"
+        bar = ui.StatusBar(ctx_tokens=1234)
+        bar.start()
+        bar.stop()
+        self.assertEqual(self._fake.getvalue(), "")
 
 
 if __name__ == "__main__":

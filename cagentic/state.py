@@ -36,6 +36,7 @@ class AppState:
     yolo: bool = False  # auto-approve all tool calls
     insecure_ssl: bool = False  # turn off TLS verify (school MITM)
     tools_enabled: bool = True  # native ollama tool calls vs text-protocol
+    dry_run: bool = False  # hard safety gate: external mutations are blocked
 
     # Effort dial — how much effort/thoroughness the model applies. One of
     # "low" | "medium" | "high". Injected into the system prompt; higher means

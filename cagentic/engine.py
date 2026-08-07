@@ -8,14 +8,15 @@ from __future__ import annotations
 import json
 import logging
 import re
+import tempfile
 from concurrent.futures import ThreadPoolExecutor, as_completed
 from dataclasses import dataclass, field
 from pathlib import Path
-from typing import Any, Iterator, Literal
+from typing import Any, Callable, Iterator, Literal
 
 from . import ui
 from .background import BackgroundExecutor
-from .config import set_value
+from .config import set_model_capability
 from .ollama_client import OllamaClient, OllamaError, ToolsUnsupportedError
 from .permissions import CONCURRENT_SAFE, Resolver, auto_deny_resolver, can_use_tool
 from .services.compact import (
@@ -488,14 +489,30 @@ After the call, STOP. The harness emits tool outputs; you must NOT.
     return base
 
 
-_MENTION_RX = re.compile(r"(?<![\w/.])@([A-Za-z0-9_./\\-]+(?::\d+(?:-\d+)?)?)")
+_MENTION_RX = re.compile(
+    r"""(?<![\w/.])@
+    (?:
+        "(?P<double>[^"\r\n]+)"
+        |'(?P<single>[^'\r\n]+)'
+        |(?P<bare>(?:[A-Za-z]:[\\/])?[~\w./\\-]+)
+    )
+    (?::(?P<start>\d+)(?:-(?P<end>\d+))?)?
+    """,
+    re.VERBOSE,
+)
 
 
-def _resolve_mention(token: str, workspace: Path, home: Path):
-    line_start: int | None = None
-    line_end: int | None = None
+def _resolve_mention(
+    token: str,
+    workspace: Path,
+    home: Path,
+    *,
+    line_start: int | None = None,
+    line_end: int | None = None,
+    parse_range: bool = True,
+):
     path_part = token
-    if ":" in token:
+    if parse_range and ":" in token:
         head, tail = token.rsplit(":", 1)
         m = re.fullmatch(r"(\d+)(?:-(\d+))?", tail)
         if m:
@@ -504,8 +521,13 @@ def _resolve_mention(token: str, workspace: Path, home: Path):
             line_end = int(m.group(2)) if m.group(2) else line_start
     import os as _os
 
-    expanded = _os.path.expanduser(_os.path.expandvars(path_part))
-    p = Path(expanded)
+    expanded = _os.path.expandvars(path_part)
+    if expanded == "~":
+        p = home
+    elif expanded.startswith("~/") or expanded.startswith("~\\"):
+        p = home / expanded[2:]
+    else:
+        p = Path(_os.path.expanduser(expanded))
     if not p.is_absolute():
         p = workspace / p
     if p.exists() and p.is_file():
@@ -519,7 +541,17 @@ def process_user_input(raw: str, workspace: Path | None = None, home: Path | Non
     attachments: list[str] = []
     seen: set[Path] = set()
     for m in _MENTION_RX.finditer(raw):
-        resolved = _resolve_mention(m.group(1), workspace, home or Path.home())
+        path_part = m.group("double") or m.group("single") or m.group("bare")
+        start = int(m.group("start")) if m.group("start") else None
+        end = int(m.group("end")) if m.group("end") else start
+        resolved = _resolve_mention(
+            path_part,
+            workspace,
+            home or Path.home(),
+            line_start=start,
+            line_end=end,
+            parse_range=False,
+        )
         if resolved is None:
             continue
         p, s, e = resolved
@@ -550,7 +582,7 @@ def process_user_input(raw: str, workspace: Path | None = None, home: Path | Non
     if not attachments:
         return {"role": "user", "content": raw}
     body = raw + "\n\n" + "\n\n".join(attachments)
-    return {"role": "user", "content": body}
+    return {"role": "user", "content": body, "_attachment_count": len(attachments)}
 
 
 def normalize_messages_for_api(messages: list[dict]) -> list[dict]:
@@ -583,6 +615,8 @@ class StreamingToolExecutor:
         self.background = background
         self.tasks = tasks
         self.teams = teams
+        self.phone_action: Callable[[str, dict], dict | None] | None = None
+        self.widget_action: Callable[[str, str, dict], str | None] | None = None
 
     def execute(self, calls):
         if not calls:
@@ -659,6 +693,8 @@ class StreamingToolExecutor:
             tasks=self.tasks,
             teams=self.teams,
             read_cache=getattr(self.engine, "_read_cache", None),
+            phone_action=self.phone_action,
+            widget_action=self.widget_action,
         )
 
         spin_label = f"{name}  {summary[:60]}" if summary else name
@@ -714,11 +750,21 @@ class QueryEngine:
         self.session_id = session_id
         self.stream = stream
         self.permission_resolver: Resolver = permission_resolver or auto_deny_resolver
-        self.task_graph = TaskGraph()
+        self._dry_run_storage: Any = None
+        if state.dry_run:
+            self._dry_run_storage = tempfile.TemporaryDirectory(prefix="cagentic-dry-run-")
+            dry_run_root = Path(self._dry_run_storage.name)
+            self.task_graph = TaskGraph(dry_run_root / "tasks")
+        else:
+            self.task_graph = TaskGraph()
         self.background = BackgroundExecutor(tasks=self.task_graph)
         from .teams import TeamRegistry
 
-        self.teams = TeamRegistry()
+        self.teams = (
+            TeamRegistry(Path(self._dry_run_storage.name) / "teams")
+            if self._dry_run_storage is not None
+            else TeamRegistry()
+        )
         self.executor = StreamingToolExecutor(
             state,
             self.permission_resolver,
@@ -771,6 +817,10 @@ class QueryEngine:
         self.messages = [{"role": "system", "content": self._system_content()}]
         self._usage = {"input": 0, "output": 0, "ms": 0}
 
+    def _record_transcript(self, role: str, content: Any, **extra: Any) -> None:
+        if not self.state.dry_run:
+            record_transcript(self.session_id or "", role, content, **extra)
+
     def load_messages(self, messages: list[dict]) -> None:
         first_content = str(messages[0].get("content") or "") if messages else ""
         if (
@@ -795,7 +845,7 @@ class QueryEngine:
         self._recent_results = []
         self._abort_turn = False
         self._read_cache = {}
-        resets = {}
+        resets: dict[str, object] = {}
         if self.state.edit_fails:
             resets["edit_fails"] = {}
         if self.state.files_read:
@@ -805,9 +855,13 @@ class QueryEngine:
         _poke_browser(self.state, model=self.model, activity="thinking")
 
         user_msg = process_user_input(prompt, workspace=self.state.workspace, home=self.state.home)
+        attachment_count = int(user_msg.pop("_attachment_count", 0))
         yield Message("user", {"text": prompt})
+        if attachment_count:
+            noun = "file" if attachment_count == 1 else "files"
+            yield Message("info", {"text": f"attached {attachment_count} {noun} to this turn"})
 
-        record_transcript(self.session_id or "", "user", prompt)
+        self._record_transcript("user", prompt)
         self.messages.append(user_msg)
 
         _pre = estimate_tokens(self.messages)
@@ -817,9 +871,10 @@ class QueryEngine:
                 "info",
                 {"text": f"compacting context (~{_pre:,} → ≤{COMPACT_TOKENS:,} tokens)…"},
             )
+        ollama_config = self.config.get("ollama") if self.config else None
         summarize_fn = (
             self._summarize_with_model
-            if (self.config and self.config.get("ollama", {}).get("llm_summarize"))
+            if isinstance(ollama_config, dict) and ollama_config.get("llm_summarize")
             else None
         )
         for r in manage_context(
@@ -935,7 +990,12 @@ class QueryEngine:
                 self.state.update(tools_enabled=False)
                 self.refresh_system_prompt()
                 if self.config is not None:
-                    set_value(self.config, f"models.{self.model}.tools_supported", False)
+                    set_model_capability(
+                        self.config,
+                        self.state.active_model_spec or self.model,
+                        "tools_supported",
+                        False,
+                    )
                 continue
             except OllamaError as e:
                 yield Message("error", {"text": str(e)})
@@ -951,8 +1011,7 @@ class QueryEngine:
             msg["content"] = cleaned
             self.messages.append(msg)
 
-            record_transcript(
-                self.session_id or "",
+            self._record_transcript(
                 "assistant",
                 cleaned,
                 tool_calls=msg.get("tool_calls") or [],
@@ -1218,10 +1277,12 @@ class QueryEngine:
         if role == "tool":
             self.messages.append({"role": "tool", "name": name, "content": text})
         else:
-            self.messages.append({
-                "role": "user",
-                "content": f"Tool result for {name}:\n{text}",
-            })
+            self.messages.append(
+                {
+                    "role": "user",
+                    "content": f"Tool result for {name}:\n{text}",
+                }
+            )
 
     def _execute_and_record(self, calls):
         # New assistant turn → reset the per-turn dedup sets so a repeated
@@ -1236,7 +1297,8 @@ class QueryEngine:
             if self._check_loop(name, args):
                 yield Message("warn", {"text": f"loop detected on {name} — steered."})
                 self._record_unrun_call(
-                    name, role,
+                    name,
+                    role,
                     "identical call repeated — suppressed by the loop guard. "
                     "Try a different approach.",
                 )
@@ -1274,7 +1336,7 @@ class QueryEngine:
                 if images:
                     msg["images"] = images
                 self.messages.append(msg)
-                record_transcript(self.session_id or "", "tool", result, name=name)
+                self._record_transcript("tool", result, name=name)
 
                 seen = self._result_loop_count(name, result)
                 steer_key = (name, (result or "")[:240])
@@ -1290,7 +1352,8 @@ class QueryEngine:
                     # list stays well-formed for the cloud providers.
                     for pending_name, _pending_args, pending_role in cleaned_calls[answered:]:
                         self._record_unrun_call(
-                            pending_name, pending_role,
+                            pending_name,
+                            pending_role,
                             "not run — the turn was ended after a repeated-result loop.",
                         )
                     return
