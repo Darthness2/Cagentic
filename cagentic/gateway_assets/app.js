@@ -17,7 +17,7 @@ let state = {
   chats: [], currentId: null, settings: {}, busy: false,
   voiceOut: false, voiceName: '', renderedPanels: new Set(), closedWindows: [],
   projects: [], activeProjectId: null,
-  os: null, osView: 'today', userName: '', architectureMode: 'all', selectedCapability: '',
+  userName: '',
   _openProjects: new Set(), _openUnaffiliated: true, _openProjectsRoot: true,
 };
 
@@ -89,47 +89,6 @@ setInterval(updateClock, 1000); updateClock();
   resize(); initParts(); draw();
 })();
 
-// ---- COGNITIVE CORE --------------------------------------------------------
-(function initCognitiveCore(){
-  const canvas=$('#coreCanvas');if(!canvas)return;const ctx=canvas.getContext('2d');
-  const reduced=window.matchMedia('(prefers-reduced-motion: reduce)').matches;
-  let width=0,height=0,dpr=1,time=0,nodes=[];
-  function seed(){
-    nodes=[];const count=Math.max(90,Math.min(190,Math.round(width*height/3100)));
-    for(let i=0;i<count;i++){
-      const theta=Math.random()*Math.PI*2,phi=Math.acos(2*Math.random()-1),radius=.2+Math.pow(Math.random(),.55)*.8;
-      nodes.push({theta,phi,radius,size:.6+Math.random()*1.8,phase:Math.random()*Math.PI*2});
-    }
-  }
-  function resize(){
-    const box=canvas.getBoundingClientRect();dpr=Math.min(2,window.devicePixelRatio||1);
-    width=Math.max(1,box.width);height=Math.max(1,box.height);canvas.width=Math.round(width*dpr);canvas.height=Math.round(height*dpr);ctx.setTransform(dpr,0,0,dpr,0,0);seed();
-  }
-  function project(node){
-    const spin=node.theta+time*(state.busy?.0032:.0012),pulse=1+Math.sin(time*.018+node.phase)*.025;
-    const x=Math.sin(node.phi)*Math.cos(spin),y=Math.cos(node.phi),z=Math.sin(node.phi)*Math.sin(spin);
-    const scale=Math.min(width*.39,height*.46)*node.radius*pulse,perspective=.82+z*.18;
-    return {x:width/2+x*scale,y:height*.45+y*scale*.78,z,alpha:.18+(z+1)*.28,size:node.size*perspective};
-  }
-  function draw(){
-    ctx.clearRect(0,0,width,height);time+=reduced?0:1;
-    const cx=width/2,cy=height*.45,rad=Math.min(width*.35,height*.42);
-    const glow=ctx.createRadialGradient(cx,cy,0,cx,cy,rad*1.22);glow.addColorStop(0,'rgba(199,155,216,.24)');glow.addColorStop(.38,'rgba(199,155,216,.09)');glow.addColorStop(1,'rgba(0,0,0,0)');ctx.fillStyle=glow;ctx.fillRect(0,0,width,height);
-    const points=nodes.map(project);
-    ctx.lineWidth=.55;
-    for(let i=0;i<points.length;i++){
-      const a=points[i];for(let j=i+1;j<Math.min(points.length,i+15);j++){
-        const b=points[j],dx=a.x-b.x,dy=a.y-b.y,dist=Math.hypot(dx,dy);
-        if(dist<Math.min(54,width*.075)){ctx.strokeStyle=`rgba(199,155,216,${Math.max(0,.12-dist/520)*(a.alpha+b.alpha)})`;ctx.beginPath();ctx.moveTo(a.x,a.y);ctx.lineTo(b.x,b.y);ctx.stroke();}
-      }
-    }
-    points.sort((a,b)=>a.z-b.z).forEach(p=>{ctx.beginPath();ctx.arc(p.x,p.y,p.size,0,Math.PI*2);ctx.fillStyle=`rgba(199,155,216,${p.alpha})`;ctx.shadowColor='#c79bd8';ctx.shadowBlur=p.size>1.5?7:2;ctx.fill();});ctx.shadowBlur=0;
-    if(!reduced)requestAnimationFrame(draw);
-  }
-  if('ResizeObserver' in window){const observer=new ResizeObserver(()=>{resize();if(reduced)draw();});observer.observe(canvas);}else{window.addEventListener('resize',()=>{resize();if(reduced)draw();});}
-  resize();draw();
-})();
-
 // ---- HELPERS ----------------------------------------------------------------
 function esc(s){ return (s||'').replace(/[&<>"']/g,c=>({'&':'&amp;','<':'&lt;','>':'&gt;','"':'&quot;',"'":'&#39;'}[c])); }
 // Allow only http(s) (and data:image for <img>) URLs into href/src attributes;
@@ -168,288 +127,6 @@ function clearLog(){ log.innerHTML=''; }
 function avatarHTML(){ return '<div class="j-avatar">C</div>'; }
 function setOrbLabel(text){ const l=$('#orbLabel'); if(l) l.textContent=(text||'New Chat'); }
 function compactOrb(on){ const z=$('#orbZone'); if(z) z.classList.toggle('compact', on); }
-
-// ---- PERSONAL OS -----------------------------------------------------------
-function showOsView(name){
-  const valid=['today','inbox','planner','goals','routines','skills','connections','assistant'];
-  if(!valid.includes(name)) name='today';
-  state.osView=name;
-  valid.forEach(v=>{
-    const el=$('#'+v+'View'); if(el) el.classList.toggle('hidden',v!==name);
-  });
-  document.querySelectorAll('.os-nav-item').forEach(el=>el.classList.toggle('active',el.dataset.view===name));
-  document.body.dataset.osView=name;
-  try{ localStorage.setItem('cagentic_os_view',name); }catch(e){}
-  if(name==='skills')renderArchitecture();
-  if(name==='assistant') setTimeout(()=>{scrollDown();input.focus();},30);
-}
-function osDate(ts, withTime=true){
-  if(!ts) return 'No date';
-  const d=new Date(Number(ts)*1000);
-  return d.toLocaleDateString([], {weekday:'short',month:'short',day:'numeric'})+
-    (withTime?' · '+d.toLocaleTimeString([], {hour:'numeric',minute:'2-digit'}):'');
-}
-function osRelative(ts){
-  if(!ts) return 'Anytime';
-  const diff=Number(ts)*1000-Date.now(), mins=Math.round(Math.abs(diff)/60000);
-  if(diff<0){ if(mins<60)return mins+'m overdue'; if(mins<1440)return Math.round(mins/60)+'h overdue'; return Math.round(mins/1440)+'d overdue'; }
-  if(mins<60)return 'in '+mins+'m'; if(mins<1440)return 'in '+Math.round(mins/60)+'h'; return 'in '+Math.round(mins/1440)+'d';
-}
-function osAgo(ts){
-  if(!ts)return 'just now';const mins=Math.max(0,Math.round((Date.now()-Number(ts)*1000)/60000));
-  if(mins<1)return 'just now';if(mins<60)return mins+'m ago';if(mins<1440)return Math.round(mins/60)+'h ago';return Math.round(mins/1440)+'d ago';
-}
-function osEmpty(title,sub,button,type){
-  return '<div class="os-empty"><span>✦</span><strong>'+esc(title)+'</strong><p>'+esc(sub||'')+'</p>'+
-    (button?'<button class="os-text-btn" data-open-capture="'+esc(type||'event')+'">'+esc(button)+'</button>':'')+'</div>';
-}
-function renderPersonalOS(){
-  const data=state.os; if(!data) return;
-  $('#osGreeting').textContent=data.greeting||'Hello';
-  $('#osUserName').textContent=state.userName?', '+state.userName:'';
-  $('#osDate').textContent=(data.date_label||'')+' · Here is what deserves your attention.';
-  const stats=data.stats||{};
-  const architecture=data.architecture||{},systemStatus=architecture.status||{};
-  const statItems=[
-    ['EVENTS',stats.events_today||0,'today',Math.min(100,(stats.events_today||0)*18+14)],
-    ['INBOX',stats.unread_inbox||0,'unread',Math.min(100,(stats.unread_inbox||0)*12+10)],
-    ['DEADLINES',stats.open_deadlines||0,stats.overdue?stats.overdue+' overdue':'open',Math.min(100,(stats.open_deadlines||0)*16+12)],
-    ['GOALS',stats.active_goals||0,'active',Math.min(100,(stats.active_goals||0)*18+15)],
-    ['SKILLS',systemStatus.capabilities||0,'mapped',Math.min(100,systemStatus.capabilities||0)]
-  ];
-  $('#osStats').innerHTML=statItems.map(x=>'<div class="vault-vital" style="--level:'+x[3]+'%"><div><span>● '+x[0]+'</span><em>'+esc(x[2])+'</em></div><strong>'+x[1]+'</strong><i></i></div>').join('');
-
-  const insights=data.insights||[];
-  $('#insightList').innerHTML=insights.length?insights.slice(0,4).map(i=>'<button class="vault-directive '+esc(i.severity||'calm')+'" data-ai-prompt="'+esc(i.action_prompt||('Help me act on: '+i.title))+'"><i></i><span><strong>'+esc(i.title)+'</strong><em>'+esc(i.body)+'</em></span></button>').join(''):osEmpty('All clear','No active directives.');
-
-  const agenda=(data.agenda||[]).slice(0,7);
-  $('#todayTimeline').innerHTML=agenda.length?agenda.map(item=>{const d=new Date(Number(item.start_at)*1000);return '<button class="vault-schedule-row" data-view-jump="planner"><time>'+d.toLocaleTimeString([],{hour:'2-digit',minute:'2-digit',hour12:false})+'</time><span><strong>'+esc(item.title)+'</strong><em>'+esc(item.location||item.kind||'event')+'</em></span></button>';}).join(''):osEmpty('Schedule clear','No events in range.','Add event','event');
-
-  const deadlines=(data.deadlines||[]).filter(d=>d.status!=='done').slice(0,6);
-  $('#deadlineList').innerHTML=deadlines.length?deadlines.map(d=>'<button class="vault-deadline '+(d.due_at&&d.due_at*1000<Date.now()?'overdue':'')+'" data-deadline-done="'+esc(d.id)+'"><span>□</span><strong>'+esc(d.text)+'</strong><em>'+esc(d.due_at?osRelative(d.due_at):'open')+'</em></button>').join(''):osEmpty('No deadlines','Attention wire clear.','Add','deadline');
-
-  const goals=(data.goals||[]).filter(g=>g.status==='active').slice(0,4);
-  $('#goalStrip').innerHTML=goals.length?goals.map(g=>'<button class="vault-document" data-view-jump="goals"><span>'+esc(g.title)+'</span><em>'+Math.round(Number(g.progress)||0)+'%</em></button>').join(''):osEmpty('No goals indexed','Set a primary direction.','Create','goal');
-
-  const integrations=(data.integrations||[]).slice(0,5);
-  $('#integrationStrip').innerHTML=integrations.length?integrations.map(c=>'<button data-view-jump="connections"><i class="'+(c.connected?'online':'')+'"></i>'+esc(c.name)+'</button>').join(''):'<span>LOCAL ONLY</span>';
-  const wire=(data.notifications||[]).slice(0,3);
-  $('#vaultWire').innerHTML=wire.length?wire.map(item=>'<button data-notification-prompt="'+esc(item.action_prompt||item.body)+'" data-notification-id="'+esc(item.id)+'"><span>› '+esc(item.title)+'</span><em>'+esc(item.body)+'</em></button>').join(''):'<p>› Monitor active. No new intelligence packets.</p>';
-  $('#vaultQueueState').textContent=(Number(data.unread_notifications)||0)+' QUEUED';
-  $('#vaultCoreState').textContent='CORE · '+(state.busy?'ACTIVE':'IDLE')+'   LINK · ONLINE   RUNNER · '+(data.proactive_running?'ALIVE':'STANDBY');
-  const inboxCount=Number(data.unread_inbox)||0, inboxBadge=$('#inboxNavCount');
-  if(inboxBadge){inboxBadge.textContent=inboxCount>99?'99+':String(inboxCount);inboxBadge.classList.toggle('hidden',inboxCount===0);}
-  renderInbox(); renderPlanner(); renderGoals(); renderRoutines(); renderArchitecture(); renderConnections(); renderNotifications(); bindOsActions();
-}
-function goalCard(g){
-  const pct=Math.max(0,Math.min(100,Number(g.progress)||0));
-  return '<article class="os-goal-card"><div class="os-goal-top"><span>'+esc((g.category||'personal').toUpperCase())+'</span><em>'+pct+'%</em></div><strong>'+esc(g.title)+'</strong><div class="os-progress"><i style="width:'+pct+'%"></i></div><div class="os-goal-foot"><span>'+(g.target_at?esc('Target '+osDate(g.target_at,false)):'No target date')+'</span><button data-goal-step="'+esc(g.id)+'">+10%</button></div></article>';
-}
-function connectionChip(c){
-  const initials=(c.name||'?').split(/\s+/).map(x=>x[0]).join('').slice(0,2).toUpperCase();
-  return '<div class="os-connection-chip"><span class="os-service-icon">'+esc(initials)+'</span><div><strong>'+esc(c.name)+'</strong><em>'+esc(c.detail||c.kind||'')+'</em></div><i class="'+(c.connected?'online':'offline')+'"></i></div>';
-}
-function renderPlanner(){
-  const el=$('#plannerTimeline'), data=state.os; if(!el||!data)return;
-  const agenda=data.agenda||[];
-  if(!agenda.length){el.innerHTML=osEmpty('Your planner is open','Add an event or ask Cagentic to design a week around your goals.','Create event','event');return;}
-  let lastDay='';
-  el.innerHTML=agenda.map(item=>{
-    const d=new Date(Number(item.start_at)*1000), day=d.toLocaleDateString([],{weekday:'long',month:'long',day:'numeric'});
-    const head=day!==lastDay?'<div class="os-day-divider">'+esc(day)+'</div>':''; lastDay=day;
-    const actions=item.kind==='event'?'<button class="os-row-delete" data-event-delete="'+esc(item.id)+'" title="Delete">×</button>':'<button class="os-row-done" data-deadline-done="'+esc(item.id)+'">Done</button>';
-    return head+'<article class="os-agenda-row '+esc(item.kind||'event')+'"><time>'+d.toLocaleTimeString([],{hour:'numeric',minute:'2-digit'})+'</time><i></i><div><strong>'+esc(item.title)+'</strong><span>'+esc(item.location||item.kind||'event')+'</span></div>'+actions+'</article>';
-  }).join('');
-}
-function renderGoals(){
-  const el=$('#goalsWorkspace'), data=state.os; if(!el||!data)return;
-  const goals=data.goals||[];
-  if(!goals.length){el.innerHTML=osEmpty('Your goals live here','Create a direction and Cagentic will help protect time for it.','Create your first goal','goal');return;}
-  el.innerHTML=goals.map(g=>{
-    const pct=Math.max(0,Math.min(100,Number(g.progress)||0));
-    return '<article class="os-goal-detail '+esc(g.status||'active')+'"><div class="os-goal-ring" style="--pct:'+pct+'"><span>'+pct+'%</span></div><div class="os-goal-detail-copy"><span>'+esc((g.category||'personal').toUpperCase())+' · '+esc(g.status||'active')+'</span><h2>'+esc(g.title)+'</h2><p>'+esc(g.description||'No description yet. Ask Cagentic to turn this into a plan.')+'</p><div class="os-goal-actions"><button data-goal-step="'+esc(g.id)+'">Move +10%</button>'+(g.status!=='completed'?'<button data-goal-complete="'+esc(g.id)+'">Mark complete</button>':'')+'<button class="danger" data-goal-delete="'+esc(g.id)+'">Delete</button></div></div><div class="os-goal-target"><span>TARGET</span><strong>'+esc(g.target_at?osDate(g.target_at,false):'Open-ended')+'</strong></div></article>';
-  }).join('');
-}
-function renderConnections(){
-  const el=$('#connectionsGrid'), data=state.os; if(!el||!data)return;
-  const items=data.integrations||[];
-  el.innerHTML=items.length?items.map(c=>{
-    const email=c.adapter==='imap', syncAttr=email?'data-email-sync':'data-connection-sync', deleteAttr=email?'data-email-delete':'data-connection-delete';
-    return '<article class="os-connection-card '+(c.managed?'managed':'')+'"><div class="os-service-icon large">'+esc((c.name||'?').slice(0,2).toUpperCase())+'</div><div><span>'+esc(c.kind||'SERVICE')+'</span><h2>'+esc(c.name)+'</h2><p>'+esc(c.detail||'')+'</p>'+(c.endpoint?'<em>'+esc(c.endpoint)+'</em>':'')+'</div><div class="os-connection-status '+(c.connected?'online':'')+'"><i></i>'+(c.status==='error'?'Needs attention':c.connected?'Connected':'Available')+'</div>'+(c.managed?'<div class="os-connection-actions"><button '+syncAttr+'="'+esc(c.id)+'">Sync now</button><button class="danger" '+deleteAttr+'="'+esc(c.id)+'">Remove</button></div>':'')+'</article>';
-  }).join(''):osEmpty('No services yet','Connect a calendar, inbox, or MCP server.');
-}
-function renderInbox(){
-  const el=$('#inboxWorkspace'),data=state.os;if(!el||!data)return;const items=data.inbox||[];
-  if(!items.length){el.innerHTML=osEmpty('Your inbox is clear','Capture a thought or connect email to bring unread headers into one place.','Capture something','inbox');return;}
-  el.innerHTML=items.map(item=>'<article class="os-inbox-item '+esc(item.status||'new')+'"><div class="os-inbox-kind">'+esc((item.kind||'item').slice(0,1).toUpperCase())+'</div><div class="os-inbox-copy"><span>'+esc((item.kind||'item').toUpperCase())+(item.sender?' · '+esc(item.sender):'')+'</span><h2>'+esc(item.title)+'</h2><p>'+esc(item.summary||'Captured '+osAgo(item.received_at||item.created_at))+'</p></div><div class="os-inbox-actions">'+(item.status==='new'?'<button data-inbox-status="read" data-inbox-id="'+esc(item.id)+'">Read</button>':'')+(item.status!=='done'?'<button data-inbox-status="done" data-inbox-id="'+esc(item.id)+'">Done</button>':'')+'<button data-inbox-status="archived" data-inbox-id="'+esc(item.id)+'">Archive</button><button class="danger" data-inbox-delete="'+esc(item.id)+'">×</button></div></article>').join('');
-}
-function renderRoutines(){
-  const el=$('#routinesWorkspace'),data=state.os;if(!el||!data)return;const items=data.routines||[];
-  if(!items.length){el.innerHTML=osEmpty('No routines yet','Schedule a useful briefing and Cagentic will surface it as a notification.');return;}
-  const dayNames=['Mon','Tue','Wed','Thu','Fri','Sat','Sun'];
-  el.innerHTML=items.map(item=>'<article class="os-routine-card '+(item.enabled?'':'disabled')+'"><div class="os-routine-orb">↻</div><div><span>'+esc((item.kind||'custom').replaceAll('_',' ').toUpperCase())+'</span><h2>'+esc(item.name)+'</h2><p>'+esc((item.days||[]).map(d=>dayNames[d]).join(' · '))+' at '+esc(item.schedule_time||'08:00')+'</p><em>'+(item.last_run_at?'Last ran '+esc(osAgo(item.last_run_at)):item.next_run_at?'Next '+esc(osRelative(item.next_run_at)):'Paused')+'</em></div><div class="os-routine-actions"><button data-routine-run="'+esc(item.id)+'">Run now</button><button data-routine-toggle="'+esc(item.id)+'" data-routine-enabled="'+(item.enabled?'1':'0')+'">'+(item.enabled?'Pause':'Enable')+'</button><button class="danger" data-routine-delete="'+esc(item.id)+'">Delete</button></div></article>').join('');
-}
-function architectureCapability(id){
-  const branches=state.os?.architecture?.branches||[];
-  for(const branch of branches){const found=(branch.capabilities||[]).find(item=>item.id===id);if(found)return {...found,branch:branch.name};}
-  return null;
-}
-function showArchitectureDetail(id){
-  state.selectedCapability=id;const item=architectureCapability(id),detail=$('#architectureDetail');if(!detail||!item)return;
-  detail.classList.remove('hidden');
-  detail.innerHTML='<div><span>'+esc(item.branch.toUpperCase())+' / '+esc(item.kind.toUpperCase())+'</span><strong>'+esc(item.name)+'</strong><em>'+esc((item.tools||[]).join(' · '))+'</em></div><p>'+esc(item.prompt)+'</p><button>Hand to conductor →</button>';
-  detail.querySelector('button').onclick=()=>{showOsView('assistant');send(item.prompt);};
-  document.querySelectorAll('[data-capability-id]').forEach(el=>el.classList.toggle('selected',el.dataset.capabilityId===id));
-}
-function renderArchitecture(){
-  const arch=state.os?.architecture;if(!arch)return;
-  const status=arch.status||{},statusEl=$('#architectureStatus');
-  if(statusEl)statusEl.innerHTML='<span><i></i> SYSTEM LIVE</span><em>'+Number(status.capabilities||0)+' CAPABILITIES · '+Number(status.installed_skills||0)+' INSTALLED SKILLS · '+Number(status.routines||0)+' ROUTINES · '+Number(status.integrations||0)+' INTEGRATIONS</em>';
-  const model=$('#architectureModel');if(model)model.textContent=(arch.conductor?.model||'local model')+' · the conductor';
-  const modes=$('#architectureModes');if(modes){
-    modes.innerHTML='<button data-architecture-mode="all" aria-pressed="'+(state.architectureMode==='all')+'">ALL <em>'+Number(status.capabilities||0)+'</em></button>'+(arch.modes||[]).map(mode=>'<button class="'+esc(mode.id)+'" data-architecture-mode="'+esc(mode.id)+'" aria-pressed="'+(state.architectureMode===mode.id)+'">'+esc(mode.label.toUpperCase())+' <em>'+Number(mode.count||0)+'</em></button>').join('');
-  }
-  const branches=$('#architectureBranches');if(branches){
-    branches.innerHTML=(arch.branches||[]).map(branch=>{
-      const visible=(branch.capabilities||[]).filter(item=>state.architectureMode==='all'||item.kind===state.architectureMode);
-      if(!visible.length)return '';
-      return '<section class="architecture-branch '+(branch.foundation?'foundation ':'')+(branch.custom?'custom':'')+'"><header><span>'+esc(branch.name.toUpperCase())+'</span><em>'+visible.length+' SYSTEMS</em></header><div>'+visible.map(item=>'<button class="architecture-capability '+esc(item.kind)+(item.available?'':' unavailable')+(item.active?'':' dormant')+(state.selectedCapability===item.id?' selected':'')+'" data-capability-id="'+esc(item.id)+'" aria-label="'+esc(item.name+', '+item.kind+', '+(item.active?'active':'available on demand')+', tools: '+(item.tools||[]).join(', '))+'"><span>'+esc(item.name)+'</span><i>'+({manual:'◆',skill:'●',routine:'◷',agent:'✦'}[item.kind]||'·')+'</i></button>').join('')+'</div></section>';
-    }).join('');
-  }
-  const automation=$('#automationLayer');if(automation){const a=arch.automation||{};automation.innerHTML='<header><span>AUTOMATION LAYER</span><em>'+Number(a.enabled_routines||0)+' ACTIVE ROUTINES</em></header><div>'+(a.triggers||[]).map(trigger=>'<span>↳ '+esc(trigger)+'</span>').join('')+'</div>';}
-  const links=$('#architectureIntegrations');if(links){const items=arch.integrations||[];links.innerHTML=items.length?items.map(item=>'<button data-view-jump="connections"><i class="'+(item.connected?'online':'')+'"></i><span>'+esc(item.name)+'</span><em>'+esc(item.kind||item.adapter||'service')+'</em></button>').join(''):'<span class="architecture-no-links">Local foundation · SQLite · tools · model runtime</span>';}
-  document.querySelectorAll('[data-architecture-mode]').forEach(el=>el.onclick=()=>{state.architectureMode=el.dataset.architectureMode;state.selectedCapability='';const detail=$('#architectureDetail');if(detail)detail.classList.add('hidden');renderArchitecture();});
-  document.querySelectorAll('[data-capability-id]').forEach(el=>el.onclick=()=>showArchitectureDetail(el.dataset.capabilityId));
-  document.querySelectorAll('#architectureIntegrations [data-view-jump]').forEach(el=>el.onclick=()=>showOsView(el.dataset.viewJump));
-}
-function renderNotifications(){
-  const data=state.os||{}, count=Number(data.unread_notifications)||0, badge=$('#notificationCount');
-  if(badge){badge.textContent=count>99?'99+':String(count);badge.classList.toggle('hidden',count===0);}
-  const list=$('#notificationList'); if(!list)return;
-  const items=data.notifications||[];
-  list.innerHTML=items.length?items.map(item=>'<article class="os-notification '+(item.read?'read':'')+' '+esc(item.severity||'attention')+'"><div class="os-notification-dot"></div><div><time>'+esc(osAgo(item.created_at))+'</time><strong>'+esc(item.title)+'</strong><p>'+esc(item.body)+'</p><div class="os-notification-actions">'+(item.action_prompt?'<button data-notification-prompt="'+esc(item.action_prompt)+'" data-notification-id="'+esc(item.id)+'">Ask Cagentic</button>':'')+'<button data-notification-dismiss="'+esc(item.id)+'">Dismiss</button></div></div></article>').join(''):osEmpty('You are all caught up','Cagentic will notify you when something genuinely needs attention.');
-}
-function openNotifications(){$('#notificationPanel').classList.add('open');}
-function closeNotifications(){$('#notificationPanel').classList.remove('open');}
-function bindOsActions(){
-  document.querySelectorAll('[data-open-capture]').forEach(el=>el.onclick=()=>openCapture(el.dataset.openCapture));
-  document.querySelectorAll('[data-view-jump]').forEach(el=>el.onclick=()=>showOsView(el.dataset.viewJump));
-  document.querySelectorAll('[data-ai-prompt]').forEach(el=>el.onclick=()=>{showOsView('assistant');send(el.dataset.aiPrompt);});
-  document.querySelectorAll('[data-deadline-done]').forEach(el=>el.onclick=()=>updateOs('/api/os/deadlines/update',{id:el.dataset.deadlineDone,status:'done'}));
-  document.querySelectorAll('[data-event-delete]').forEach(el=>el.onclick=()=>updateOs('/api/os/events/delete',{id:el.dataset.eventDelete}));
-  document.querySelectorAll('[data-goal-step]').forEach(el=>el.onclick=()=>{
-    const g=(state.os.goals||[]).find(x=>x.id===el.dataset.goalStep); if(g) updateOs('/api/os/goals/update',{id:g.id,progress:Math.min(100,(Number(g.progress)||0)+10)});
-  });
-  document.querySelectorAll('[data-goal-complete]').forEach(el=>el.onclick=()=>updateOs('/api/os/goals/update',{id:el.dataset.goalComplete,status:'completed'}));
-  document.querySelectorAll('[data-goal-delete]').forEach(el=>el.onclick=()=>updateOs('/api/os/goals/delete',{id:el.dataset.goalDelete}));
-  document.querySelectorAll('[data-connection-sync]').forEach(el=>el.onclick=async()=>{
-    el.disabled=true;el.textContent='Syncing…';const r=await api('/api/os/integrations/sync',{id:el.dataset.connectionSync});if(r.os){state.os=r.os;renderPersonalOS();}
-  });
-  document.querySelectorAll('[data-connection-delete]').forEach(el=>el.onclick=()=>showConfirm('Remove this calendar connection? Imported events will be kept.',()=>updateOs('/api/os/integrations/delete',{id:el.dataset.connectionDelete})));
-  document.querySelectorAll('[data-email-sync]').forEach(el=>el.onclick=async()=>{el.disabled=true;el.textContent='Syncing…';const r=await api('/api/os/email/sync',{id:el.dataset.emailSync});if(r.os){state.os=r.os;renderPersonalOS();}});
-  document.querySelectorAll('[data-email-delete]').forEach(el=>el.onclick=()=>showConfirm('Remove this email connection? Imported inbox items will be kept.',()=>updateOs('/api/os/email/delete',{id:el.dataset.emailDelete})));
-  document.querySelectorAll('[data-inbox-status]').forEach(el=>el.onclick=()=>updateOs('/api/os/inbox/update',{id:el.dataset.inboxId,status:el.dataset.inboxStatus}));
-  document.querySelectorAll('[data-inbox-delete]').forEach(el=>el.onclick=()=>showConfirm('Permanently delete this inbox item?',()=>updateOs('/api/os/inbox/delete',{id:el.dataset.inboxDelete})));
-  document.querySelectorAll('[data-routine-run]').forEach(el=>el.onclick=async()=>{el.disabled=true;el.textContent='Running…';await updateOs('/api/os/routines/run',{id:el.dataset.routineRun});});
-  document.querySelectorAll('[data-routine-toggle]').forEach(el=>el.onclick=()=>updateOs('/api/os/routines/update',{id:el.dataset.routineToggle,enabled:el.dataset.routineEnabled!=='1'}));
-  document.querySelectorAll('[data-routine-delete]').forEach(el=>el.onclick=()=>showConfirm('Delete this proactive routine?',()=>updateOs('/api/os/routines/delete',{id:el.dataset.routineDelete})));
-  document.querySelectorAll('[data-notification-dismiss]').forEach(el=>el.onclick=async()=>{const r=await api('/api/os/notifications/action',{id:el.dataset.notificationDismiss,action:'dismiss'});state.os.notifications=r.notifications||[];state.os.unread_notifications=r.unread_notifications||0;renderNotifications();bindOsActions();});
-  document.querySelectorAll('[data-notification-prompt]').forEach(el=>el.onclick=async()=>{await api('/api/os/notifications/action',{id:el.dataset.notificationId,action:'read'});closeNotifications();showOsView('assistant');send(el.dataset.notificationPrompt);});
-}
-async function updateOs(path,body){
-  const result=await api(path,body);
-  if(result.os){state.os=result.os;renderPersonalOS();}
-  return result;
-}
-async function refreshPersonalOS(){
-  try{state.os=await api('/api/os');renderPersonalOS();}catch(e){console.warn('OS refresh failed',e);}
-}
-
-async function exportCalendar(){
-  const response=await fetch('/api/os/calendar/export.ics');
-  if(!response.ok)return;
-  const blob=await response.blob(), url=URL.createObjectURL(blob), link=document.createElement('a');
-  link.href=url;link.download='cagentic-calendar.ics';document.body.appendChild(link);link.click();link.remove();setTimeout(()=>URL.revokeObjectURL(url),1000);
-}
-
-function openConnectionModal(){
-  $('#connectionName').value='';$('#connectionKind').value='ical';$('#connectionUrl').value='';$('#connectionUsername').value='';$('#connectionPassword').value='';$('#connectionAutoSync').checked=true;$('#connectionError').classList.add('hidden');selectConnectionKind();$('#connectionModal').classList.remove('hidden');setTimeout(()=>$('#connectionName').focus(),40);
-}
-function closeConnectionModal(){$('#connectionModal').classList.add('hidden');}
-function selectConnectionKind(){const caldav=$('#connectionKind').value==='caldav';$('#connectionAuthFields').classList.toggle('hidden',!caldav);$('#connectionUrl').placeholder=caldav?'https://calendar.example.com/dav/calendars/you/main/':'https://…/calendar.ics';}
-async function saveConnection(){
-  const err=$('#connectionError'), body={name:$('#connectionName').value.trim(),kind:$('#connectionKind').value,url:$('#connectionUrl').value.trim(),username:$('#connectionUsername').value,password:$('#connectionPassword').value,direction:$('#connectionKind').value==='caldav'?$('#connectionDirection').value:'pull',auto_sync:$('#connectionAutoSync').checked};
-  if(!body.name||!body.url){err.textContent='Name and calendar URL are required.';err.classList.remove('hidden');return;}
-  $('#connectionSave').disabled=true;$('#connectionSave').textContent='Connecting…';
-  try{
-    const created=await api('/api/os/integrations/create',body);if(!created.ok)throw new Error(created.error||'Could not save connection');
-    const synced=await api('/api/os/integrations/sync',{id:created.connection.id});state.os=synced.os||created.os;renderPersonalOS();
-    if(!synced.ok)throw new Error(synced.error||'Connection saved, but the first sync failed.');
-    closeConnectionModal();
-  }catch(e){err.textContent=e.message||String(e);err.classList.remove('hidden');}
-  finally{$('#connectionSave').disabled=false;$('#connectionSave').textContent='Connect & sync';}
-}
-
-function openEmailModal(){
-  $('#emailName').value='';$('#emailHost').value='';$('#emailPort').value='993';$('#emailUsername').value='';$('#emailPassword').value='';$('#emailSsl').checked=true;$('#emailError').classList.add('hidden');$('#emailModal').classList.remove('hidden');setTimeout(()=>$('#emailName').focus(),40);
-}
-function closeEmailModal(){$('#emailModal').classList.add('hidden');}
-async function saveEmailConnection(){
-  const err=$('#emailError'),body={name:$('#emailName').value.trim(),host:$('#emailHost').value.trim(),port:Number($('#emailPort').value)||993,username:$('#emailUsername').value.trim(),password:$('#emailPassword').value,use_ssl:$('#emailSsl').checked,auto_sync:true};
-  if(!body.name||!body.host||!body.username){err.textContent='Name, IMAP host, and username are required.';err.classList.remove('hidden');return;}
-  $('#emailSave').disabled=true;$('#emailSave').textContent='Connecting…';
-  try{
-    const created=await api('/api/os/email/create',body);if(!created.ok)throw new Error(created.error||'Could not save connection');
-    const synced=await api('/api/os/email/sync',{id:created.connection.id});state.os=synced.os||created.os;renderPersonalOS();
-    if(!synced.ok)throw new Error(synced.error||'Connection saved, but the first sync failed.');
-    closeEmailModal();
-  }catch(e){err.textContent=e.message||String(e);err.classList.remove('hidden');}
-  finally{$('#emailSave').disabled=false;$('#emailSave').textContent='Connect & sync';}
-}
-
-function openRoutineModal(){
-  $('#routineName').value='';$('#routineKind').value='daily_plan';$('#routineTime').value='08:00';$('#routinePrompt').value='';$('#routineError').classList.add('hidden');
-  document.querySelectorAll('#routineDays input').forEach(el=>{el.checked=Number(el.value)<5;});
-  $('#routineModal').classList.remove('hidden');setTimeout(()=>$('#routineName').focus(),40);
-}
-function closeRoutineModal(){$('#routineModal').classList.add('hidden');}
-async function saveRoutine(){
-  const err=$('#routineError'),days=[...document.querySelectorAll('#routineDays input:checked')].map(el=>Number(el.value));
-  const body={name:$('#routineName').value.trim(),kind:$('#routineKind').value,schedule_time:$('#routineTime').value,days,prompt:$('#routinePrompt').value.trim(),enabled:true};
-  if(!body.name||!body.schedule_time||!days.length){err.textContent='Name, local time, and at least one day are required.';err.classList.remove('hidden');return;}
-  $('#routineSave').disabled=true;
-  try{const result=await api('/api/os/routines/create',body);if(!result.ok)throw new Error(result.error||'Could not create routine');state.os=result.os;closeRoutineModal();renderPersonalOS();}
-  catch(e){err.textContent=e.message||String(e);err.classList.remove('hidden');}
-  finally{$('#routineSave').disabled=false;}
-}
-
-let _captureType='event';
-function localInputValue(date){const off=date.getTimezoneOffset();return new Date(date.getTime()-off*60000).toISOString().slice(0,16);}
-function selectCaptureType(type){
-  _captureType=['inbox','event','deadline','goal'].includes(type)?type:'inbox';
-  document.querySelectorAll('[data-capture-type]').forEach(el=>el.classList.toggle('active',el.dataset.captureType===_captureType));
-  document.querySelectorAll('[data-fields]').forEach(el=>el.classList.toggle('hidden',el.dataset.fields!==_captureType));
-}
-function openCapture(type='event'){
-  selectCaptureType(type); $('#captureTitle').value=''; $('#captureNotes').value=''; $('#captureError').classList.add('hidden');
-  const start=new Date(); start.setMinutes(Math.ceil(start.getMinutes()/30)*30,0,0); const end=new Date(start.getTime()+3600000);
-  $('#captureStart').value=localInputValue(start); $('#captureEnd').value=localInputValue(end); $('#captureDue').value=localInputValue(end); $('#captureTarget').value='';
-  $('#captureModal').classList.remove('hidden'); setTimeout(()=>$('#captureTitle').focus(),40);
-}
-function closeCapture(){$('#captureModal').classList.add('hidden');}
-async function saveCapture(){
-  const title=$('#captureTitle').value.trim(), notes=$('#captureNotes').value.trim(), err=$('#captureError');
-  if(!title){err.textContent='Give this item a title.';err.classList.remove('hidden');return;}
-  let path,body={title};
-  if(_captureType==='inbox'){path='/api/os/inbox/create';body={...body,summary:notes,kind:'capture'};}
-  else if(_captureType==='event'){path='/api/os/events/create';body={...body,start_at:$('#captureStart').value,end_at:$('#captureEnd').value,location:$('#captureLocation').value,description:notes};}
-  else if(_captureType==='deadline'){path='/api/os/deadlines/create';body={...body,due_at:$('#captureDue').value};}
-  else {path='/api/os/goals/create';body={...body,target_at:$('#captureTarget').value,category:$('#captureCategory').value,description:notes};}
-  try{
-    const result=await api(path,body); if(!result.ok)throw new Error(result.error||'Could not save');
-    state.os=result.os; closeCapture(); renderPersonalOS();
-  }catch(e){err.textContent=e.message||String(e);err.classList.remove('hidden');}
-}
 
 // ---- HUD --------------------------------------------------------------------
 const HUD_RX = /```hud\s*\n?([\s\S]*?)```/g;
@@ -2129,29 +1806,26 @@ async function api(path,body){
 function setModelBadge(m){ const n=$('#msName'); if(n) n.textContent=(m||'').toUpperCase(); }
 async function boot(){
   const b=await api('/api/bootstrap');
-  state.chats=b.chats; state.settings=b.settings; state.projects=b.projects||[]; state.os=b.os||null;
+  state.chats=b.chats; state.settings=b.settings; state.projects=b.projects||[];
   state.userName=b.user_name||'';
   setModelBadge(b.model);
   const vs=$('#versionSpan'); if(vs) vs.textContent=b.version||'--';
   renderModelMenu();
-  renderSessions(); setCurrent(b.current); renderPersonalOS();
-  let initial='today'; try{initial=localStorage.getItem('cagentic_os_view')||'today';}catch(e){}
-  showOsView(initial);
-  setInterval(refreshPersonalOS,60000);
+  renderSessions(); setCurrent(b.current);
 }
 async function newChat(){
   const r=await api('/api/chats/new',{}); state.chats=r.chats; renderSessions(); setCurrent(r.current);
   if(r.current&&r.current.model){state.settings.model=r.current.model;setModelBadge(r.current.model);renderModelMenu();}
-  clearViewport(); closeSessions(); showOsView('assistant'); input.focus();
+  clearViewport(); closeSessions(); input.focus();
 }
 async function loadChat(id){
-  const r=await api('/api/chats/load',{id}); state.chats=r.chats; clearViewport(); renderSessions(); setCurrent(r.current); if(r.current&&r.current.model){state.settings.model=r.current.model;setModelBadge(r.current.model);renderModelMenu();} closeSessions(); showOsView('assistant');
+  const r=await api('/api/chats/load',{id}); state.chats=r.chats; clearViewport(); renderSessions(); setCurrent(r.current); if(r.current&&r.current.model){state.settings.model=r.current.model;setModelBadge(r.current.model);renderModelMenu();} closeSessions();
 }
 async function deleteChat(id){
   const r=await api('/api/chats/delete',{id}); state.chats=r.chats; state.projects=r.projects||state.projects; renderSessions(); setCurrent(r.current); closeSessions();
 }
 async function refreshChats(){
-  const b=await api('/api/bootstrap'); state.chats=b.chats; state.projects=b.projects||[]; state.os=b.os||state.os; renderSessions(); setOrbLabel(b.current.title||'New Chat'); renderPersonalOS();
+  const b=await api('/api/bootstrap'); state.chats=b.chats; state.projects=b.projects||[]; renderSessions(); setOrbLabel(b.current.title||'New Chat');
 }
 
 // ---- MODEL SWITCHER ---------------------------------------------------------
@@ -2217,7 +1891,7 @@ function toggleVoiceOut(){
 }
 
 // ---- SEND -------------------------------------------------------------------
-function setBusy(on){ state.busy=on; sendBtn.disabled=on; input.disabled=on; const bl=$('#busyLabel'); if(bl){bl.textContent='\u25CF '+_curVerb+'\u2026';bl.classList.toggle('hidden',!on);} $('#stopBtn').classList.toggle('hidden',!on); const core=$('#vaultCoreState');if(core){const alive=state.os?.proactive_running?'ALIVE':'STANDBY';core.textContent='CORE · '+(on?'ACTIVE':'IDLE')+'   LINK · ONLINE   RUNNER · '+alive;} }
+function setBusy(on){ state.busy=on; sendBtn.disabled=on; input.disabled=on; const bl=$('#busyLabel'); if(bl){bl.textContent='\u25CF '+_curVerb+'\u2026';bl.classList.toggle('hidden',!on);} $('#stopBtn').classList.toggle('hidden',!on); }
 function finishTurn(){ setBusy(false); const ts=$('#tokenStats'); if(ts) ts.classList.add('hidden'); input.focus(); refreshChats(); }
 let _abortCtrl=null;
 async function abortGeneration(){
@@ -2228,7 +1902,6 @@ async function abortGeneration(){
 }
 async function send(text){
   if(state.busy) return;
-  showOsView('assistant');
   // Slash commands → /api/cmd instead of /api/chat
   if(text.startsWith('/')){
     const parts=text.split(/\s+/);
@@ -2282,37 +1955,6 @@ $('#logsBtn').onclick=openSessions;
 $('#newMissionBtn').onclick=newChat;
 $('#configBtn').onclick=openSettings;
 $('#voiceOutBtn').onclick=toggleVoiceOut;
-$('#quickAddBtn').onclick=()=>openCapture('inbox');
-$('#notificationBtn').onclick=openNotifications;
-$('#closeNotifications').onclick=closeNotifications;
-$('#markNotificationsRead').onclick=async()=>{const r=await api('/api/os/notifications/action',{action:'read_all'});state.os.notifications=r.notifications||[];state.os.unread_notifications=r.unread_notifications||0;renderNotifications();bindOsActions();};
-document.querySelectorAll('.os-nav-item').forEach(el=>el.onclick=()=>showOsView(el.dataset.view));
-document.querySelectorAll('[data-capture-type]').forEach(el=>el.onclick=()=>selectCaptureType(el.dataset.captureType));
-$('#captureClose').onclick=closeCapture;
-$('#captureCancel').onclick=closeCapture;
-$('#captureSave').onclick=saveCapture;
-$('#captureModal').addEventListener('click',e=>{if(e.target.id==='captureModal')closeCapture();});
-$('#captureTitle').addEventListener('keydown',e=>{if(e.key==='Enter'){e.preventDefault();saveCapture();}});
-$('#connectionSettingsBtn').onclick=openSettings;
-$('#addConnectionBtn').onclick=openConnectionModal;
-$('#connectionModalClose').onclick=closeConnectionModal;
-$('#connectionCancel').onclick=closeConnectionModal;
-$('#connectionSave').onclick=saveConnection;
-$('#connectionKind').onchange=selectConnectionKind;
-$('#connectionModal').addEventListener('click',e=>{if(e.target.id==='connectionModal')closeConnectionModal();});
-$('#addEmailBtn').onclick=openEmailModal;
-$('#inboxConnectEmailBtn').onclick=openEmailModal;
-$('#connectionsEmailBtn').onclick=openEmailModal;
-$('#emailModalClose').onclick=closeEmailModal;
-$('#emailCancel').onclick=closeEmailModal;
-$('#emailSave').onclick=saveEmailConnection;
-$('#emailModal').addEventListener('click',e=>{if(e.target.id==='emailModal')closeEmailModal();});
-$('#addRoutineBtn').onclick=openRoutineModal;
-$('#routineModalClose').onclick=closeRoutineModal;
-$('#routineCancel').onclick=closeRoutineModal;
-$('#routineSave').onclick=saveRoutine;
-$('#routineModal').addEventListener('click',e=>{if(e.target.id==='routineModal')closeRoutineModal();});
-$('#exportCalendarBtn').onclick=exportCalendar;
 
 $('#closeSessionsBtn').onclick=closeSessions;
 $('#newProjectModalClose').onclick=closeNewProjectModal;
@@ -2336,9 +1978,6 @@ document.addEventListener('keydown',e=>{
   if((e.ctrlKey||e.metaKey)&&e.key==='s'){ e.preventDefault(); openSettings(); return; }
   if(e.key==='Escape'){
     if(!$('#confirmModal').classList.contains('hidden')){ $('#confirmModal').classList.add('hidden'); _confirmCb=null; }
-    else if(!$('#captureModal').classList.contains('hidden')) closeCapture();
-    else if(!$('#connectionModal').classList.contains('hidden')) closeConnectionModal();
-    else if($('#notificationPanel').classList.contains('open')) closeNotifications();
     else if(!$('#newProjectModal').classList.contains('hidden')) closeNewProjectModal();
     else if(!$('#renameModal').classList.contains('hidden')) closeRename();
     else if(!$('#projectModal').classList.contains('hidden')) closeProjectPicker();

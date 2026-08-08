@@ -14,7 +14,8 @@ Cagentic **remembers things about you** across sessions, keeps a persistent remi
 - **MCP bridges** — point Cagentic at any MCP server (Notion, Google Drive, Slack, your own custom ones) via stdio JSON-RPC and it can call their tools and read their resources.
 - **Controls your browser** — a companion Chrome extension lets Cagentic read pages, open tabs, click links, and fill forms in your actual browser.
 - **Web UI** — `/gateway` starts a local web app: the full assistant in a browser tab, with tool approvals shown right on the page.
-- **Personal OS dashboard** — the gateway opens on a proactive command center for goals, calendar events, deadlines, a unified inbox, scheduled AI routines, connected services, and a focus feed. Everything is stored locally and is also available to the assistant as tools.
+- **Rich answers in the tab** — the assistant can draw bar/line/pie charts, tables, stat blocks and progress bars as draggable panels in the web UI instead of dumping an ASCII table into the chat.
+- **Personal OS data** — goals, calendar events, deadlines, a unified inbox and scheduled AI routines are stored locally and available to the assistant as tools (the `life` group). Ask for them in chat; there is no separate dashboard to keep in sync.
 - **Conversations persist** — sessions auto-save to `~/.config/cagentic/sessions/`. `/resume` to come back to one.
 - **Background jobs** — slow shell commands run in the background; their output gets injected back into the conversation when they finish.
 - **GitHub integration** (optional) — list repos, read files, browse issues/PRs with a personal access token.
@@ -279,11 +280,18 @@ Type `/help` in the web composer for its focused command list. Chat saving is au
 
 If the configured port is already occupied, Cagentic automatically tries the next 20 ports and prints the URL it selected. Set `gateway.auto_port` to `false` if you prefer startup to fail instead.
 
-The gateway's Core, Inbox, Planner, Goals, Routines, Skills, and Connections workspaces share one local data model with chat. You can capture an inbox item, event, deadline, or goal in the UI, or ask Cagentic naturally; the assistant can use the `inbox_*`, `calendar_event_*`, `goal_*`, `routine_*`, and `personal_briefing` tools to keep the same dashboard current. Configured MCP servers appear in Connections and remain the bridge to services such as Notion, Drive, and Slack.
+The gateway is a chat surface, not a dashboard — there are no separate
+workspace pages to keep in sync. Ask for your inbox, calendar, deadlines,
+goals, or routines in the conversation and the assistant reads and writes the
+same local data through the `inbox_*`, `calendar_event_*`, `goal_*`,
+`routine_*`, and `personal_briefing` tools. Configured MCP servers remain the
+bridge to services such as Notion, Drive, and Slack.
 
-The **Core** route uses a dense terminal-style command deck: live vitals and directives on the left, an animated cognitive network and primary intent in the center, and on-demand commands, schedule, deadlines, and proactive intelligence on the right. The **Skills** route exposes Cagentic's live architecture as four execution modes—manual actions, reusable skills, scheduled routines, and delegated agents—organized into Memory, Productivity, Research, Content, Community, Agency, Sales, Finance, and Custom Ops branches. Capability tiles are grounded in registered tools and hand their intent directly to the conductor instead of acting as decorative shortcuts.
+When an answer is easier to read as a picture, the assistant calls
+`show_widget` and the result opens as a draggable panel in the tab — bar, line
+and pie charts, tables, stat blocks, progress bars, metrics, and alerts.
 
-Connections can also synchronize calendars directly:
+Calendars can synchronize directly:
 
 - **iCalendar feeds** (`https://…/*.ics` or `webcal://…`) import events from Google Calendar, Outlook, Apple Calendar, and other products that expose a subscription URL.
 - **CalDAV** connects to standards-compatible providers for import-only, publish-only, or two-way event sync.

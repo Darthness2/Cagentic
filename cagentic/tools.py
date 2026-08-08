@@ -2546,17 +2546,45 @@ def t_phone_screenshot(args: dict, ctx: ToolContext) -> str:
     return f"OK: captured iPhone screenshot ({width}×{height})"
 
 
+# Every panel kind cagentic/gateway_assets/app.js:buildPanelInner can draw.
+# Keep the two in step: a type missing here is a renderer the model can never
+# reach, and a type here with no case there renders nothing at all.
 _WIDGET_TYPES = {
-    "stocks",
-    "sports",
-    "weather",
-    "crypto",
-    "calendar",
+    # charts
+    "bar",
+    "line",
+    "pie",
+    # data
+    "table",
+    "list",
     "stats",
     "progress",
-    "list",
-    "table",
+    "metric",
+    # rich cards
+    "alert",
+    "image",
+    "map",
+    "web",
+    "calendar",
+    "stocks",
+    "crypto",
+    "weather",
+    "sports",
 }
+
+# The shape `data` must take, per type. Sent to the model in the schema so it
+# doesn't have to guess key names.
+_WIDGET_SHAPES = (
+    "bar/pie: {labels:[str], values:[num]} · "
+    "line: {labels:[str], datasets:[{label,values:[num]}]} · "
+    "table: {columns:[str], rows:[[cell]]} · "
+    "list: {items:[str]} · "
+    "stats: {items:[{label,value}]} · "
+    "progress: {items:[{label,pct}]} · "
+    "metric: {value,unit,trend:up|down|flat,sub} · "
+    "alert: {level:info|warn|error,title,text} · "
+    "image: {url,caption}"
+)
 
 
 def t_show_widget(args: dict, ctx: ToolContext) -> str:
@@ -3916,7 +3944,12 @@ TOOL_SCHEMAS: list[dict[str, Any]] = [
         "type": "function",
         "function": {
             "name": "show_widget",
-            "description": "Display structured data as a rich card on the connected iPhone.",
+            "description": (
+                "Draw structured data as a rich visual panel in the user's Cagentic tab "
+                "— bar/line/pie charts, tables, stat blocks, progress bars and more. "
+                "Prefer this over an ASCII table whenever the user should compare or "
+                "scan numbers. Data shapes — " + _WIDGET_SHAPES
+            ),
             "parameters": {
                 "type": "object",
                 "properties": {
@@ -4098,8 +4131,11 @@ TOOL_GROUPS: dict[str, list[str]] = {
         "phone_open_app",
         "phone_open_url",
         "phone_screenshot",
-        "show_widget",
     ],
+    # Rich cards — charts, tables, stat blocks — rendered straight into the
+    # gateway tab (and the iOS app). This lived in "phone" and so was invisible
+    # to the web UI, which is the surface that actually renders them.
+    "widgets": ["show_widget"],
     # off by default
     "teams": [
         "team_create",
@@ -4145,6 +4181,7 @@ DEFAULT_GROUPS: set[str] = {
     "coding",
     "worktree",
     "subagent",
+    "widgets",
 }
 
 

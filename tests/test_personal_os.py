@@ -3,7 +3,7 @@ from __future__ import annotations
 import errno
 import time
 
-from cagentic import capabilities, personal_os, storage
+from cagentic import personal_os, storage
 from cagentic.agent import Agent
 from cagentic.gateway import Gateway
 from cagentic.ollama_client import OllamaClient
@@ -84,59 +84,41 @@ def test_gateway_uses_next_port_when_configured_port_is_busy(tmp_path, monkeypat
     gateway.stop()
 
 
-def test_gateway_bootstrap_exposes_personal_os(tmp_path, monkeypatch):
+def test_gateway_no_longer_serves_the_personal_os_dashboard(tmp_path, monkeypatch):
+    """The gateway is a chat surface again, not a personal-OS dashboard.
+
+    The sidebar's "SYSTEM ROUTES" pages (Core, Inbox, Planner, Goals, Routines,
+    Skills, Connections) and the ~25 /api/os/* endpoints behind them are gone.
+    Bootstrap no longer ships a dashboard payload either — the browser stopped
+    reading it, and building one meant a briefing + architecture scan on every
+    page load.
+    """
     _isolated_config(tmp_path, monkeypatch)
     agent = Agent(OllamaClient("http://127.0.0.1:1"), "test", tmp_path)
     gateway = Gateway(agent, {"gateway": {"port": 8700}}, port=8700)
-    result = gateway.create_goal({"title": "Stay focused", "progress": 10})
-    assert result["ok"] is True
-    assert gateway.create_inbox_item({"title": "Review the brief"})["ok"] is True
-    assert (
-        gateway.create_routine(
-            {
-                "name": "Daily orientation",
-                "schedule_time": "08:00",
-                "days": [0, 1, 2, 3, 4],
-            }
-        )["ok"]
-        is True
-    )
-    bootstrap = gateway.bootstrap()
-    assert bootstrap["os"]["goals"][0]["title"] == "Stay focused"
-    assert bootstrap["os"]["stats"]["active_goals"] == 1
-    assert bootstrap["os"]["inbox"][0]["title"] == "Review the brief"
-    assert bootstrap["os"]["unread_inbox"] == 1
-    assert bootstrap["os"]["routines"][0]["name"] == "Daily orientation"
-    architecture = bootstrap["os"]["architecture"]
-    assert architecture["conductor"]["name"] == "Cagentic"
-    assert {branch["id"] for branch in architecture["branches"]} >= {
-        "memory",
-        "productivity",
-        "research",
-        "content",
-        "community",
-        "agency",
-        "sales",
-        "finance",
-        "ops",
-    }
-    assert architecture["status"]["routines"] == 1
+
+    assert "os" not in gateway.bootstrap()
+    for gone in ("personal_os_snapshot", "create_goal", "create_inbox_item", "create_routine"):
+        assert not hasattr(gateway, gone), f"{gone} should have gone with the dashboard"
+
+    # The background proactive runner is NOT part of the dashboard and must
+    # survive — the monitor is wired to it in Gateway.__init__.
+    assert callable(gateway._run_proactive_routine)
 
 
-def test_capability_catalog_is_grounded_in_available_tools():
-    catalog = capabilities.build_architecture(
-        available_tools={"note_write", "note_get", "note_search"},
-        active_tools={"note_write", "note_get"},
-        installed_skills=["meeting-notes"],
-    )
-    memory = next(branch for branch in catalog["branches"] if branch["id"] == "memory")
-    vault = next(item for item in memory["capabilities"] if item["name"] == "Personal Vault")
-    recall = next(item for item in memory["capabilities"] if item["name"] == "Conversation Recall")
-    assert vault["available"] is True
-    assert vault["active"] is False
-    assert recall["available"] is False
-    assert catalog["status"]["available_tools"] == 3
-    assert catalog["status"]["active_tools"] == 2
-    assert catalog["status"]["installed_skills"] == 1
-    ops = next(branch for branch in catalog["branches"] if branch["id"] == "ops")
-    assert any(item["name"] == "meeting-notes" for item in ops["capabilities"])
+def test_the_agent_can_still_reach_personal_os_data(tmp_path, monkeypatch):
+    """Removing the dashboard must not remove the underlying capability.
+
+    personal_os is shared by the (deleted) dashboard and the agent's `life`
+    tool group. Only the former went; the model can still create and read a
+    goal, which is what "ask Cagentic about my goals" depends on.
+    """
+    _isolated_config(tmp_path, monkeypatch)
+    from cagentic.state import AppState
+    from cagentic.tools import TOOL_GROUPS, ToolContext, dispatch
+
+    assert "goal_create" in TOOL_GROUPS["life"]
+    ctx = ToolContext(root=tmp_path, state=AppState(workspace=tmp_path, home=tmp_path))
+    created = dispatch("goal_create", {"title": "Ship the rework"}, ctx)
+    assert not created.startswith("ERROR:"), created
+    assert "Ship the rework" in dispatch("goal_list", {}, ctx)

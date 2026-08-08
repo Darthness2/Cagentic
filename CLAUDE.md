@@ -187,14 +187,16 @@ circular import. Shared display helpers (`fmt_duration`, `fmt_ago`,
 
 ### The personal-OS layer
 
-`personal_os.py` (goals, calendar events, deadlines) is shared by the gateway
-dashboard *and* the agent's `life` tool group — the dashboard shows real user
-data, not UI-only state. Around it: `proactive.py` (background monitoring +
+`personal_os.py` (goals, calendar events, deadlines) backs the agent's `life`
+tool group. It used to also back a gateway dashboard; that dashboard and its
+~25 `/api/os/*` routes were removed, so the *only* way in is now the tools —
+which means a change here shows up in chat, with nothing to keep in sync.
+`capabilities.py` went with it (it existed to build the architecture map for
+the dashboard's Skills page). Around it: `proactive.py` (background monitoring +
 notification inbox), `routines.py` (user-defined scheduled routines evaluated
-locally), `integrations.py` (read-only iCalendar / CalDAV — open standards, no
-vendor SDKs), `inbox.py` (local capture + standards-based email ingestion), and
-`capabilities.py` (the catalog behind the gateway's architecture map, grounded in
-real tools rather than decorative tiles).
+locally — `Gateway._run_proactive_routine` still runs them), `integrations.py`
+(read-only iCalendar / CalDAV — open standards, no vendor SDKs), and
+`inbox.py` (local capture + standards-based email ingestion).
 
 ### Sub-agents and teams
 
