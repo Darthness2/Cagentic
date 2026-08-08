@@ -43,6 +43,92 @@ def test_no_color_markdown_is_rendered_instead_of_leaking_syntax(monkeypatch):
     assert "\x1b" not in rendered
 
 
+# Answers that exercise every inline rule, plus the punctuation that must NOT
+# be read as markup (arithmetic, snake_case, a bare dash, a stray backtick).
+_MD_CORPUS = {
+    "bullets with bold": (
+        "Here are ideas:\n\n"
+        "- **Watch something** — I can look up episodes\n"
+        "- **Learn something cool** — always something going on\n"
+        "* **Star bullet** — the other marker\n"
+    ),
+    "headers": "# Big\n\n## Medium\n\n### Small\n\nbody text after\n",
+    "inline code": "Run `pip install -e .` then `pytest -q` to check.\n",
+    "links": "See [the docs](https://example.com/a) and [more](https://x.y/z).\n",
+    "nested indent": "  - indented bullet **bold** here\n    - deeper one\n",
+    "italics": "This is *italic* and _also italic_ and 2 * 3 = 6.\n",
+    "bold beside punctuation": "**Alpha**, **Beta**; **Gamma**! done\n",
+    "unclosed bold": "this has **an unclosed span that never closes at all\n",
+    "stray backtick": "a lone ` backtick and then plenty more text follows here\n",
+    "snake_case": "call some_function_name(foo_bar) and file_name.py now\n",
+    "mixed": (
+        "## Plan\n\n"
+        "- **step one** with `code` and [a link](http://e.co)\n"
+        "- *just italic* and **bold** together\n\n"
+        "Final `word`.\n"
+    ),
+    "implausibly long span": "x **" + ("y" * 400) + " tail\n",
+    "dash that is not a bullet": "well - this is not a bullet, just a dash\n",
+    "blank lines": "one\n\n\ntwo\n",
+}
+
+
+def _stream(chunks) -> str:
+    out: list[str] = []
+    md = ui.StreamMarkdown(emit=out.append)
+    for chunk in chunks:
+        md.feed(chunk)
+    md.flush()
+    return "".join(out)
+
+
+@pytest.mark.parametrize("name", sorted(_MD_CORPUS))
+@pytest.mark.parametrize("colored", [False, True])
+def test_streamed_markdown_does_not_depend_on_chunk_boundaries(monkeypatch, name, colored):
+    """What the user sees must not depend on where the network split the stream.
+
+    ``render_markdown`` renders exactly the string it is handed, and the
+    streaming renderer hands it mid-line fragments. A fragment boundary inside
+    ``**bold**`` used to leave both halves unrendered, and a fragment that
+    happened to *begin* with ``* `` was read as a bullet — which is how a clean
+    answer reached the terminal as ``**Watch something*• — I can look up…``.
+    Splitting inside a word was worse: ``some_function_name`` cut after
+    ``some`` leaves ``_function_name``, whose ``_`` then satisfies the italic
+    pattern's ``(?<!\\w)`` lookbehind and the underscores are eaten.
+
+    So: for any chunking, the result must equal the one-shot render.
+    """
+    monkeypatch.delenv("NO_COLOR", raising=False)
+    monkeypatch.setattr(ui, "_supports_color", lambda stream=None: colored)
+
+    text = _MD_CORPUS[name]
+    baseline = _stream([text])
+    assert baseline  # a corpus entry that renders to nothing proves nothing
+
+    for size in range(1, 41):
+        chunks = [text[i : i + size] for i in range(0, len(text), size)]
+        assert _stream(chunks) == baseline, f"chunk size {size} rendered differently"
+
+
+def test_streamed_markdown_survives_ragged_chunk_boundaries(monkeypatch):
+    """Providers do not split on a fixed stride — fuzz ragged splits too."""
+    import random
+
+    monkeypatch.delenv("NO_COLOR", raising=False)
+    monkeypatch.setattr(ui, "_supports_color", lambda stream=None: True)
+
+    rng = random.Random(20240607)
+    for name, text in _MD_CORPUS.items():
+        baseline = _stream([text])
+        for _ in range(40):
+            chunks, i = [], 0
+            while i < len(text):
+                step = rng.randint(1, 12)
+                chunks.append(text[i : i + step])
+                i += step
+            assert _stream(chunks) == baseline, f"{name} rendered differently when split ragged"
+
+
 def test_banner_and_messages_fit_a_narrow_terminal(monkeypatch, capsys):
     monkeypatch.setenv("NO_COLOR", "1")
     _set_terminal(monkeypatch, 36)

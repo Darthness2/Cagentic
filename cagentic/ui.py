@@ -276,20 +276,44 @@ _MD_ITALIC_AST_RX = re.compile(r"(?<![*\w])\*([^*\n]+?)\*(?!\w)")
 _MD_ITALIC_UND_RX = re.compile(r"(?<!\w)_([^_\n]+?)_(?!\w)")
 _MD_HEADER_RX = re.compile(r"^(#{1,6})\s+(.*)$", re.MULTILINE)
 _MD_BULLET_RX = re.compile(r"^(\s*)[-*]\s+", re.MULTILINE)
+# Same two rules for text that CONTINUES a line already on screen: they must
+# still fire after an embedded newline, but never at offset 0. A streamed
+# fragment starting "* — I can look up…" (the tail of "**Watch something**")
+# is not a bullet, and rewriting it to "• — …" corrupts the line.
+_MD_HEADER_CONT_RX = re.compile(r"(?<=\n)(#{1,6})\s+(.*)$", re.MULTILINE)
+_MD_BULLET_CONT_RX = re.compile(r"(?<=\n)(\s*)[-*]\s+")
+# A line start that has not yet revealed whether it opens with a bullet or a
+# header — the marker and the whitespace that confirms it may straddle two
+# streamed chunks. Nothing may be emitted while this matches.
+_MD_PENDING_MARKER_RX = re.compile(r"^[ \t]*(?:[-*]|#{1,6})?[ \t]*$")
+# The complete leading marker, once it has arrived. It is one indivisible
+# token: '-' emitted without its trailing space is just a dash, and the rest
+# of the line then arrives as a continuation where the bullet rule no longer
+# applies, so the bullet is lost.
+_MD_MARKER_PREFIX_RX = re.compile(r"[ \t]*(?:[-*]|#{1,6})[ \t]+")
 # <step N> markers the model emits to signal progress through its plan —
 # rendered as a visible 'on step N' header so the user sees what's happening.
 _MD_STEP_RX = re.compile(r"<step\s+(\d+)(?:\s*/\s*(\d+))?\s*>", re.IGNORECASE)
 # Same pattern used by StatusBar to extract step markers from raw delta chunks.
 _BAR_STEP_RX = _MD_STEP_RX
 _MD_LINK_RX = re.compile(r"\[([^\]\n]+)\]\(([^)\s]+)\)")
+# An SGR colour sequence. Escapes injected by one rule must be hidden from the
+# next: every one of them contains '[' and ends in 'm', which the link pattern
+# and the italic lookbehinds would otherwise read as ordinary text.
+_SGR_RX = re.compile(r"\x1b\[[0-9;]*m")
 
 
-def render_markdown(text: str) -> str:
+def render_markdown(text: str, *, line_start: bool = True) -> str:
     """Render a readable CommonMark subset with or without terminal color.
 
     Plain output is a real rendering path, not an early return.  This matters
     for ``NO_COLOR``, logs, snapshots, and piped output: users should see clean
     headings and code instead of raw formatting punctuation.
+
+    ``line_start=False`` says `text` continues a line already on screen, so the
+    rules anchored to a line start (bullets, headers) must not fire at offset
+    0.  The streaming renderer hands over mid-line fragments, and column 0 of a
+    fragment is not column 0 of the terminal.
     """
     text = sanitize(text)
     styled = _supports_color()
@@ -318,6 +342,24 @@ def render_markdown(text: str) -> str:
 
     out = _MD_INLINE_CODE_RX.sub(_stash_inline, out)
 
+    # Inline links: [text](url) → text (url, dimmed). Stashed like code, and
+    # stashed HERE, before any rule injects an escape sequence: every SGR code
+    # is 'ESC [ …' and the link pattern's '[' would happily match the one
+    # inside it, swallowing a whole styled line into a bogus link label. It
+    # also keeps a URL's underscores away from the italic rule.
+    def _stash_link(m: re.Match) -> str:
+        label, url = m.group(1), m.group(2)
+        if label == url:
+            rendered = color(url, GLOW) if styled else url
+        elif styled:
+            rendered = color(label, GLOW) + color(f" ({url})", SOFT)
+        else:
+            rendered = f"{label} ({url})"
+        placeholders.append(rendered)
+        return f"\x00INL{len(placeholders) - 1}\x00"
+
+    out = _MD_LINK_RX.sub(_stash_link, out)
+
     # Headers (one per line).
     def _header(m: re.Match) -> str:
         level = len(m.group(1))
@@ -330,11 +372,13 @@ def render_markdown(text: str) -> str:
             return color(body, DUSK + BOLD)
         return color(body, SURFACE + BOLD)
 
-    out = _MD_HEADER_RX.sub(_header, out)
+    out = (_MD_HEADER_RX if line_start else _MD_HEADER_CONT_RX).sub(_header, out)
 
     # Bullets.
     bullet = color("• ", DUSK) if styled else "• "
-    out = _MD_BULLET_RX.sub(lambda m: m.group(1) + bullet, out)
+    out = (_MD_BULLET_RX if line_start else _MD_BULLET_CONT_RX).sub(
+        lambda m: m.group(1) + bullet, out
+    )
 
     # Step markers: '<step 2>' becomes a styled '→ step 2', '<step 2/4>'
     # becomes '→ step 2 of 4'. Wrapped in newlines so they always read as
@@ -347,29 +391,126 @@ def render_markdown(text: str) -> str:
 
     out = _MD_STEP_RX.sub(_step, out)
 
+    # Hide every escape injected above before running the inline rules. An SGR
+    # sequence ends in 'm' — a word character — so a bullet rendered right
+    # before '*italic*' makes the italic pattern's (?<![*\w]) fail and the
+    # asterisks show raw. Whether that happens depended on whether the bullet
+    # and the span landed in the same streamed fragment, which is exactly the
+    # "sometimes the markdown doesn't work" report.
+    def _stash_sgr(m: re.Match) -> str:
+        placeholders.append(m.group(0))
+        return f"\x00INL{len(placeholders) - 1}\x00"
+
+    out = _SGR_RX.sub(_stash_sgr, out)
+
     # Bold and italic. (Order matters — bold first.)
     out = _MD_BOLD_RX.sub(lambda m: color(m.group(1), BOLD) if styled else m.group(1), out)
     out = _MD_ITALIC_AST_RX.sub(lambda m: color(m.group(1), ITALIC) if styled else m.group(1), out)
     out = _MD_ITALIC_UND_RX.sub(lambda m: color(m.group(1), ITALIC) if styled else m.group(1), out)
 
-    # Inline links: [text](url) → text (url, dimmed).
-    def _link(m: re.Match) -> str:
-        label, url = m.group(1), m.group(2)
-        if label == url:
-            return color(url, GLOW) if styled else url
-        if styled:
-            return color(label, GLOW) + color(f" ({url})", SOFT)
-        return f"{label} ({url})"
-
-    out = _MD_LINK_RX.sub(_link, out)
-
-    # Restore stashed code.
+    # Restore stashed code and links.
     def _restore(m: re.Match) -> str:
         return placeholders[int(m.group(1))]
 
     out = re.sub(r"\x00BLOCK(\d+)\x00", _restore, out)
     out = re.sub(r"\x00INL(\d+)\x00", _restore, out)
     return out
+
+
+# How much text may be held back waiting for an inline span to close. Past
+# this the span is implausible — an unmatched '`' or '**' must not stall the
+# stream for a whole paragraph — so we cut anyway and render it literally.
+_MAX_INLINE_HOLD = 200
+
+
+def _span_end(s: str, i: int) -> int:
+    """End index of the inline span opening at `s[i]`, ``-1`` if it hasn't
+    closed yet, or ``0`` if nothing opens there."""
+    c = s[i]
+    if c == "`":
+        j = s.find("`", i + 1)
+        return j + 1 if j >= 0 else -1
+    if s.startswith("**", i):
+        j = s.find("**", i + 2)
+        return j + 2 if j >= 0 else -1
+    if c == "[":
+        label = s.find("](", i + 1)
+        if label < 0:
+            # Still a candidate while the '](' could yet arrive: that is either
+            # no ']' at all, or a ']' sitting at the very end of what we have.
+            end = s.find("]", i + 1)
+            return 0 if 0 <= end < len(s) - 1 else -1
+        j = s.find(")", label + 2)
+        return j + 1 if j >= 0 else -1
+    if c in "*_":
+        # Mirror the italic patterns' guards so arithmetic ('2 * 3'), globs and
+        # snake_case don't read as spans: an opener is preceded by a non-word
+        # and followed by a non-space.
+        if i and (s[i - 1].isalnum() or s[i - 1] in "*_"):
+            return 0
+        if i + 1 >= len(s) or s[i + 1].isspace():
+            return 0
+        j = s.find(c, i + 1)
+        while 0 <= j and s[j - 1].isspace():
+            j = s.find(c, j + 1)
+        return j + 1 if j >= 0 else -1
+    return 0
+
+
+def _safe_split(s: str, cut: int, *, line_start: bool) -> int:
+    """Largest index ``<= cut`` that does not fall inside a markdown token.
+
+    ``render_markdown`` renders exactly the string it is handed, so a streamed
+    fragment cut in the middle of ``**bold**`` shows the literal asterisks and
+    drops the other half into the next fragment — which is how a clean answer
+    reaches the terminal as ``**Watch something*• — …``.  Pulling the cut back
+    keeps every token whole; the tail waits for the next chunk, or for the
+    newline that flushes the line entire.
+
+    Three things are indivisible:
+
+    * the leading bullet/header marker, when `line_start` — a ``-`` emitted
+      without its trailing space is just a dash, and the remainder of the line
+      then arrives as a continuation where the rule no longer applies;
+    * an inline span — both while it is still open and, once closed, through
+      its middle;
+    * a word. Cutting mid-word would also fabricate a boundary that the
+      renderer's lookbehinds trust: ``some_function_name`` split after
+      ``some`` leaves a fragment starting ``_function_name``, whose ``_`` now
+      satisfies ``(?<!\\w)`` and renders as italics, eating the underscores.
+      Cutting only after whitespace makes those lookbehinds true by
+      construction.
+    """
+    if line_start:
+        marker = _MD_MARKER_PREFIX_RX.match(s)
+        if marker is not None and cut < marker.end():
+            return 0
+
+    # The two rules feed each other — backing out of a word can land inside a
+    # span, and backing out of a span can land mid-word — so run them to a
+    # fixed point. `safe` only ever decreases, so this terminates.
+    safe = cut
+    previous = -1
+    while safe != previous:
+        previous = safe
+        while safe > 0 and not s[safe - 1].isspace():
+            safe -= 1
+        i = 0
+        while i < min(len(s), safe):
+            end = _span_end(s, i)
+            if end == 0:
+                i += 1
+                continue
+            if end < 0 or end > safe:
+                safe = i
+                break
+            i = end
+
+    # An unmatched '`' or '**', or one implausibly long word, must not stall
+    # the stream for a whole paragraph. Past the cap, cut and render literally.
+    if len(s) - safe > _MAX_INLINE_HOLD:
+        return cut
+    return safe
 
 
 class StreamMarkdown:
@@ -441,7 +582,9 @@ class StreamMarkdown:
             else:
                 prefix = self.cont_prefix
             self.opened = True
-            self.emit(prefix + render_markdown(line) + terminator)
+            # mid_line means this fragment continues a line already painted,
+            # so its offset 0 is not a line start — see render_markdown.
+            self.emit(prefix + render_markdown(line, line_start=not self.mid_line) + terminator)
         self.mid_line = terminator == ""
 
     def feed(self, text: str) -> None:
@@ -572,13 +715,25 @@ class StreamMarkdown:
                     self._emit_line(self.buf, "")
                     self.buf = ""
                 return
+            if not self.mid_line and _MD_PENDING_MARKER_RX.match(self.buf):
+                # At a real line start whose leading token could still turn out
+                # to be a bullet or a header. Emitting the bare '-' now would
+                # split it from the space that makes it a bullet, and the rest
+                # of the line arrives as a continuation where the rule no
+                # longer applies — the marker is lost and '-' is printed raw.
+                return
             keep = self._max_open - 1
             if len(self.buf) > keep:
                 # The prefix can't contain a complete open marker that hasn't
                 # been found above; safe to emit as a line continuation.
-                emit_now = self.buf[:-keep]
-                self.buf = self.buf[-keep:]
-                if emit_now:
+                cut = len(self.buf) - keep
+                # …but never through the middle of an inline span, or the two
+                # halves of a '**bold**' land in different fragments and
+                # neither one renders.
+                cut = _safe_split(self.buf, cut, line_start=not self.mid_line)
+                if cut > 0:
+                    emit_now = self.buf[:cut]
+                    self.buf = self.buf[cut:]
                     # Treat as a partial line (no newline yet).
                     self._emit_line(emit_now, "")
             return
@@ -1198,6 +1353,56 @@ def _os_home() -> str:
 # ---------------------------------------------------------------------------
 
 
+def _reserve_bottom_row_seq(rows: int, *, region_active: bool) -> str:
+    """Escapes that reserve row `rows` for the status bar and leave the cursor
+    INSIDE the resulting scroll region.
+
+    DECSTBM (`ESC [ t;b r`) homes the cursor to (1,1) per the VT spec, so it
+    must be bracketed in DECSC/DECRC (`ESC 7` / `ESC 8`) — otherwise the cursor
+    jumps to the top of the screen and the turn's first streamed tokens write
+    right over the banner and previous output.
+
+    The bracket alone is not enough: it faithfully restores a cursor that was
+    already on the LAST row, which is the row we just reserved. Row N sits
+    below the scroll region, where LF no longer scrolls — every line of the
+    turn overwrites that one row and the next paint frame erases it, so the
+    whole answer is written and wiped and the REPL looks like it returned
+    nothing. That is the REPL's steady state once the screen has scrolled
+    full, because prompt_toolkit leaves the cursor on the bottom row. (Seen
+    live under ConPTY: every paint frame restored to `ESC [ 24;22 H` on a
+    24-row screen.)
+
+    So free a row first: IND (`ESC D`) moves down one, scrolling only if we are
+    already at the bottom, and CUU (`ESC [ A`) steps back up without ever
+    scrolling. Both preserve the column, so a half-written streamed line is
+    never split — when the screen does scroll, the partial line rides up with
+    it and the cursor stays right after it. Mid-screen the pair is a no-op; on
+    the last row it scrolls once and leaves the cursor on row N-1.
+
+    `region_active` says whether a scroll region is already in effect (the
+    resize path, re-reserving mid-turn). It matters because IND scrolls
+    *within* the current region: with a stale region still set, the make-room
+    step could scroll the region's contents and drag the cursor off the line
+    being streamed. Resetting to the full screen first — bracketed, since that
+    escape homes too — makes IND behave exactly as it does at start().
+    """
+    prelude = ""
+    if region_active:
+        prelude = (
+            "\0337"  # ESC 7: save cursor (DECSC)
+            + "\033[r"  # reset scroll region to the full screen (homes)
+            + "\0338"  # ESC 8: restore cursor (DECRC)
+        )
+    return (
+        prelude
+        + "\033D"  # IND: down one row, scrolling if we're at the bottom
+        + "\033[A"  # CUU: back up one row (never scrolls)
+        + "\0337"  # ESC 7: save cursor (DECSC)
+        + f"\033[1;{rows - 1}r"  # DECSTBM — reserve bottom row (homes)
+        + "\0338"  # ESC 8: restore cursor (DECRC)
+    )
+
+
 class StatusBar:
     """One-row status bar pinned to the terminal's last line via DECSTBM.
 
@@ -1243,17 +1448,8 @@ class StatusBar:
         if not motion_enabled() or configured in {"off", "0", "false", "no"} or rows < 4:
             return
         self._last_rows = rows
-        # Reserve the last row from the scroll region. DECSTBM (ESC [ t;b r)
-        # homes the cursor to (1,1) per the VT spec, so it MUST be bracketed
-        # in DECSC/DECRC (ESC 7 / ESC 8) — otherwise the cursor jumps to the
-        # top of the screen and the turn's first streamed tokens write right
-        # over the banner and previous output.
         with _PAINT_LOCK:
-            sys.stdout.write(
-                "\0337"  # ESC 7: save cursor (DECSC)
-                + f"\033[1;{rows - 1}r"  # DECSTBM — reserve bottom row (homes)
-                + "\0338"  # ESC 8: restore cursor (DECRC)
-            )
+            sys.stdout.write(_reserve_bottom_row_seq(rows, region_active=False))
             sys.stdout.flush()
         self._active = True
         self._stop.clear()
@@ -1335,17 +1531,20 @@ class StatusBar:
     def _paint(self) -> None:
         text = self._compose()
         rows = shutil.get_terminal_size((80, 24)).lines
-        # On resize, re-reserve the bottom row against the new height. This
-        # goes INSIDE the save/restore bracket so the DECSTBM home doesn't
-        # strand the cursor and overwrite streaming output.
-        resize_seq = ""
-        if rows != self._last_rows:
-            resize_seq = f"\033[1;{rows - 1}r"
-            self._last_rows = rows
         with _PAINT_LOCK:
+            # On resize, re-reserve the bottom row against the new height —
+            # with the same make-room guard start() uses. Shrinking is the
+            # dangerous direction: the terminal clamps the cursor into the new,
+            # shorter screen, so it can land on the row we are about to reserve
+            # and every subsequent line of the turn gets painted over. This is
+            # emitted as its own statement rather than folded into the paint
+            # bracket below, because DECSC/DECRC is a single save slot on most
+            # terminals and nesting one pair inside another clobbers it.
+            if rows != self._last_rows:
+                sys.stdout.write(_reserve_bottom_row_seq(rows, region_active=True))
+                self._last_rows = rows
             sys.stdout.write(
                 "\0337"  # ESC 7: save cursor
-                + resize_seq  # re-reserve bottom row on resize
                 + f"\033[{rows};1H"  # move to bottom row
                 + "\033[2K"  # clear line
                 + color(text, MUTED)
