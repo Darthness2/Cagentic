@@ -48,6 +48,10 @@ _log = logging.getLogger(__name__)
 _LONGPOLL_SECONDS = 25
 # The extension counts as "connected" if it has polled within this window.
 _CONNECTED_WINDOW = 45
+# Shortest gap between two "invalid token" warnings. A client presenting a bad
+# token gets a 403 immediately — it never reaches the long poll — so an
+# unpaired extension can retry as fast as the network stack allows.
+_AUTH_WARN_INTERVAL = 60.0
 
 # Hosts we accept in the Host header (anti DNS-rebinding). Port is stripped
 # before comparison.
@@ -84,6 +88,9 @@ class BrowserBridge:
         self._pending: set[int] = set()  # command ids still awaited by send()
         self._next_id = 1
         self._last_poll = 0.0  # monotonic time of last extension poll
+        # Token rejections are throttled — see note_auth_failure().
+        self._auth_warn_at = 0.0
+        self._auth_warn_suppressed = 0
         self.error: str | None = None  # set if start() failed
         # Live status surfaced to the extension popup.
         self.model: str | None = None  # the loaded Ollama model
@@ -165,6 +172,32 @@ class BrowserBridge:
             # in-memory token (the user just won't be able to read it from disk).
             _log.warning("could not persist browser token file", exc_info=True)
         return token
+
+    def note_auth_failure(self) -> None:
+        """Log a token rejection, at most once per `_AUTH_WARN_INTERVAL`.
+
+        A stale token is one persistent condition, not N independent events.
+        The extension polls continuously, so logging per request turns a single
+        mis-pairing into an unbounded stream of identical warnings across the
+        whole session — which is what the user sees. Throttling keeps the log
+        readable no matter how fast a client retries, and the first line says
+        how to fix it rather than only what went wrong.
+        """
+        now = time.monotonic()
+        with self._lock:
+            if now < self._auth_warn_at:
+                self._auth_warn_suppressed += 1
+                return
+            suppressed = self._auth_warn_suppressed
+            self._auth_warn_suppressed = 0
+            self._auth_warn_at = now + _AUTH_WARN_INTERVAL
+        # Never log the token value — only where the real one lives.
+        _log.warning(
+            "rejected bridge request with missing/invalid token%s — re-pair the "
+            "Chrome extension with the token in %s",
+            f" ({suppressed} more suppressed)" if suppressed else "",
+            _token_path(),
+        )
 
     def verify_token(self, presented: str | None) -> bool:
         """Constant-time comparison of a presented token against ours."""
@@ -371,8 +404,7 @@ class _Handler(BaseHTTPRequestHandler):
             self._send_json({"error": "forbidden host"}, status=403)
             return False
         if not self._bridge().verify_token(self._presented_token()):
-            # Never log the token value, only the rejection.
-            _log.warning("rejected bridge request with missing/invalid token")
+            self._bridge().note_auth_failure()
             self._send_json({"error": "forbidden"}, status=403)
             return False
         return True

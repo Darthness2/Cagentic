@@ -352,6 +352,194 @@ class TestBrowserBridgeTimeout(unittest.TestCase):
         self.assertEqual(bridge._results, {})
 
 
+class TestBrowserBridgeAuthLogging(unittest.TestCase):
+    """A stale token must not flood the terminal.
+
+    An authenticated /next is held open by the bridge for ~25s, and that long
+    poll is the only thing pacing the extension's loop. A request with a bad
+    token is rejected *before* the long poll, so it returns immediately — the
+    extension retried with no backoff and the bridge logged a warning for every
+    attempt, so one mis-pairing produced an endless identical stream. Both ends
+    are fixed; this covers the bridge, which must stay quiet no matter how fast
+    any client hammers it.
+    """
+
+    def _rejections(self, bridge, n: int) -> list:
+        with self.assertLogs("cagentic.browser", level="WARNING") as caught:
+            for _ in range(n):
+                bridge.note_auth_failure()
+            # assertLogs fails the test if nothing is logged at all, so the
+            # first call must always emit — that is the point.
+            pass
+        return caught.output
+
+    def test_repeated_rejections_log_once_per_interval(self) -> None:
+        from cagentic.browser import BrowserBridge
+
+        bridge = BrowserBridge(port=0)
+        lines = self._rejections(bridge, 500)
+        self.assertEqual(len(lines), 1, f"expected one warning, got {len(lines)}")
+        self.assertIn("invalid token", lines[0])
+
+    def test_the_warning_says_how_to_fix_it_and_never_leaks_the_token(self) -> None:
+        from cagentic.browser import BrowserBridge, _token_path
+
+        bridge = BrowserBridge(port=0)
+        bridge.token = "super-secret-value"
+        lines = self._rejections(bridge, 1)
+        self.assertIn(_token_path(), lines[0])
+        self.assertNotIn("super-secret-value", lines[0])
+
+    def test_suppressed_rejections_are_counted_in_the_next_line(self) -> None:
+        from cagentic.browser import BrowserBridge
+
+        bridge = BrowserBridge(port=0)
+        bridge.note_auth_failure()  # opens the window
+        for _ in range(41):
+            bridge.note_auth_failure()  # suppressed
+        bridge._auth_warn_at = 0.0  # window elapses
+        with self.assertLogs("cagentic.browser", level="WARNING") as caught:
+            bridge.note_auth_failure()
+        self.assertIn("41 more suppressed", caught.output[0])
+
+    def test_a_real_rejected_request_over_http_is_throttled(self) -> None:
+        """End to end through the actual server, not just the helper."""
+        import socket
+        import urllib.error
+        import urllib.request
+
+        from cagentic.browser import BrowserBridge
+
+        # start() rejects port 0, so claim a free one and hand over the number.
+        with socket.socket() as probe:
+            probe.bind(("127.0.0.1", 0))
+            port = probe.getsockname()[1]
+
+        bridge = BrowserBridge(port=port)
+        self.assertTrue(bridge.start(), bridge.error)
+        try:
+            with self.assertLogs("cagentic.browser", level="WARNING") as caught:
+                for _ in range(25):
+                    req = urllib.request.Request(
+                        f"http://127.0.0.1:{port}/next",
+                        headers={"X-Cagentic-Token": "wrong"},
+                    )
+                    with self.assertRaises(urllib.error.HTTPError) as err:
+                        urllib.request.urlopen(req, timeout=5)
+                    self.assertEqual(err.exception.code, 403)
+        finally:
+            bridge.stop()
+        self.assertEqual(
+            len(caught.output), 1, f"25 rejected polls logged {len(caught.output)} lines"
+        )
+
+
+class TestWindowsShellSelection(unittest.TestCase):
+    """run_bash must never be routed through Windows' WSL launcher.
+
+    Windows ships stubs named `bash` — the App Execution Alias under
+    WindowsApps and the legacy System32 one — that hand the command to WSL,
+    and both sit ahead of Git Bash on PATH. On a machine with no WSL
+    distribution installed (the default) shutil.which("bash") therefore
+    returned a launcher that failed EVERY shell command with a UTF-16
+    "Windows Subsystem for Linux has no installed distributions". Git Bash was
+    installed the whole time; it just isn't on PATH under the name `bash`.
+    """
+
+    def setUp(self) -> None:
+        from cagentic import tools
+
+        tools.windows_posix_shell.cache_clear()
+
+    def tearDown(self) -> None:
+        from cagentic import tools
+
+        tools.windows_posix_shell.cache_clear()
+
+    def test_wsl_stubs_are_recognised(self) -> None:
+        from cagentic.tools import _is_wsl_launcher
+
+        self.assertTrue(
+            _is_wsl_launcher(r"C:\Users\x\AppData\Local\Microsoft\WindowsApps\bash.EXE")
+        )
+        self.assertTrue(_is_wsl_launcher(r"C:\Windows\System32\bash.exe"))
+        self.assertTrue(_is_wsl_launcher("C:/Windows/System32/wsl.exe"))
+
+    def test_a_real_shell_is_not_mistaken_for_a_stub(self) -> None:
+        import tempfile
+
+        from cagentic.tools import _is_wsl_launcher
+
+        with tempfile.TemporaryDirectory() as d:
+            real = Path(d) / "bash.exe"
+            real.write_bytes(b"MZ not really an executable but not empty either")
+            self.assertFalse(_is_wsl_launcher(str(real)))
+            # A zero-byte file IS the App Execution Alias shape.
+            alias = Path(d) / "alias.exe"
+            alias.write_bytes(b"")
+            self.assertTrue(_is_wsl_launcher(str(alias)))
+
+    def test_path_stub_is_skipped_in_favour_of_git_bash(self) -> None:
+        import tempfile
+        from unittest import mock
+
+        from cagentic import tools
+
+        with tempfile.TemporaryDirectory() as d:
+            root = Path(d)
+            stub = root / "WindowsApps" / "bash.exe"
+            stub.parent.mkdir(parents=True)
+            stub.write_bytes(b"")
+            git_bash = root / "Git" / "bin" / "bash.exe"
+            git_bash.parent.mkdir(parents=True)
+            git_bash.write_bytes(b"MZ real enough")
+
+            with (
+                mock.patch.object(tools.shutil, "which", lambda name: str(stub)),
+                mock.patch.object(tools, "_git_bash_roots", lambda: [root / "Git"]),
+            ):
+                self.assertEqual(tools.windows_posix_shell(), str(git_bash))
+
+    def test_falls_back_to_cmd_when_only_a_stub_exists(self) -> None:
+        from unittest import mock
+
+        from cagentic import tools
+
+        with (
+            mock.patch.object(tools.os, "name", "nt"),
+            mock.patch.object(tools.shutil, "which", lambda name: r"C:\Windows\System32\bash.exe"),
+            mock.patch.object(tools, "_git_bash_roots", lambda: []),
+        ):
+            tools.windows_posix_shell.cache_clear()
+            run_cmd, use_shell = tools._shell_run_invocation("echo hi")
+            self.assertEqual(run_cmd, ["cmd", "/c", "echo hi"])
+            self.assertFalse(use_shell)
+
+    @unittest.skipUnless(os.name == "nt", "Windows shell selection")
+    def test_the_selected_shell_actually_runs_unix_syntax(self) -> None:
+        """End to end on the real machine: whatever we picked must work."""
+        import subprocess
+
+        from cagentic.tools import _shell_run_invocation
+
+        run_cmd, use_shell = _shell_run_invocation("echo alpha | tr 'a-z' 'A-Z'")
+        if not use_shell:
+            self.assertNotIn("windowsapps", run_cmd[0].lower())
+            self.assertNotIn("system32", run_cmd[0].lower())
+        if run_cmd[0] == "cmd":
+            self.skipTest("no POSIX shell installed on this machine")
+        proc = subprocess.run(
+            run_cmd,
+            shell=use_shell,
+            capture_output=True,
+            text=True,
+            errors="replace",
+            timeout=60,
+        )
+        self.assertEqual(proc.returncode, 0, proc.stdout + proc.stderr)
+        self.assertIn("ALPHA", proc.stdout)
+
+
 class TestTagCoercion(unittest.TestCase):
     """A string where the schema asked for an array must not become letters."""
 

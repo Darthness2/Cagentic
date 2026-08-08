@@ -2009,18 +2009,82 @@ def _analyze_failure(stdout: str, stderr: str) -> str:
     return ("  ↳ " + "  ·  ".join(hints)) if hints else ""
 
 
+def _is_wsl_launcher(path: str) -> bool:
+    """True if `path` is one of Windows' WSL stubs rather than a real shell.
+
+    Windows ships launchers named `bash` that hand the command to WSL: the
+    App Execution Alias under WindowsApps, and the legacy System32 stub. Both
+    sit early on PATH, so shutil.which("bash") finds them *ahead* of Git Bash.
+    On a machine with no WSL distribution installed every command then dies
+    with "Windows Subsystem for Linux has no installed distributions" — which
+    arrives as UTF-16 mojibake — even though Git Bash is sitting right there.
+    Neither stub is ever a usable POSIX shell, so never pick one.
+    """
+    low = path.replace("/", "\\").lower()
+    if "\\windowsapps\\" in low or "\\system32\\" in low:
+        return True
+    try:
+        # App Execution Aliases are zero-byte reparse points.
+        return os.path.getsize(path) == 0
+    except OSError:
+        return False
+
+
+def _git_bash_roots() -> list[Path]:
+    """Directories that might contain a Git-for-Windows install."""
+    roots: list[Path] = []
+    git = shutil.which("git")
+    if git:
+        # git.exe lives in <install>\cmd or <install>\bin — the shell is a
+        # sibling of that directory.
+        roots.append(Path(git).resolve().parent.parent)
+    for var in ("ProgramFiles", "ProgramFiles(x86)", "ProgramW6432"):
+        base = os.environ.get(var)
+        if base:
+            roots.append(Path(base) / "Git")
+    local = os.environ.get("LOCALAPPDATA")
+    if local:
+        roots.append(Path(local) / "Programs" / "Git")
+    return roots
+
+
+@lru_cache(maxsize=1)
+def windows_posix_shell() -> str | None:
+    """Absolute path to a real POSIX shell on Windows, or None if there is
+    none. Cached — this stats the disk and runs before every shell command."""
+    for name in ("bash", "sh"):
+        found = shutil.which(name)
+        if found and not _is_wsl_launcher(found):
+            return found
+    # Git for Windows ships bash but frequently isn't on PATH under that name
+    # (only <install>\cmd is added, which holds git.exe but not bash.exe).
+    for root in _git_bash_roots():
+        for rel in ("bin/bash.exe", "usr/bin/bash.exe"):
+            candidate = root / rel
+            try:
+                if candidate.is_file() and not _is_wsl_launcher(str(candidate)):
+                    return str(candidate)
+            except OSError:
+                continue
+    return None
+
+
 def _shell_run_invocation(cmd: str):
     """Return (args, shell) for subprocess.run to execute `cmd` under a shell.
 
     On POSIX, shell=True uses /bin/sh. On Windows, shell=True uses cmd.exe,
     which rejects the Unix shell syntax the model often emits (&&, $VAR,
     pipes, redirects) — so a command like `grep foo file | head` fails. When
-    a POSIX shell (bash from Git Bash, or sh) is on PATH, route through it so
-    those commands work; otherwise fall back to cmd.exe (basic commands still
-    run, Unix syntax won't).
+    a real POSIX shell (bash from Git Bash, or sh) can be found, route through
+    it so those commands work; otherwise fall back to cmd.exe (basic commands
+    still run, Unix syntax won't).
+
+    "Real" is load-bearing: see _is_wsl_launcher. Picking Windows' WSL stub
+    sends every command into a subsystem that may have no distribution
+    installed, which fails 100% of shell calls on an otherwise fine machine.
     """
     if os.name == "nt":
-        posix_shell = shutil.which("bash") or shutil.which("sh")
+        posix_shell = windows_posix_shell()
         if posix_shell:
             return ([posix_shell, "-c", cmd], False)
         return (["cmd", "/c", cmd], False)
@@ -2041,6 +2105,9 @@ def t_run_bash(args: dict, ctx: ToolContext) -> str:
                 cwd=str(ctx.root),
                 capture_output=True,
                 text=True,
+                # A command that emits bytes the locale codec can't decode
+                # must not blow up the tool call with a UnicodeDecodeError.
+                errors="replace",
                 timeout=timeout,
             )
     except subprocess.TimeoutExpired:

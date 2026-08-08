@@ -1373,7 +1373,7 @@ body {
 .os-goal-top em { color:#aaa0b3;font:normal 9px var(--mono); }
 .os-goal-card>strong { display:block;color:#eee8f0;font-size:11px;margin:9px 0 10px;white-space:nowrap;overflow:hidden;text-overflow:ellipsis; }
 .os-progress { height:4px;border-radius:3px;background:rgba(255,255,255,.055);overflow:hidden; }
-.os-progress i { display:block;height:100%;background:linear-gradient(90deg,var(--accent),#ffd0ae);box-shadow:0 0 9px var(--accent-glow); }
+.os-progress i { display:block;height:100%;background:linear-gradient(90deg,var(--accent),#e7d4f0);box-shadow:0 0 9px var(--accent-glow); }
 .os-goal-foot { margin-top:8px; }
 .os-goal-foot span { color:#756c7d;font-size:8px; }
 .os-goal-foot button { border:0;background:transparent;color:var(--ok);cursor:pointer;font-size:8px; }

@@ -6,8 +6,10 @@
 // approval prompt before it ever reaches here.
 
 const DEFAULT_PORT = 8765;
-const CAG_ORANGE = "#ff8c42";   // the "iconic" Cagentic orange
+// The brand hue, kept in step with --accent in gateway_assets/app.css.
+const CAG_ACCENT = "#c79bd8";   // dusk mauve
 let looping = false;
+let authFailing = false;        // bridge is rejecting our token (403)
 let cagGroupId = null;          // id of the "Cagentic" tab group
 const glowTimers = new Map();   // tabId -> timeoutHandle for hide-soon
 
@@ -57,6 +59,24 @@ async function pollLoop() {
         });
         if (res.ok) {
           command = (await res.json()).command;
+          authFailing = false;
+        } else {
+          // An authenticated /next is held open by the bridge for ~25s, and
+          // that is the ONLY thing pacing this loop. A rejected one returns
+          // immediately, so without a backoff we spin as fast as fetch allows
+          // and the bridge logs a rejection for every attempt — a stale token
+          // turns into an endless "rejected bridge request" stream in the
+          // user's terminal. 403 needs the user to re-paste the token (the
+          // popup says so), so warn once rather than on every retry; the wait
+          // stays short enough that re-pairing takes effect promptly.
+          if (res.status === 403 && !authFailing) {
+            authFailing = true;
+            console.warn(
+              "Cagentic: bridge rejected our token (403) — re-pair in the popup."
+            );
+          }
+          await sleep(res.status === 403 ? 10000 : 3000);
+          continue;
         }
       } catch (e) {
         console.warn("Cagentic: /next poll failed", e);
@@ -180,7 +200,7 @@ function blockedIPv4(ip) {
 }
 
 async function dispatch(action, p) {
-  // Resolve the target tab up-front so we can apply the orange glow and the
+  // Resolve the target tab up-front so we can apply the accent glow and the
   // "Cagentic" tab group around the actual work.
   let tabId = null;
   if (PER_TAB_ACTIONS.has(action)) {
@@ -393,7 +413,7 @@ async function ensureGroup(tabId) {
     if (cagGroupId == null) {
       cagGroupId = await chrome.tabs.group({ tabIds: [tabId] });
       await chrome.tabGroups.update(cagGroupId, {
-        title: "Cagentic", color: "orange",
+        title: "Cagentic", color: "purple",
       });
       return;
     }
@@ -409,7 +429,7 @@ async function ensureGroup(tabId) {
   }
 }
 
-// ---- orange "AI is working" glow -----------------------------------------
+// ---- accent "AI is working" glow -----------------------------------------
 
 async function glowOn(tabId) {
   // Cancel any pending hide so a fresh action keeps the glow continuous.
@@ -419,7 +439,7 @@ async function glowOn(tabId) {
     await chrome.scripting.executeScript({
       target: { tabId },
       func: showCagGlow,
-      args: [CAG_ORANGE],
+      args: [CAG_ACCENT],
     });
   } catch (e) {
     // chrome:// page, detached, or restricted — glow is cosmetic only.
@@ -447,16 +467,16 @@ function glowOffSoon(tabId) {
 
 // ---- injected page functions (must be self-contained) ---------------------
 
-function showCagGlow(orange) {
+function showCagGlow(accent) {
   if (document.getElementById("__cag-glow")) return;
   const style = document.createElement("style");
   style.id = "__cag-glow-style";
   style.textContent = `
     @keyframes __cagGlowPulse {
-      0%, 100% { box-shadow: inset 0 0 0 3px ${orange}cc,
-                             inset 0 0 36px 4px ${orange}55; }
-      50%      { box-shadow: inset 0 0 0 3px ${orange},
-                             inset 0 0 56px 9px ${orange}88; }
+      0%, 100% { box-shadow: inset 0 0 0 3px ${accent}cc,
+                             inset 0 0 36px 4px ${accent}55; }
+      50%      { box-shadow: inset 0 0 0 3px ${accent},
+                             inset 0 0 56px 9px ${accent}88; }
     }
     #__cag-glow {
       position: fixed; inset: 0; pointer-events: none;

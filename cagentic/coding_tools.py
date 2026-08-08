@@ -151,6 +151,16 @@ def _check_js(src: str, label: str, is_ts: bool) -> tuple[bool, str]:
 
 
 def _check_bash(src: str, label: str) -> tuple[bool, str]:
+    # Resolve the shell the same way run_bash does rather than trusting PATH:
+    # on Windows the first `bash` is usually a WSL launcher, which would
+    # report "no installed distributions" as if it were a syntax error.
+    if os.name == "nt":
+        from .tools import windows_posix_shell
+
+        shell = windows_posix_shell()
+        if not shell:
+            return True, "skipped (no POSIX shell installed)"
+        return _check_via_cmd([shell, "-n"], src, label)
     return _check_via_cmd(["bash", "-n"], src, label)
 
 
