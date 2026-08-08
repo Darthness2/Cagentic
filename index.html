@@ -1,0 +1,249 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8" />
+<meta name="viewport" content="width=device-width, initial-scale=1" />
+<title>Cagentic</title>
+<link rel="stylesheet" href="/app.css" />
+</head>
+<body>
+<div id="app">
+  <div class="scanlines"></div>
+  <div class="vignette"></div>
+
+  <header class="hud-header">
+    <div class="hdr-left">
+        <span class="jl">C</span><span class="jd">&middot;</span><span class="jl">A</span><span class="jd">&middot;</span><span class="jl">G</span><span class="jd">&middot;</span><span class="jl">E</span><span class="jd">&middot;</span><span class="jl">N</span><span class="jd">&middot;</span><span class="jl">T</span><span class="jd">&middot;</span><span class="jl">I</span><span class="jd">&middot;</span><span class="jl">C</span>
+      <span class="j-sub">COGNITIVE AGENT NETWORK FOR INTELLIGENT COMPUTING</span>
+    </div>
+    <div class="hdr-right">
+      <span class="badge b-on">&#9679; Connected</span>
+      <div class="model-switch" id="modelSwitch" title="Switch model">
+        <span class="ms-dot">&#9679;</span>
+        <span class="ms-name" id="msName">---</span>
+        <span class="ms-caret">&#9662;</span>
+        <div class="model-menu hidden" id="modelMenu"></div>
+      </div>
+      <div class="j-clock" id="jClock">00:00:00</div>
+      <div class="j-date"  id="jDate">---</div>
+    </div>
+  </header>
+
+  <div class="nav-bar">
+    <button class="nav-btn" id="logsBtn">[ Chats ]</button>
+    <button class="nav-btn" id="newMissionBtn">[ + New Chat ]</button>
+    <div class="nav-divider"></div>
+    <span class="nav-meta">SESSION <span id="jSession">--------</span></span>
+    <div class="nav-spacer"></div>
+    <button class="nav-btn toggle-btn" id="voiceOutBtn" title="Read replies aloud">[ &#128264; Voice: OFF ]</button>
+  
+    <div class="nav-divider"></div>
+    <button class="nav-btn" id="configBtn">[ CONFIG ]</button>
+  </div>
+
+  <div class="main-area">
+    <div class="center-stack" id="centerStack">
+      <div class="orb-zone" id="orbZone">
+        <canvas id="orbCanvas"></canvas>
+        <div class="orb-rings">
+          <div class="ring r1"></div><div class="ring r2"></div>
+          <div class="ring r3"></div><div class="ring r4"></div>
+        </div>
+        <div class="orb-label" id="orbLabel">New Chat</div>
+      </div>
+      <div id="log" class="chat-log"></div>
+    </div>
+  </div>
+
+  <div id="windowLayer"></div>
+  <div id="restorePill" class="restore-pill" style="display:none">
+    <span class="restore-pill-icon">↩</span><span class="restore-pill-count">0</span> panels
+    <div class="restore-dropdown" id="restoreDropdown"></div>
+  </div>
+
+  <div class="cmd-area">
+    <div class="cmd-box" id="cmdBox">
+      <span class="cmd-prompt">&gt;_</span>
+      <textarea id="input" rows="1" placeholder="Type a message&#8230;"></textarea>
+      <button id="micBtn" class="mic-btn" title="Voice input">&#127908;</button>
+      <button id="send" class="exec-btn">EXECUTE</button>
+      <button id="stopBtn" class="exec-btn stop-btn hidden">&#9632; STOP</button>
+    </div>
+    <div class="cmd-footer">
+      <span>CAGENTIC v<span id="versionSpan">--</span></span>
+      <span id="hintText">Enter to send &bull; Shift+Enter for newline &bull; Ctrl+K New Chat &bull; Ctrl+S Settings</span>
+      <span id="busyLabel" class="busy-label hidden">&#9679; Thinking&#8230;</span>
+      <span id="tokenStats" class="token-stats hidden"></span>
+    </div>
+  </div>
+</div>
+
+<!-- Sessions drawer -->
+<div id="sessionsPanel" class="sessions-panel">
+  <div class="sessions-head">
+    <span class="panel-hdr">&#123; Sessions &#125;</span>
+    <button id="closeSessionsBtn" class="icon-btn">&#10005;</button>
+  </div>
+  <div id="sessionList" class="session-list"></div>
+</div>
+
+<div id="backdrop" class="backdrop hidden"></div>
+
+<!-- Settings modal -->
+<div id="settingsModal" class="modal hidden">
+  <div class="modal-card">
+    <div class="modal-head">
+      <span class="panel-hdr">&#123; Settings &#125;</span>
+      <button id="closeSettings" class="icon-btn">&#10005;</button>
+    </div>
+    <div class="modal-body">
+      <div class="field">
+        <span class="field-label">MODEL</span>
+        <select id="setModel"></select>
+      </div>
+      <div class="field">
+        <span class="field-label">OPERATOR NAME</span>
+        <input id="setName" type="text" placeholder="Your name" />
+      </div>
+      <div class="field">
+        <span class="field-label">TEMPERATURE &nbsp;<em id="tempVal">0.40</em></span>
+        <input id="setTemp" type="range" min="0" max="1.5" step="0.05" />
+      </div>
+      <div class="field">
+        <span class="field-label">Voice (TTS)</span>
+        <select id="setVoice"></select>
+      </div>
+      <div class="field row">
+        <span class="field-label">Stream responses</span>
+        <label class="toggle"><input id="setStream" type="checkbox" /><span></span></label>
+      </div>
+      <div class="field row">
+        <span class="field-label">Auto-approve tools</span>
+        <label class="toggle"><input id="setYolo" type="checkbox" /><span></span></label>
+      </div>
+      <hr class="settings-divider" />
+      <div class="section-label">GATEWAY</div>
+      <div class="field">
+        <span class="field-label">PORT</span>
+        <input id="setGwPort" type="number" min="1" max="65535" placeholder="8700" />
+      </div>
+      <div class="field row">
+        <span class="field-label">Auto-start on launch</span>
+        <label class="toggle"><input id="setGwAuto" type="checkbox" /><span></span></label>
+      </div>
+      <div class="field-hint">Port takes effect next launch. Auto-start can be toggled anytime.</div>
+      <hr class="settings-divider" />
+      <div class="section-label">SYSTEM PROMPT</div>
+      <div class="field">
+        <span class="field-label">Custom instructions</span>
+        <textarea id="setSysPrompt" rows="4" placeholder="Additional instructions appended to the system prompt&#8230;"></textarea>
+      </div>
+    </div>
+    <div class="modal-foot">
+      <button id="cancelSettings" class="btn-ghost">Cancel</button>
+      <button id="saveSettings"   class="btn-primary">Save</button>
+    </div>
+  </div>
+</div>
+<!-- Confirm modal -->
+<div id="confirmModal" class="modal hidden">
+  <div class="modal-card sm">
+    <div class="modal-head">
+      <span id="confirmTitle" class="modal-title">Confirm</span>
+      <button id="confirmClose" class="icon-btn">&#10005;</button>
+    </div>
+    <div class="modal-body">
+      <p id="confirmMsg" class="modal-msg"></p>
+    </div>
+    <div class="modal-foot">
+      <button id="confirmCancel" class="btn-ghost">Cancel</button>
+      <button id="confirmOk" class="btn-primary">Delete</button>
+    </div>
+  </div>
+</div>
+
+<!-- Rename modal -->
+<div id="renameModal" class="modal hidden">
+  <div class="modal-card md">
+    <div class="modal-head">
+      <span class="modal-title">Rename</span>
+      <button id="renameClose" class="icon-btn">&#10005;</button>
+    </div>
+    <div class="modal-body">
+      <input id="renameInput" type="text" class="modal-input" />
+    </div>
+    <div class="modal-foot">
+      <button id="renameCancel" class="btn-ghost">Cancel</button>
+      <button id="renameOk" class="btn-primary">Rename</button>
+    </div>
+  </div>
+</div>
+
+<!-- New project modal -->
+<div id="newProjectModal" class="modal hidden">
+  <div class="modal-card md">
+    <div class="modal-head">
+      <span class="modal-title">New Project</span>
+      <button id="newProjectModalClose" class="icon-btn">&#10005;</button>
+    </div>
+    <div class="modal-body">
+      <input id="newProjectInput" type="text" placeholder="Project name" class="modal-input" />
+    </div>
+    <div class="modal-foot">
+      <button id="newProjectCancel" class="btn-ghost">Cancel</button>
+      <button id="newProjectOk" class="btn-primary">Create</button>
+    </div>
+  </div>
+</div>
+
+<!-- Add to project modal -->
+<div id="projectModal" class="modal hidden">
+  <div class="modal-card md">
+    <div class="modal-head">
+      <span class="modal-title">Add to Project</span>
+      <button id="projectModalClose" class="icon-btn">&#10005;</button>
+    </div>
+    <div class="modal-body" id="projectModalBody">
+    </div>
+    <div class="modal-foot">
+      <button id="projectModalNewBtn" class="btn-ghost">+ New Project</button>
+      <button id="projectModalCancel" class="btn-ghost">Cancel</button>
+    </div>
+  </div>
+</div>
+
+<!-- Project config modal -->
+<div id="projConfigModal" class="modal hidden">
+  <div class="modal-card lg">
+    <div class="modal-head">
+      <span class="modal-title">Project Config</span>
+      <button id="projConfigClose" class="icon-btn">&#10005;</button>
+    </div>
+    <div class="modal-body">
+      <div class="field">
+        <span class="field-label">SYSTEM PROMPT</span>
+        <textarea id="projConfigPrompt" rows="5" class="modal-textarea" placeholder="Custom instructions for this project's chats&#10;(appended after the base system prompt)"></textarea>
+      </div>
+      <div class="field">
+        <span class="field-label">CONTEXT / NOTES</span>
+        <textarea id="projConfigContext" rows="5" class="modal-textarea" placeholder="Reference material always included in this project's chats&#10;(e.g. coding standards, project background, key contacts)"></textarea>
+      </div>
+    </div>
+    <div class="modal-foot">
+      <button id="projConfigCancel" class="btn-ghost">Cancel</button>
+      <button id="projConfigSave" class="btn-primary">Save</button>
+    </div>
+  </div>
+</div>
+
+<!-- Context menu (floating) -->
+<div id="ctxMenu" class="ctx-menu hidden">
+  <div class="ctx-item" data-action="rename">&#9998; Rename</div>
+  <div class="ctx-item" data-action="project">&#128193; Add to Project</div>
+  <div class="ctx-sep"></div>
+  <div class="ctx-item ctx-danger" data-action="delete">&#128465; Delete</div>
+</div>
+
+<script src="/app.js"></script>
+</body>
+</html>
