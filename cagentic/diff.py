@@ -11,13 +11,22 @@ DEFAULT_MAX_LINES = 12
 
 
 def render(
-    old: str, new: str, path: str, context: int = 3, max_lines: int = DEFAULT_MAX_LINES
+    old: str,
+    new: str,
+    path: str,
+    context: int = 3,
+    max_lines: int = DEFAULT_MAX_LINES,
+    colorize: bool = True,
 ) -> str:
-    """Return a colored unified-diff string, truncated to `max_lines`.
+    """Return a unified-diff string, truncated to `max_lines`.
 
     Empty if nothing changed. When the diff is longer than `max_lines`, the
     preview is cut off and a '… +N more lines' marker is appended so you can
     see something changed without flooding the terminal.
+
+    `colorize=False` yields plain text — needed by non-terminal consumers such
+    as the gateway, which puts the diff in a JSON event where ANSI escapes
+    would be rendered literally by the browser.
     """
     old_lines = old.splitlines(keepends=False)
     new_lines = new.splitlines(keepends=False)
@@ -39,6 +48,9 @@ def render(
     shown = diff_lines[:max_lines]
     for line in shown:
         line = ui.sanitize(line)
+        if not colorize:
+            out.append(line)
+            continue
         if line.startswith("+++") or line.startswith("---"):
             rendered = ui.color(line, ui.BOLD)
         elif line.startswith("@@"):
@@ -53,12 +65,8 @@ def render(
 
     remaining = len(diff_lines) - len(shown)
     if remaining > 0:
-        out.append(
-            ui.truncate(
-                ui.color(f"  … +{remaining} more diff line(s) (truncated)", ui.SOFT),
-                ui.width(),
-            )
-        )
+        tail = f"  … +{remaining} more diff line(s) (truncated)"
+        out.append(tail if not colorize else ui.truncate(ui.color(tail, ui.SOFT), ui.width()))
     return "\n".join(out)
 
 

@@ -277,7 +277,7 @@ def test_gateway_collama_compat_endpoints(tmp_path, monkeypatch):
             r = urllib.request.Request(
                 f"http://127.0.0.1:18991{path}",
                 data=data,
-                headers={"X-Cagentic-Link": gw.token, "Content-Type": "application/json"},
+                headers={"X-Cagentic-Token": gw.token, "Content-Type": "application/json"},
             )
             with urllib.request.urlopen(r) as resp:
                 return json.loads(resp.read())

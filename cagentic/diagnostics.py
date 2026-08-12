@@ -48,4 +48,24 @@ def run(cfg: dict) -> dict:
     browser = raw_browser if isinstance(raw_browser, dict) else {}
     browser_enabled = command_utils.boolean_value(browser.get("enabled", True), True)
     add("browser", browser_enabled, "enabled in config")
+
+    # Report the sandbox explicitly: shell commands are confined by default, so
+    # a missing backend (or a deliberate shell.sandbox=off) changes what an
+    # approval actually grants, and that shouldn't be something you discover by
+    # accident when a command fails to reach the network.
+    from . import sandbox as _sandbox
+
+    raw_shell = cfg.get("shell")
+    shell = raw_shell if isinstance(raw_shell, dict) else {}
+    sandbox_setting = str(shell.get("sandbox", "auto")).lower()
+    network_setting = str(shell.get("network", "deny")).lower()
+    if sandbox_setting == "off":
+        add("shell_sandbox", False, "disabled by config (shell.sandbox=off)")
+    else:
+        kind = _sandbox.backend()
+        add(
+            "shell_sandbox",
+            kind != "none",
+            f"{_sandbox.describe()}; network {network_setting}",
+        )
     return {"ok": all(item["ok"] for item in checks), "checks": checks}

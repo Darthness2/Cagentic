@@ -55,15 +55,47 @@ _DEFAULTS: dict[str, Any] = {
         },
         "anthropic": {
             "api_key": None,
+            # Cache the stable request prefix (tools + system + history tail).
+            # Cache writes cost 1.25x and reads 0.1x, so for an agent loop that
+            # re-sends the same prefix every step this is a large net win. Turn
+            # it off only to debug a caching-related API error.
+            "prompt_cache": True,
         },
     },
+    "shell": {
+        # "auto" confines run_bash/bash_async with the platform sandbox
+        # (macOS sandbox-exec, Linux bubblewrap): reads are unrestricted,
+        # writes are limited to the workspace. "off" runs unconfined.
+        "sandbox": "auto",
+        # "deny" cuts network access unless the individual call passes
+        # network=true (which the user sees at the approval prompt).
+        "network": "deny",
+    },
+    # Pattern permission rules — "tool" or "tool(glob)", e.g.
+    #   "allow": ["run_bash(git status*)", "run_bash(git diff*)"]
+    #   "deny":  ["run_bash(rm -rf*)"]
+    # Deny beats everything, including yolo. A workspace can add its own in
+    # .cagentic/settings.json (shared) and .cagentic/settings.local.json
+    # (personal, gitignore it).
+    "permissions": {"allow": [], "deny": []},
     "github": {"token": None},
     "mcp": {"servers": {}},  # {name: {"command": [...], "env": {...}, "enabled": bool}}
-    "browser": {"enabled": True, "port": 8765},  # companion Chrome extension bridge
+    # Companion Chrome extension bridge. `sites` is a per-site permission
+    # list of host globs — deny always wins, and a non-empty allow turns it
+    # into an allow-list. Empty means "any site".
+    "browser": {
+        "enabled": True,
+        "port": 8765,
+        "sites": {"allow": [], "deny": []},
+    },
     "gateway": {
         "port": 8700,
         "auto_port": True,  # try the next 20 ports when the preferred one is occupied
         "workspace_roots": None,
+        # Restart `cagentic --serve` when the installed package's source
+        # changes. Only affects the standalone daemon (the background service);
+        # the REPL's own /gateway shares that process and is never re-execed.
+        "auto_reload": True,
     },  # /gateway web UI
     "proactive": {
         "enabled": True,

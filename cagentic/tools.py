@@ -40,6 +40,27 @@ def _truncate(s: str, limit: int = MAX_OUTPUT_CHARS) -> str:
     return s[:limit] + f"\n…[truncated, {len(s) - limit} more chars]"
 
 
+def _truncate_ends(s: str, limit: int = MAX_OUTPUT_CHARS) -> str:
+    """Keep the head AND the tail of long output, dropping the middle.
+
+    Head-only truncation is the wrong shape for a command: a failing build
+    prints thousands of lines and then the one line that says what broke, and
+    cutting from the front throws that away — the model then retries blind.
+    Two thirds head, one third tail: the head carries what ran, the tail
+    carries how it ended.
+    """
+    if len(s) <= limit:
+        return s
+    head = (limit * 2) // 3
+    tail = limit - head
+    dropped = len(s) - head - tail
+    return (
+        s[:head]
+        + f"\n\n…[{dropped} chars of output omitted from the middle]\n\n"
+        + s[-tail:]
+    )
+
+
 class PathEscapeError(Exception):
     """Raised when a resolved path would escape the workspace root."""
 
@@ -108,7 +129,6 @@ class ToolContext:
     tasks: object | None = None
     teams: object | None = None
     read_cache: dict | None = None
-    phone_action: Callable[[str, dict], dict | None] | None = None
     widget_action: Callable[[str, str, dict], str | None] | None = None
     # A tool that produces an image (e.g. browser_screenshot) appends raw
     # base64 PNG data here; the engine attaches it to the tool result
@@ -218,6 +238,9 @@ def _record_edit(ctx: ToolContext, path: Path, before: str, after: str, op: str)
                 "before": before,
                 "after": after,
                 "op": op,
+                # Which user turn produced this edit — /rewind restores whole
+                # turns, not individual writes.
+                "turn": int(getattr(state, "turn_index", 0)),
             }
         )
         del hist[:-MAX_EDIT_HISTORY]
@@ -387,6 +410,72 @@ def _write_text_raw(p: Path, text: str) -> None:
     p.write_text(text, encoding="utf-8", newline="")
 
 
+# Sentinel for the one _plan_edit failure the caller must handle itself: the
+# "old_string not found" message needs the per-file failure counter in AppState
+# to decide whether to suggest replace_lines, which a pure function can't see.
+_EDIT_NOT_FOUND = "\x00edit-not-found"
+
+
+def _plan_edit(raw: str, old: str, new: str, replace_all: bool) -> tuple[str | None, str, str]:
+    """Pure core of t_edit_file — returns (new_text, label, error).
+
+    Split out of the tool so the approval prompt can render the *exact* diff
+    that would be applied. Computing the preview separately would mean two
+    copies of this match logic, and a preview that drifts from the tool shows
+    the user a diff they didn't actually approve — worse than showing none.
+
+    Never touches the filesystem. Exactly one of new_text / error is set, and
+    the returned text already has the file's original line endings restored.
+    """
+    count = raw.count(old)
+    if count == 1 or (count > 1 and replace_all):
+        # The model writes LF; splicing that into a CRLF file would leave mixed
+        # endings on the new lines. Match the replacement to the file.
+        spliced = _restore_eol(raw, _norm_eol(new))
+        new_text = raw.replace(old, spliced) if replace_all else raw.replace(old, spliced, 1)
+        return new_text, f"replace {count} occurrence(s)", ""
+
+    if count > 1:
+        return (
+            None,
+            "",
+            f"ERROR: old_string matches {count} times — pass replace_all=true or supply more context",
+        )
+
+    # Recovery: line-ending + whitespace tolerant
+    text = _norm_eol(raw)
+    old_n = _norm_eol(old)
+    new_n = _norm_eol(new)
+    if text.count(old_n) == 1:
+        merged = text.replace(old_n, new_n, 1)
+        return _restore_eol(raw, merged), "replace 1 occurrence (line-ending normalized)", ""
+
+    span = _fuzzy_span(text, old_n)
+    if span is None:
+        return None, "", _EDIT_NOT_FOUND
+    i, j, exact = span
+    if not exact:
+        # The only match differs from old_string by whitespace alone.
+        # Refuse rather than silently rewriting a region the model didn't
+        # supply verbatim — point it at the surgical line-range tool.
+        return (
+            None,
+            "",
+            f"ERROR: no exact match for old_string; the closest region (lines "
+            f"{i + 1}-{j}) differs only in whitespace. Re-supply old_string "
+            f"matching the file EXACTLY (including indentation), or use "
+            f"replace_lines(path, start_line, end_line, new_content) for a "
+            f"surgical edit.",
+        )
+    file_lines = text.split("\n")
+    merged = "\n".join(file_lines[:i] + new_n.split("\n") + file_lines[j:])
+    return (
+        _restore_eol(raw, merged),
+        f"replace lines {i + 1}-{j} (whitespace-tolerant)",
+        "",
+    )
+
+
 def t_edit_file(args: dict, ctx: ToolContext) -> str:
     path = args["path"]
     old = args["old_string"]
@@ -400,105 +489,57 @@ def t_edit_file(args: dict, ctx: ToolContext) -> str:
         return f"ERROR: file not found: {path}"
     raw = _read_text_robust(p)
 
-    count = raw.count(old)
-    if count == 1 or (count > 1 and replace_all):
-        if not ctx.confirm("file edit", f"{path}: replace {count} occurrence(s)"):
-            return "ERROR: user denied edit"
-        # The model writes LF; splicing that into a CRLF file would leave mixed
-        # endings on the new lines. Match the replacement to the file.
-        new = _restore_eol(raw, _norm_eol(new))
-        new_text = raw.replace(old, new) if replace_all else raw.replace(old, new, 1)
-        if raw.strip() and not new_text.strip() and not args.get("allow_empty"):
-            return f"ERROR: refusing to empty {path}. Pass allow_empty=true to confirm."
-        _write_text_raw(p, new_text)
-        _record_edit(ctx, p, raw, new_text, "edit")
-        adds, dels = _diff.stats(raw, new_text)
-        return f"OK: edited {path} +{adds} -{dels}"
-    if count > 1:
-        return f"ERROR: old_string matches {count} times — pass replace_all=true or supply more context"
-
-    # Recovery: line-ending + whitespace tolerant
-    text = _norm_eol(raw)
-    old_n = _norm_eol(old)
-    new_n = _norm_eol(new)
-    if text.count(old_n) == 1:
-        if not ctx.confirm("file edit", f"{path}: replace 1 occurrence (line-ending normalized)"):
-            return "ERROR: user denied edit"
-        new_text = text.replace(old_n, new_n, 1)
-    else:
-        span = _fuzzy_span(text, old_n)
-        if span is None:
-            lines = len(text.splitlines())
-            state = getattr(ctx, "state", None)
-            fail_count = 1
-            if state is not None:
-                fails = dict(getattr(state, "edit_fails", {}) or {})
-                rp = str(p.resolve())
-                fails[rp] = fails.get(rp, 0) + 1
-                fail_count = fails[rp]
-                state.update(edit_fails=fails)
-            msg = (
-                f"ERROR: old_string not found in {path} (file has {lines} lines). "
-                f"old_string must match the file EXACTLY, including indentation."
+    new_text, label, error = _plan_edit(raw, old, new, replace_all)
+    if error == _EDIT_NOT_FOUND:
+        text = _norm_eol(raw)
+        lines = len(text.splitlines())
+        state = getattr(ctx, "state", None)
+        fail_count = 1
+        if state is not None:
+            fails = dict(getattr(state, "edit_fails", {}) or {})
+            rp = str(p.resolve())
+            fails[rp] = fails.get(rp, 0) + 1
+            fail_count = fails[rp]
+            state.update(edit_fails=fails)
+        msg = (
+            f"ERROR: old_string not found in {path} (file has {lines} lines). "
+            f"old_string must match the file EXACTLY, including indentation."
+        )
+        hint = _closest_region(text, _norm_eol(old))
+        if hint:
+            msg += f"\n\nClosest region:\n{hint}"
+        if fail_count >= 2:
+            msg += (
+                f"\n\nSwitch to replace_lines(path, start_line, end_line, new_content) "
+                f"— surgical line-range edit, no string matching."
             )
-            hint = _closest_region(text, old_n)
-            if hint:
-                msg += f"\n\nClosest region:\n{hint}"
-            if fail_count >= 2:
-                msg += (
-                    f"\n\nSwitch to replace_lines(path, start_line, end_line, new_content) "
-                    f"— surgical line-range edit, no string matching."
-                )
-            return msg
-        i, j, exact = span
-        if not exact:
-            # The only match differs from old_string by whitespace alone.
-            # Refuse rather than silently rewriting a region the model didn't
-            # supply verbatim — point it at the surgical line-range tool.
-            return (
-                f"ERROR: no exact match for old_string in {path}; the closest "
-                f"region (lines {i + 1}-{j}) differs only in whitespace. "
-                f"Re-supply old_string matching the file EXACTLY (including "
-                f"indentation), or use replace_lines(path, start_line, end_line, "
-                f"new_content) for a surgical edit."
-            )
-        if not ctx.confirm("file edit", f"{path}: replace lines {i + 1}-{j} (whitespace-tolerant)"):
-            return "ERROR: user denied edit"
-        file_lines = text.split("\n")
-        new_text = "\n".join(file_lines[:i] + new_n.split("\n") + file_lines[j:])
-
+        return msg
+    if error:
+        # The pure planner doesn't know the path; name it here so the model
+        # still gets the file in the message it has to act on.
+        return error.replace("ERROR: ", f"ERROR: in {path}: ", 1)
+    assert new_text is not None
+    if not ctx.confirm("file edit", f"{path}: {label}"):
+        return "ERROR: user denied edit"
     if raw.strip() and not new_text.strip() and not args.get("allow_empty"):
-        return f"ERROR: refusing to empty {path}. Pass allow_empty=true."
-    adds, dels = _diff.stats(text, new_text)
-    new_text = _restore_eol(raw, new_text)
+        return f"ERROR: refusing to empty {path}. Pass allow_empty=true to confirm."
     _write_text_raw(p, new_text)
     _record_edit(ctx, p, raw, new_text, "edit")
+    adds, dels = _diff.stats(raw, new_text)
     return f"OK: edited {path} +{adds} -{dels}"
 
 
-def t_replace_lines(args: dict, ctx: ToolContext) -> str:
-    path = args["path"]
-    start = args.get("start_line")
-    end = args.get("end_line")
-    new_content = args.get("new_content", "")
-    if start is None or end is None:
-        return "ERROR: replace_lines requires start_line and end_line (1-indexed, inclusive)"
-    try:
-        p = _resolve_contained(path, ctx.root)
-    except PathEscapeError as exc:
-        return f"ERROR: {exc}"
-    if not p.exists():
-        return f"ERROR: file not found: {path}"
-    raw = _read_text_robust(p)
+def _plan_replace_lines(
+    raw: str, start: int, end: int, new_content: str
+) -> tuple[str | None, int, int, str]:
+    """Pure core of t_replace_lines — (new_text, s, e, error). See _plan_edit."""
     lines = raw.splitlines(keepends=True)
     s = max(1, int(start)) - 1
     e = min(len(lines), int(end))
     if s >= len(lines):
-        return f"ERROR: start_line {start} is past end of file ({len(lines)} lines)"
+        return None, s, e, f"ERROR: start_line {start} is past end of file ({len(lines)} lines)"
     if e < s + 1:
-        return f"ERROR: end_line ({end}) must be >= start_line ({start})"
-    if not ctx.confirm("file edit (replace_lines)", f"{path}: lines {s + 1}-{e}"):
-        return "ERROR: user denied edit"
+        return None, s, e, f"ERROR: end_line ({end}) must be >= start_line ({start})"
     # Preserve the original per-line EOL of the replaced region rather than
     # forcing a whole-file CRLF heuristic (which corrupts mixed-EOL files).
     # We look at the first line being replaced; fall back to the dominant EOL
@@ -520,14 +561,96 @@ def t_replace_lines(args: dict, ctx: ToolContext) -> str:
         replacement: list[str] = []
     else:
         replacement = [new_content if new_content.endswith(("\n", "\r")) else new_content + eol]
-    new_lines = lines[:s] + replacement + lines[e:]
-    new_text = "".join(new_lines)
+    return "".join(lines[:s] + replacement + lines[e:]), s, e, ""
+
+
+def t_replace_lines(args: dict, ctx: ToolContext) -> str:
+    path = args["path"]
+    start = args.get("start_line")
+    end = args.get("end_line")
+    new_content = args.get("new_content", "")
+    if start is None or end is None:
+        return "ERROR: replace_lines requires start_line and end_line (1-indexed, inclusive)"
+    try:
+        p = _resolve_contained(path, ctx.root)
+    except PathEscapeError as exc:
+        return f"ERROR: {exc}"
+    if not p.exists():
+        return f"ERROR: file not found: {path}"
+    raw = _read_text_robust(p)
+    new_text, s, e, error = _plan_replace_lines(raw, int(start), int(end), new_content)
+    if error:
+        return error
+    assert new_text is not None
+    if not ctx.confirm("file edit (replace_lines)", f"{path}: lines {s + 1}-{e}"):
+        return "ERROR: user denied edit"
     if raw.strip() and not new_text.strip() and not args.get("allow_empty"):
         return f"ERROR: refusing to empty {path}. Pass allow_empty=true."
     _write_text_raw(p, new_text)
     _record_edit(ctx, p, raw, new_text, "replace_lines")
     adds, dels = _diff.stats(raw, new_text)
     return f"OK: replaced {path}:{s + 1}-{e} +{adds} -{dels}"
+
+
+def preview_change(name: str, args: dict, root: Path) -> tuple[str, str, str] | None:
+    """Predict a mutating file tool's result as (path, before, after).
+
+    Called from the permission gate so the approval prompt can show the actual
+    patch instead of "edit_file · replace 1 occurrence(s)". Approving a change
+    you can't see is the thing this exists to fix.
+
+    Every branch delegates to the same pure planner the tool itself uses, so a
+    previewed diff cannot disagree with what gets written. Returns None when
+    the change can't be predicted (unknown tool, unreadable file, a match that
+    would fail anyway) — the caller falls back to the plain summary rather than
+    guessing, since a *wrong* diff is worse than no diff.
+    """
+    try:
+        path = args.get("path")
+        if not isinstance(path, str) or not path:
+            return None
+        p = _resolve_contained(path, root)
+
+        if name == "write_file":
+            content = args.get("content")
+            if not isinstance(content, str):
+                return None
+            existed = p.is_file()
+            before = _read_text_robust(p) if existed else ""
+            written = _restore_eol(before, _norm_eol(content)) if existed else content
+            return path, before, written
+
+        if not p.is_file():
+            return None
+        before = _read_text_robust(p)
+
+        if name == "edit_file":
+            old, new = args.get("old_string"), args.get("new_string")
+            if not isinstance(old, str) or not isinstance(new, str):
+                return None
+            edited, _label, error = _plan_edit(
+                before, old, new, bool(args.get("replace_all", False))
+            )
+            return None if error or edited is None else (path, before, edited)
+
+        if name == "replace_lines":
+            start, end = args.get("start_line"), args.get("end_line")
+            if start is None or end is None:
+                return None
+            spliced, _s, _e, error = _plan_replace_lines(
+                before, int(start), int(end), args.get("new_content", "")
+            )
+            return None if error or spliced is None else (path, before, spliced)
+
+        if name == "multi_edit":
+            from .coding_tools import plan_multi_edit
+
+            batched, error, _notes = plan_multi_edit(before, args.get("edits") or [])
+            return None if error or batched is None else (path, before, batched)
+    except (PathEscapeError, OSError, ValueError, TypeError):
+        # A preview must never be able to break the approval prompt itself.
+        return None
+    return None
 
 
 def t_list_dir(args: dict, ctx: ToolContext) -> str:
@@ -1397,7 +1520,7 @@ def _browser(ctx: ToolContext):
             port = 8765
         if not 1 <= port <= 65535:
             port = 8765
-        bridge = BrowserBridge(port=port)
+        bridge = BrowserBridge(port=port, site_rules=browser_cfg.get("sites"))
         if bridge.start():
             state.update(browser=bridge)
         return bridge
@@ -1831,6 +1954,60 @@ def _host_is_blocked(host: str) -> tuple[bool, str]:
     return False, ""
 
 
+def describe_request_error(exc: Exception, url: str) -> str:
+    """One actionable line for a failed HTTP request.
+
+    The raw `requests` exception string is a nested wall of urllib3 detail —
+    useless to the user and, worse, useless to the *model*, which then retries
+    the same doomed call. Name the actual cause and the actual fix.
+    """
+    import requests
+
+    text = str(exc)
+    host = ""
+    try:
+        from urllib.parse import urlparse
+
+        host = urlparse(url).hostname or ""
+    except ValueError:
+        host = ""
+
+    if isinstance(exc, requests.exceptions.SSLError):
+        # Overwhelmingly a corporate/school TLS-inspecting proxy, not a real
+        # attack — and there is a supported switch for it, so say so.
+        return (
+            f"ERROR: TLS certificate verification failed for {host or url}. "
+            "This usually means a network appliance (corporate/school proxy, or "
+            "some antivirus) is intercepting HTTPS with its own certificate. "
+            "Do NOT retry this URL as-is — either install that proxy's root "
+            "certificate, or the user can run `/set insecure_ssl true` to skip "
+            "verification for this session (which weakens transport security)."
+        )
+    if isinstance(exc, requests.exceptions.ConnectTimeout):
+        return f"ERROR: timed out connecting to {host or url}. The host may be down or blocked."
+    if isinstance(exc, requests.exceptions.ReadTimeout):
+        return f"ERROR: {host or url} accepted the connection but sent no response in time."
+    if isinstance(exc, requests.exceptions.TooManyRedirects):
+        return f"ERROR: too many redirects from {host or url}."
+    if isinstance(exc, requests.exceptions.ProxyError):
+        return f"ERROR: the configured HTTP proxy refused the request to {host or url}."
+    if isinstance(exc, requests.exceptions.ConnectionError):
+        lowered = text.lower()
+        if "name or service not known" in lowered or "nodename nor servname" in lowered:
+            return f"ERROR: could not resolve {host or url} — check the address or your DNS."
+        if "connection refused" in lowered:
+            return f"ERROR: {host or url} refused the connection."
+        return f"ERROR: could not reach {host or url} — no network route, or the host is offline."
+    # Anything else: one line of the underlying message, never the traceback.
+    first = text.splitlines()[0] if text else exc.__class__.__name__
+    return f"ERROR: fetch failed for {host or url}: {_truncate_line(first)}"
+
+
+def _truncate_line(text: str, limit: int = 200) -> str:
+    text = " ".join(text.split())
+    return text if len(text) <= limit else text[: limit - 1] + "…"
+
+
 def t_web_fetch(args: dict, ctx: ToolContext) -> str:
     from urllib.parse import urljoin, urlparse
 
@@ -1865,8 +2042,10 @@ def t_web_fetch(args: dict, ctx: ToolContext) -> str:
                 allow_redirects=False,
             )
         except requests.RequestException as e:
+            # The traceback goes to the log file (see cagentic/logs.py); the
+            # model and the user get one sentence they can act on.
             logger.warning("web_fetch: request to %r failed", current, exc_info=True)
-            return f"ERROR: fetch failed: {e}"
+            return describe_request_error(e, current)
         if r.is_redirect or r.status_code in (301, 302, 303, 307, 308):
             location = r.headers.get("Location")
             try:
@@ -1958,7 +2137,8 @@ def t_web_search(args: dict, ctx: ToolContext) -> str:
             verify=not ctx.insecure_ssl,
         )
     except requests.RequestException as e:
-        return f"ERROR: search failed: {e}"
+        logger.warning("web_search: request failed", exc_info=True)
+        return describe_request_error(e, "the search engine")
     if r.status_code != 200:
         return f"ERROR: HTTP {r.status_code}"
     # Bound the HTML we run the (DOTALL, backtracking) result regex over so a
@@ -2091,12 +2271,43 @@ def _shell_run_invocation(cmd: str):
     return (cmd, True)
 
 
+def shell_sandbox_settings(ctx: ToolContext, args: dict) -> tuple[bool, bool]:
+    """(sandbox_enabled, network_allowed) for a shell call.
+
+    Config: `shell.sandbox` (auto|off) and `shell.network` (deny|allow), both
+    defaulting to the confined option. A call opts into the network per-call
+    with network=true, which shows up at the approval prompt.
+    """
+    engine = getattr(ctx, "engine", None)
+    cfg = getattr(engine, "config", None) or {}
+    shell_cfg = cfg.get("shell") if isinstance(cfg, dict) else None
+    shell_cfg = shell_cfg if isinstance(shell_cfg, dict) else {}
+    enabled = str(shell_cfg.get("sandbox", "auto")).lower() != "off"
+    network = str(shell_cfg.get("network", "deny")).lower() == "allow"
+    if args.get("network"):
+        network = True
+    return enabled, network
+
+
+def _sandboxed_invocation(cmd: str, ctx: ToolContext, args: dict):
+    """(run_cmd, use_shell, note) for `cmd`, confined per config."""
+    from . import sandbox as _sandbox
+
+    run_cmd, use_shell = _shell_run_invocation(cmd)
+    enabled, network = shell_sandbox_settings(ctx, args)
+    return _sandbox.wrap(
+        run_cmd, use_shell, workspace=ctx.root, network=network, enabled=enabled
+    ) + (network,)
+
+
 def t_run_bash(args: dict, ctx: ToolContext) -> str:
+    from . import sandbox as _sandbox
+
     cmd = args["command"]
     timeout = int(args.get("timeout", 60))
     if not ctx.confirm("shell command", cmd):
         return "ERROR: user denied command"
-    run_cmd, use_shell = _shell_run_invocation(cmd)
+    run_cmd, use_shell, note, network = _sandboxed_invocation(cmd, ctx, args)
     try:
         with ui.Spinner(f"running: {cmd[:40] + ('…' if len(cmd) > 40 else '')}"):
             proc = subprocess.run(
@@ -2112,6 +2323,12 @@ def t_run_bash(args: dict, ctx: ToolContext) -> str:
             )
     except subprocess.TimeoutExpired:
         return f"ERROR: timed out after {timeout}s"
+    except FileNotFoundError as exc:
+        # The sandbox binary vanished between the availability check and the
+        # run. Say so rather than reporting it as the command's own failure.
+        return (
+            f"ERROR: could not start the sandbox ({exc}). Set shell.sandbox=off to run unconfined."
+        )
     status = "PASS" if proc.returncode == 0 else "FAIL"
     parts = [f"{status} (exit code {proc.returncode})"]
     if proc.stdout:
@@ -2119,9 +2336,22 @@ def t_run_bash(args: dict, ctx: ToolContext) -> str:
     if proc.stderr:
         parts.append(f"--- stderr ---\n{proc.stderr}")
     if proc.returncode != 0:
+        if not network and _sandbox.looks_like_network_denial(proc.stderr or "", proc.stdout or ""):
+            # The most confusing sandbox failure by far: the command looks
+            # broken when it was only offline. Name the fix in the result the
+            # model reads, so it can re-request rather than flailing.
+            parts.append(
+                "NOTE: the shell sandbox denies network access by default. If this "
+                "command genuinely needs the network, call run_bash again with "
+                "network=true — the user will be shown that it wants network access."
+            )
         hint = _analyze_failure(proc.stdout, proc.stderr)
         if hint:
             parts.append(hint)
+    if note.startswith("NOT sandboxed"):
+        # Never let a missing sandbox be silent: the user's safety expectation
+        # depends on knowing whether one is actually in place.
+        parts.append(f"NOTE: {note}")
     return _truncate("\n".join(parts))
 
 
@@ -2133,7 +2363,8 @@ def t_bash_async(args: dict, ctx: ToolContext) -> str:
     timeout = int(args.get("timeout", 600))
     if not ctx.confirm("background shell command", cmd):
         return "ERROR: user denied command"
-    job_id = bg.submit_bash(cmd, ctx.root, timeout=timeout)
+    enabled, network = shell_sandbox_settings(ctx, args)
+    job_id = bg.submit_bash(cmd, ctx.root, timeout=timeout, sandbox=enabled, network=network)
     return f"OK: queued {job_id}  (poll with task_status / task_wait)"
 
 
@@ -2399,8 +2630,15 @@ def t_sleep(args: dict, ctx: ToolContext) -> str:
 
 def t_skill(args: dict, ctx: ToolContext) -> str:
     """Append a named skill's instructions onto the engine for the rest of
-    the session. Skills live at ~/.config/cagentic/skills/<name>.md."""
+    the session.
+
+    Skills come from the project first (`.cagentic/skills/<name>.md` in the
+    workspace) and the user's own directory second, so a repo can ship its
+    review process and have it beat whatever the individual developer happens
+    to have installed globally.
+    """
     from .config import config_dir
+    from .project_scope import find_skill, list_skills, project_dir
 
     op = args.get("op", "use")
     name = args.get("name", "")
@@ -2408,19 +2646,20 @@ def t_skill(args: dict, ctx: ToolContext) -> str:
     skills_dir.mkdir(parents=True, exist_ok=True)
 
     if op == "list":
-        files = sorted(skills_dir.glob("*"))
-        if not files:
-            return "(no skills installed; drop *.md files in " + str(skills_dir) + ")"
-        return "\n".join(f"- {f.stem}  ({f.stat().st_size} bytes)" for f in files)
+        found = list_skills(ctx.root)
+        if not found:
+            return (
+                "(no skills installed; drop *.md files in "
+                + str(project_dir(ctx.root) / "skills")
+                + " for this project, or "
+                + str(skills_dir)
+                + " for every project)"
+            )
+        return "\n".join(f"- {skill_name}  ({origin})" for skill_name, origin in found)
 
     if not name:
         return "ERROR: skill name required"
-    candidate = None
-    for ext in (".md", ".txt", ""):
-        c = skills_dir / f"{name}{ext}"
-        if c.exists():
-            candidate = c
-            break
+    candidate = find_skill(ctx.root, name)
     if op == "get":
         if not candidate:
             return f"ERROR: no skill '{name}'"
@@ -2445,105 +2684,8 @@ def t_skill(args: dict, ctx: ToolContext) -> str:
 
 
 # ============================================================================
-# Phone + widgets — available for iOS-originated gateway turns
+# Widgets — rich cards rendered by the gateway web UI
 # ============================================================================
-
-
-def _phone_result(ctx: ToolContext, action: str, payload: dict) -> tuple[dict | None, str | None]:
-    callback = ctx.phone_action
-    if callback is None:
-        return None, "phone tools are available only during an active iOS gateway turn"
-    try:
-        response = callback(action, payload)
-    except Exception as exc:
-        logger.warning("phone action %s failed", action, exc_info=True)
-        return None, f"phone action failed: {exc}"
-    if response is None:
-        return None, "phone action timed out waiting for the iOS client"
-    if not isinstance(response, dict):
-        return None, "iOS client returned an invalid response"
-    if response.get("success") is False or response.get("ok") is False:
-        return None, str(response.get("error") or "phone action failed")
-    if (
-        response.get("error")
-        and response.get("success") is not True
-        and response.get("ok") is not True
-    ):
-        return None, str(response["error"])
-    nested = response.get("result")
-    if isinstance(nested, dict):
-        return nested, None
-    if nested is not None:
-        return {"value": nested}, None
-    return response, None
-
-
-def _phone_text(result: dict) -> str:
-    for key in ("output", "text", "value", "url", "app"):
-        if result.get(key) is not None:
-            return str(result[key])
-    if result and set(result) <= {"success", "ok"}:
-        return "completed"
-    return json.dumps(result, ensure_ascii=False, default=str)
-
-
-def t_phone_shell(args: dict, ctx: ToolContext) -> str:
-    command = str(args.get("command") or "").strip()
-    if not command:
-        return "ERROR: phone_shell requires 'command'"
-    result, error = _phone_result(ctx, "shell", {"command": command})
-    return f"ERROR: {error}" if error else _truncate(f"OK: {_phone_text(result or {})}")
-
-
-def t_phone_clipboard_read(args: dict, ctx: ToolContext) -> str:
-    result, error = _phone_result(ctx, "clipboard_read", {})
-    return f"ERROR: {error}" if error else _truncate(f"OK: {_phone_text(result or {})}")
-
-
-def t_phone_clipboard_write(args: dict, ctx: ToolContext) -> str:
-    text = args.get("text")
-    if not isinstance(text, str):
-        return "ERROR: phone_clipboard_write requires string 'text'"
-    _result, error = _phone_result(ctx, "clipboard_write", {"text": text})
-    return f"ERROR: {error}" if error else "OK: wrote the iPhone clipboard"
-
-
-def t_phone_open_app(args: dict, ctx: ToolContext) -> str:
-    target = str(args.get("target") or args.get("url") or args.get("scheme") or "").strip()
-    if not target:
-        return "ERROR: phone_open_app requires 'target'"
-    _result, error = _phone_result(ctx, "open_app", {"target": target})
-    return f"ERROR: {error}" if error else f"OK: opened {target} on the iPhone"
-
-
-def t_phone_open_url(args: dict, ctx: ToolContext) -> str:
-    url = str(args.get("url") or "").strip()
-    if not url.startswith(("http://", "https://")):
-        return "ERROR: phone_open_url requires an http:// or https:// URL"
-    _result, error = _phone_result(ctx, "open_url", {"url": url})
-    return f"ERROR: {error}" if error else f"OK: opened {url} on the iPhone"
-
-
-def t_phone_screenshot(args: dict, ctx: ToolContext) -> str:
-    result, error = _phone_result(ctx, "screenshot", {})
-    if error:
-        return f"ERROR: {error}"
-    result = result or {}
-    image = (
-        result.get("data")
-        or result.get("image")
-        or result.get("base64")
-        or result.get("image_data")
-        or result.get("imageData")
-    )
-    if not isinstance(image, str) or not image:
-        return "ERROR: iPhone screenshot returned no image data"
-    if image.startswith("data:") and "," in image:
-        image = image.split(",", 1)[1]
-    ctx.pending_images.append(image)
-    width = result.get("width") or "?"
-    height = result.get("height") or "?"
-    return f"OK: captured iPhone screenshot ({width}×{height})"
 
 
 # Every panel kind cagentic/gateway_assets/app.js:buildPanelInner can draw.
@@ -2709,13 +2851,7 @@ TOOLS: dict[str, ToolFn] = {
     "config_set": t_config_set,
     "sleep": t_sleep,
     "skill": t_skill,
-    # iOS gateway actions and rich cards
-    "phone_shell": t_phone_shell,
-    "phone_clipboard_read": t_phone_clipboard_read,
-    "phone_clipboard_write": t_phone_clipboard_write,
-    "phone_open_app": t_phone_open_app,
-    "phone_open_url": t_phone_open_url,
-    "phone_screenshot": t_phone_screenshot,
+    # rich cards
     "show_widget": t_show_widget,
 }
 
@@ -3737,12 +3873,16 @@ TOOL_SCHEMAS: list[dict[str, Any]] = [
         "type": "function",
         "function": {
             "name": "run_bash",
-            "description": "Run a shell command in the workspace. Requires user approval.",
+            "description": "Run a shell command in the workspace. Requires user approval. Runs in a sandbox: it can read the system but can only write inside the workspace, and has NO network access unless you pass network=true.",
             "parameters": {
                 "type": "object",
                 "properties": {
                     "command": {"type": "string"},
                     "timeout": {"type": "integer"},
+                    "network": {
+                        "type": "boolean",
+                        "description": "Request network access for this command (installs, downloads, git fetch/push). The user sees that it was requested when approving. Leave unset for anything that doesn't need the internet.",
+                    },
                 },
                 "required": ["command"],
             },
@@ -3752,12 +3892,16 @@ TOOL_SCHEMAS: list[dict[str, Any]] = [
         "type": "function",
         "function": {
             "name": "bash_async",
-            "description": "Run a shell command in the background. Returns a job id; poll with task_status / task_wait.",
+            "description": "Run a shell command in the background. Returns a job id; poll with task_status / task_wait. Sandboxed exactly like run_bash — workspace-only writes, no network unless network=true.",
             "parameters": {
                 "type": "object",
                 "properties": {
                     "command": {"type": "string"},
                     "timeout": {"type": "integer"},
+                    "network": {
+                        "type": "boolean",
+                        "description": "Request network access for this command.",
+                    },
                 },
                 "required": ["command"],
             },
@@ -3875,71 +4019,7 @@ TOOL_SCHEMAS: list[dict[str, Any]] = [
             "parameters": {"type": "object", "properties": {"query": {"type": "string"}}},
         },
     },
-    # ---------- iOS phone + widgets ----------
-    {
-        "type": "function",
-        "function": {
-            "name": "phone_shell",
-            "description": "Run a shell command on the connected iPhone.",
-            "parameters": {
-                "type": "object",
-                "properties": {"command": {"type": "string"}},
-                "required": ["command"],
-            },
-        },
-    },
-    {
-        "type": "function",
-        "function": {
-            "name": "phone_clipboard_read",
-            "description": "Read text from the connected iPhone clipboard.",
-            "parameters": {"type": "object", "properties": {}},
-        },
-    },
-    {
-        "type": "function",
-        "function": {
-            "name": "phone_clipboard_write",
-            "description": "Write text to the connected iPhone clipboard.",
-            "parameters": {
-                "type": "object",
-                "properties": {"text": {"type": "string"}},
-                "required": ["text"],
-            },
-        },
-    },
-    {
-        "type": "function",
-        "function": {
-            "name": "phone_open_app",
-            "description": "Open an app, deep link, or URL on the connected iPhone.",
-            "parameters": {
-                "type": "object",
-                "properties": {"target": {"type": "string"}},
-                "required": ["target"],
-            },
-        },
-    },
-    {
-        "type": "function",
-        "function": {
-            "name": "phone_open_url",
-            "description": "Open an HTTP or HTTPS URL in Safari on the connected iPhone.",
-            "parameters": {
-                "type": "object",
-                "properties": {"url": {"type": "string"}},
-                "required": ["url"],
-            },
-        },
-    },
-    {
-        "type": "function",
-        "function": {
-            "name": "phone_screenshot",
-            "description": "Request a screenshot from the connected iPhone and attach it to the turn.",
-            "parameters": {"type": "object", "properties": {}},
-        },
-    },
+    # ---------- widgets ----------
     {
         "type": "function",
         "function": {
@@ -4123,18 +4203,8 @@ TOOL_GROUPS: dict[str, list[str]] = {
     "coding": ["check_syntax", "multi_edit", "notebook_edit"],
     "worktree": ["enter_worktree", "exit_worktree"],
     "subagent": ["agent_call", "agent_call_async"],
-    # Enabled dynamically for turns originating from the iOS gateway.
-    "phone": [
-        "phone_shell",
-        "phone_clipboard_read",
-        "phone_clipboard_write",
-        "phone_open_app",
-        "phone_open_url",
-        "phone_screenshot",
-    ],
     # Rich cards — charts, tables, stat blocks — rendered straight into the
-    # gateway tab (and the iOS app). This lived in "phone" and so was invisible
-    # to the web UI, which is the surface that actually renders them.
+    # gateway web UI by app.js.
     "widgets": ["show_widget"],
     # off by default
     "teams": [

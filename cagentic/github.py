@@ -93,7 +93,12 @@ def _request(method: str, path: str, ctx: ToolContext, **kw) -> tuple[int, Any]:
     try:
         r = requests.request(method, url, headers=_headers(ctx), timeout=30, **kw)
     except requests.RequestException as e:
-        return 0, {"error": str(e)}
+        # Same treatment as web_fetch: one actionable line, traceback to the
+        # log file, never the raw urllib3 chain.
+        from .tools import describe_request_error
+
+        logger.warning("github: %s %s failed", method, url, exc_info=True)
+        return 0, {"error": describe_request_error(e, url).removeprefix("ERROR: ")}
     try:
         body = r.json()
     except ValueError:

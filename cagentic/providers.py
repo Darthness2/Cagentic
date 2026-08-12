@@ -61,6 +61,75 @@ def parse_model(model_str: str) -> tuple[str, str]:
     return "ollama", model_str
 
 
+# Context windows by model-name prefix, longest prefix wins. Only the input
+# window matters here — this drives compaction thresholds and the /context
+# readout, not max_tokens.
+#
+# Before this table the window came from `ollama.num_ctx` (default 8192) for
+# EVERY provider, so a 200k Claude model was told it had 8k and compacted away
+# context it never needed to lose, while the compaction threshold itself was a
+# flat 32000 that an 8k local model could never reach before overflowing.
+_CONTEXT_WINDOWS: tuple[tuple[str, int], ...] = (
+    # Anthropic
+    ("claude-opus-4", 200_000),
+    ("claude-sonnet-4", 200_000),
+    ("claude-haiku-4", 200_000),
+    ("claude-3-5", 200_000),
+    ("claude-3-7", 200_000),
+    ("claude-3", 200_000),
+    ("claude", 200_000),
+    # OpenAI
+    ("gpt-4.1", 1_047_576),
+    ("gpt-4o", 128_000),
+    ("gpt-4-turbo", 128_000),
+    ("gpt-4", 8_192),
+    ("gpt-3.5", 16_385),
+    ("o1", 200_000),
+    ("o3", 200_000),
+    ("o4", 200_000),
+)
+
+# Used when a cloud model isn't in the table — better to assume a modern
+# window than to inherit Ollama's 8k and silently over-compact.
+_PROVIDER_FALLBACK_WINDOW = {"anthropic": 200_000, "openai": 128_000}
+
+
+def context_window_for(model_spec: str, cfg: dict, default: int = 8192) -> int:
+    """Input context window, in tokens, for a 'provider:model' spec.
+
+    Resolution order: explicit per-model config override → known-model table →
+    provider fallback → for Ollama tags, `ollama.num_ctx` (the only place the
+    number is genuinely a local runtime setting rather than a model property).
+    """
+    if not isinstance(model_spec, str) or not model_spec.strip():
+        return default
+
+    override = _config.get_model_capability(cfg, model_spec, "context_window")
+    try:
+        if override is not None and not isinstance(override, bool):
+            value = int(override)
+            if value > 0:
+                return value
+    except (TypeError, ValueError):
+        _log.warning("ignoring invalid context_window override for %s: %r", model_spec, override)
+
+    provider, name = parse_model(model_spec)
+
+    if provider == "ollama":
+        # A local model's usable window is whatever Ollama was told to
+        # allocate, not whatever the weights theoretically support.
+        return _integer(cfg, "ollama.num_ctx", default, positive=True)
+
+    lowered = name.lower()
+    best: tuple[int, int] | None = None  # (prefix length, window)
+    for prefix, window in _CONTEXT_WINDOWS:
+        if lowered.startswith(prefix) and (best is None or len(prefix) > best[0]):
+            best = (len(prefix), window)
+    if best is not None:
+        return best[1]
+    return _PROVIDER_FALLBACK_WINDOW.get(provider, default)
+
+
 def build_client(cfg: dict, provider: str = "ollama") -> Any:
     """Return an instantiated client for *provider*.
 
@@ -97,7 +166,8 @@ def build_client(cfg: dict, provider: str = "ollama") -> Any:
                 "  Option 1: export ANTHROPIC_API_KEY=sk-ant-...\n"
                 "  Option 2: run cagentic --login anthropic"
             )
-        return AnthropicClient(api_key=api_key)
+        cache = _config.get_value(cfg, "providers.anthropic.prompt_cache", True)
+        return AnthropicClient(api_key=api_key, prompt_cache=cache is not False)
 
     if provider == "ollama":
         from .ollama_client import OllamaClient

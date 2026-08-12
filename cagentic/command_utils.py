@@ -9,6 +9,7 @@ from typing import Any
 _BOOLEAN_SETTINGS = {
     "browser.enabled",
     "gateway.auto_port",
+    "gateway.auto_reload",
     "gateway.auto_start",
     "gateway.lan",
     "insecure_ssl",
@@ -94,6 +95,10 @@ def validate_config_value(key: str, value: Any) -> str | None:
             return "proactive.interval must be an integer between 30 and 3600 seconds"
     if key == "effort" and value not in {"low", "medium", "high"}:
         return "effort must be low, medium, or high"
+    if key == "shell.sandbox" and value not in {"auto", "off"}:
+        return "shell.sandbox must be auto or off"
+    if key == "shell.network" and value not in {"deny", "allow"}:
+        return "shell.network must be deny or allow"
     if key == "tool_groups" and not (
         value is None
         or (
@@ -170,8 +175,20 @@ def switch_value(raw: str, current: bool) -> bool | None:
     return None
 
 
-def context_window(config: dict, default: int = 8192) -> int:
-    """Read a positive context window from possibly malformed config."""
+def context_window(config: dict, default: int = 8192, model_spec: str | None = None) -> int:
+    """Context window for *model_spec*, or for the configured active model.
+
+    Callers that don't track a model still get the right answer, because the
+    persisted `model` is the one the session is running. Previously this read
+    `ollama.num_ctx` unconditionally, so `/context` reported 8192 while talking
+    to a 200k Claude model.
+    """
+    spec = model_spec or config.get("model")
+    if isinstance(spec, str) and spec.strip():
+        from .providers import context_window_for
+
+        return context_window_for(spec, config, default=default)
+
     ollama = config.get("ollama")
     raw = ollama.get("num_ctx", default) if isinstance(ollama, dict) else default
     try:

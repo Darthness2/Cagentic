@@ -4,8 +4,8 @@ This file provides guidance to Claude Code (claude.ai/code) when working with co
 
 ## What this is
 
-Cagentic is a local-first personal assistant: a terminal REPL, a web gateway
-(also the iOS app's backend), and a Chrome extension, all driving one
+Cagentic is a local-first personal assistant: a terminal REPL, a web gateway,
+and a Chrome extension, all driving one
 tool-calling loop against Ollama, OpenAI, or Anthropic. It has since absorbed a
 full coding agent (Collama) and a "personal OS" layer — goals, calendar,
 deadlines, inbox, routines.
@@ -87,7 +87,6 @@ front end is a renderer of that stream:
   maps the same events to SSE. Its UI is no longer embedded strings: it lives in
   `cagentic/gateway_assets/` (`index.html`, `app.css`, `app.js`, shipped via
   `[tool.setuptools.package-data]`) and is read through `_asset_text()`.
-- The iOS app talks to the same gateway HTTP/SSE API.
 
 Adding an event kind means touching `EventKind`, `agent.render_event`, and the
 gateway's SSE mapping together.
@@ -116,13 +115,13 @@ runs on an HTTP worker thread and would steal or block the REPL's input.
 
 `tools.py` plus `coding_tools.py` hold the tool bodies as
 `t_<name>(args, ctx) -> str`, with `TOOL_GROUPS` deciding which schemas reach the
-model (`teams` and `github` are off by default; `phone` is enabled only for iOS
-gateway turns). Contracts the rest of the system depends on:
+model (`teams` and `github` are off by default). Contracts the rest of the
+system depends on:
 
 - A tool returns a **string**. Failure is a leading `ERROR:` — the engine keys
   `ok` off that prefix, and `dispatch()` converts exceptions into it.
-- `ToolContext` carries `state`, `engine`, `background`, `tasks`, phone/widget
-  callbacks, and the per-turn `read_cache`. `ctx.confirm()` is a no-op `True`: approval already
+- `ToolContext` carries `state`, `engine`, `background`, `tasks`, the widget
+  callback, and the per-turn `read_cache`. `ctx.confirm()` is a no-op `True`: approval already
   happened in `can_use_tool`, and re-prompting would deadlock the gateway.
 - Path arguments go through `_resolve_contained()`; ids that become filenames
   go through a validator (see `tasks._safe_id`).
@@ -158,6 +157,22 @@ hard the model works by injecting a system-prompt section — local models have 
 native reasoning knob. Thresholds (`COMPACT_TOKENS`, `COMPACT_KEEP_RECENT`,
 `LOOP_THRESHOLD`) are constants at the top of `engine.py`, commented with why
 they were retuned; read those before changing them.
+
+### The background service and auto-reload
+
+`service.py` installs `cagentic --serve` as a launchd agent / systemd user unit.
+Because that daemon outlives every edit, `autoreload.py` polls the *installed
+package directory* (`Path(cagentic.__file__).parent` — so it self-corrects to
+whatever tree the process actually imported) and `os.execv`s the process when
+it changes. exec rather than exit-and-be-restarted: launchd's
+`ThrottleInterval` would cost a 30s outage and systemd's `Restart=on-failure`
+wouldn't restart a clean exit at all.
+
+It refuses to restart mid-turn (`Gateway.is_busy`), before the tree settles, or
+into code that fails `compile()` — that last one matters because a supervisor
+will happily restart a crash-looping process forever. Wired only into the
+`serve_mode` branch of `_run_runtime`; the REPL's `/gateway` shares its process
+and must never be re-execed.
 
 ### Persistence, and the import graph
 

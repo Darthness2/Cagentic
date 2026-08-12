@@ -209,7 +209,12 @@ class StatusBarCursorSafetyTests(unittest.TestCase):
             bar.start()
             time.sleep(0.3)
             current[0] = os.terminal_size((100, 12))  # user drags the window shorter
-            time.sleep(0.5)
+            # Long enough to clear the resize debounce (ui._RESIZE_SETTLE) plus
+            # two 200ms paint ticks: the bar deliberately waits for the size to
+            # hold still before re-reserving, because acting on every size a
+            # drag emits is what sprayed duplicate status lines into the
+            # scrollback.
+            time.sleep(ui._RESIZE_SETTLE + 0.6)
             bar.stop()
         out = self._fake.getvalue()
 
@@ -250,7 +255,7 @@ class StatusBarCursorSafetyTests(unittest.TestCase):
             bar.start()
             time.sleep(0.3)
             current[0] = os.terminal_size((100, 12))
-            time.sleep(0.5)
+            time.sleep(ui._RESIZE_SETTLE + 0.6)  # clear the resize debounce
             bar.stop()
         self.assertEqual(
             _max_save_depth(self._fake.getvalue()),

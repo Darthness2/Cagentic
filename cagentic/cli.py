@@ -27,6 +27,7 @@ from . import (
     ui,
 )
 from . import diff as _diff
+from . import logs as _logs
 from . import (
     notes as _notes,
 )
@@ -35,7 +36,7 @@ from . import (
 )
 from .agent import Agent
 from .ollama_client import OllamaClient, OllamaError, _is_apple_silicon, _normalize_host
-from .prompt import Prompt
+from .prompt import ALL_COMMANDS, Prompt
 from .providers import (
     build_client as _build_client,
 )
@@ -194,7 +195,15 @@ def _print_context(
     # so --dry-run cannot alter an object supplied by an in-memory store.
     data = copy.deepcopy(loaded)
     messages = [dict(message) for message in data.get("messages", [])]
-    before = count_messages(messages, str(data.get("model") or ""))
+    session_model = str(data.get("model") or "")
+    before = count_messages(messages, session_model)
+    # The session records the model it ran under, which beats the caller's
+    # config-derived default: inspecting a Claude session from a machine
+    # configured for a local model must not report an 8k window.
+    if session_model:
+        context_limit = command_utils.context_window(
+            config.load(), default=context_limit, model_spec=session_model
+        )
     limit = max(1, int(context_limit * threshold))
     if compact:
         auto_compact(messages, max_tokens=limit, keep_recent=6)
@@ -282,13 +291,34 @@ def _pick_model_interactive(client: OllamaClient) -> str | None:
     return ans
 
 
-def print_help() -> None:
-    """Render the shared command catalog as a responsive reference."""
+def print_help(workspace: Path | None = None) -> None:
+    """Render the shared command catalog as a responsive reference.
+
+    Project commands (.cagentic/commands/*.md) are appended as their own
+    section, so a repo's custom commands are discoverable the same way the
+    built-ins are rather than being a thing you have to already know about.
+    """
     from .prompt import COMMAND_GROUPS
+
+    groups = list(COMMAND_GROUPS)
+    if workspace is not None:
+        from .project_scope import command_summary, discover_commands
+
+        found = discover_commands(workspace)
+        if found:
+            groups.append(
+                (
+                    "this project",
+                    [
+                        (f"/{name}", "[args]", command_summary(body))
+                        for name, body in sorted(found.items())
+                    ],
+                )
+            )
 
     usage = {
         name: (f"{name} {args}" if args else name)
-        for _s, entries in COMMAND_GROUPS
+        for _s, entries in groups
         for name, args, _h in entries
     }
     columns = ui.width()
@@ -297,7 +327,7 @@ def print_help() -> None:
 
     print()
     ui.heading("Commands")
-    for section, entries in COMMAND_GROUPS:
+    for section, entries in groups:
         print()
         print("  " + ui.color(section.title(), ui.SURFACE + ui.BOLD))
         for name, _args, hint in entries:
@@ -797,7 +827,13 @@ def repl(agent: Agent, cfg: dict, gateway_holder: dict | None = None) -> int:
                 "mode": (
                     "dry run" if agent.state.dry_run else "plan" if agent.state.plan_mode else "act"
                 ),
-                "approval": "auto approve" if agent.state.yolo else "ask changes",
+                "approval": (
+                    "auto approve"
+                    if agent.state.yolo
+                    else "accept edits"
+                    if agent.state.approval_mode == "accept_edits"
+                    else "ask changes"
+                ),
                 "tools": "tools on" if agent.tools_enabled else "tools off",
             }
         )
@@ -810,16 +846,32 @@ def repl(agent: Agent, cfg: dict, gateway_holder: dict | None = None) -> int:
 
     last_user_input = ""
     retry_messages: list[dict] | None = None
+    # Type-ahead: lets the user compose while the model streams. Constructed
+    # once and reused; a no-op when the terminal can't support it.
+    from .typeahead import TypeAhead
+
+    typeahead = TypeAhead()
+    queued: str | None = None
     while True:
-        ui.prepare_for_input()
-        print()
-        try:
-            line = prompt.ask(ui.prompt_prefix()).strip()
-        except (EOFError, KeyboardInterrupt):
+        if queued is not None:
+            # Submitted mid-turn via type-ahead — run it straight away rather
+            # than throwing away what the user already typed and re-prompting.
+            line, queued = queued.strip(), None
+            if not line:
+                continue
+            ui.prepare_for_input()
             print()
-            return 0
-        if not line:
-            continue
+            print(ui.prompt_prefix() + line)
+        else:
+            ui.prepare_for_input()
+            print()
+            try:
+                line = prompt.ask(ui.prompt_prefix()).strip()
+            except (EOFError, KeyboardInterrupt):
+                print()
+                return 0
+            if not line:
+                continue
 
         if line.startswith("/"):
             parts = line.split(maxsplit=2)
@@ -827,6 +879,34 @@ def repl(agent: Agent, cfg: dict, gateway_holder: dict | None = None) -> int:
             arg1 = parts[1] if len(parts) > 1 else ""
             arg2 = parts[2] if len(parts) > 2 else ""
             full_arg = command_utils.full_argument(arg1, arg2)
+
+            # Project commands (.cagentic/commands/*.md) expand into a prompt
+            # and run as an ordinary turn. Looked up per invocation rather than
+            # cached at start-up so adding a command file takes effect
+            # immediately, and checked AFTER the built-ins so a project can't
+            # shadow /quit or /yolo.
+            if cmd not in _BUILTIN_COMMAND_NAMES:
+                from .project_scope import discover_commands, render_command
+
+                project_commands = discover_commands(agent.state.workspace)
+                if cmd in project_commands:
+                    rendered = render_command(project_commands[cmd], full_arg)
+                    if not rendered:
+                        ui.warn(f"/{cmd} is empty — nothing to run")
+                        continue
+                    ui.meta(f"running project command /{cmd}")
+                    line = rendered
+                    # Fall through to the normal turn path below.
+                    if not (line.startswith("/") and line.split(maxsplit=1)[0].lower() == "/retry"):
+                        retry_messages = _retry_snapshot(agent)
+                    last_user_input = line
+                    try:
+                        agent.turn(line, typeahead=typeahead)
+                    except KeyboardInterrupt:
+                        ui.warn("interrupted")
+                        continue
+                    queued = agent.pending_input
+                    continue
 
             no_argument_commands = {
                 "browser",
@@ -894,8 +974,53 @@ def repl(agent: Agent, cfg: dict, gateway_holder: dict | None = None) -> int:
 
             if cmd == "quit":
                 return 0
+            if cmd == "init":
+                from .project_scope import PROJECT_DIR
+
+                workspace = agent.state.workspace
+                target = workspace / "AGENTS.md"
+                if target.exists() and arg1.lower() != "force":
+                    ui.warn(f"{target} already exists — /init force overwrites it")
+                    ui.meta("it's already loaded into every turn; edit it directly instead")
+                    continue
+                if agent.state.dry_run:
+                    ui.warn("dry run is ON — /init would write but is blocked")
+                    continue
+                facts = _project_facts(workspace)
+                ui.info("asking the model to describe this project…")
+                # The model writes it, because a template full of blanks is
+                # worse than nothing — but ground it in what's actually on disk
+                # so it describes this repo rather than a generic one.
+                draft = agent.turn(
+                    "Write the contents of an AGENTS.md for this project. It is loaded "
+                    "into your context at the start of every future session, so include "
+                    "only what a competent newcomer could not work out quickly: how to "
+                    "run and test it, the conventions that aren't obvious from the code, "
+                    "and any traps. Be concise and concrete — no filler, no restating "
+                    "the directory listing. Reply with the file contents only, no "
+                    "commentary and no code fence.\n\n"
+                    f"What's on disk:\n{facts}",
+                    typeahead=typeahead,
+                )
+                body = (draft or "").strip()
+                if body.startswith("```"):
+                    body = body.split("\n", 1)[-1].rsplit("```", 1)[0].strip()
+                if not body:
+                    ui.error("the model returned nothing; AGENTS.md was not written")
+                    continue
+                try:
+                    from .tools import _write_text_raw
+
+                    _write_text_raw(target, body + "\n")
+                except OSError as exc:
+                    ui.error(f"could not write {target}: {exc}")
+                    continue
+                ui.info(f"wrote {target} ({len(body)} chars)")
+                ui.meta("it is read back into every turn — edit it freely")
+                ui.meta(f"project settings/commands/skills live in {workspace / PROJECT_DIR}/")
+                continue
             if cmd == "help":
-                print_help()
+                print_help(agent.state.workspace)
                 continue
             if cmd == "tools":
                 print_tools(agent)
@@ -1120,7 +1245,7 @@ def repl(agent: Agent, cfg: dict, gateway_holder: dict | None = None) -> int:
 
                 if agent.state.browser is None:
                     port = _configured_port(cfg, "browser", 8765)
-                    b = BrowserBridge(port=port)
+                    b = BrowserBridge(port=port, site_rules=config.get_value(cfg, "browser.sites"))
                     if b.start():
                         agent.state.update(browser=b)
                     else:
@@ -1133,6 +1258,26 @@ def repl(agent: Agent, cfg: dict, gateway_holder: dict | None = None) -> int:
                 elif b.is_connected():
                     ui.info(f"Chrome extension is connected — bridge on port {b.port}.")
                     ui.info("Cagentic can read pages, open tabs, click, and fill forms.")
+                elif b.auth_failing():
+                    # The extension IS installed and polling — it just has the
+                    # wrong secret. Showing the install steps here (which is what
+                    # this used to do) sends the user to fix a problem they don't
+                    # have, while the real one keeps failing silently in the log.
+                    from .browser import _token_path
+
+                    ui.warn(
+                        "the Chrome extension is running but its bridge token is "
+                        "wrong — every request is being rejected."
+                    )
+                    print()
+                    ui.heading("Re-pair the extension")
+                    print()
+                    ui.list_item("Click the Cagentic icon in Chrome's toolbar", marker="1")
+                    ui.list_item("Paste this token into 'Bridge token', then Save", marker="2")
+                    print()
+                    ui.code_block(b.token or "(token unavailable)")
+                    ui.field("also stored at", _token_path())
+                    ui.field("bridge port", str(b.port))
                 else:
                     ui.warn(
                         f"bridge running on port {b.port}, but the Chrome extension "
@@ -1324,6 +1469,16 @@ def repl(agent: Agent, cfg: dict, gateway_holder: dict | None = None) -> int:
                 rems_n = len(_reminders.list_all())
                 _row("data", f"{notes_n} notes · {rems_n} active reminders")
                 _row("github", "logged in" if agent.state.github_token else "no token")
+                from . import sandbox as _sandbox
+
+                if str(config.get_value(cfg, "shell.sandbox", "auto")).lower() == "off":
+                    _row("shell", "UNCONFINED (shell.sandbox=off)")
+                else:
+                    _row(
+                        "shell",
+                        f"{_sandbox.describe()} · network "
+                        f"{config.get_value(cfg, 'shell.network', 'deny')}",
+                    )
                 _row("input", prompt.backend)
                 gw = gateway_holder.get("server")
                 _row("gateway", gw.url() if gw is not None and gw.running else "off")
@@ -1586,32 +1741,56 @@ def repl(agent: Agent, cfg: dict, gateway_holder: dict | None = None) -> int:
                 if not hist:
                     ui.info("(no edits to undo)")
                     continue
-                entry = hist.pop()
-                p = Path(entry["path"])
-                try:
-                    from .tools import _read_text_robust, _write_text_raw
-
-                    if not p.exists() and entry.get("op") != "create":
-                        ui.error(f"undo refused: {p} no longer exists")
-                        continue
-                    if p.exists() and _read_text_robust(p) != entry.get("after", ""):
-                        ui.error(
-                            f"undo refused: {p} changed after Cagentic's edit; "
-                            "review it before reverting"
-                        )
-                        continue
-                    if entry.get("op") == "create":
-                        p.unlink(missing_ok=True)
-                    else:
-                        # Same raw write the edit tools use: Path.write_text would
-                        # translate "\n" to os.linesep and turn an LF file into CRLF
-                        # on Windows, so "undo" would leave a whole-file diff behind.
-                        _write_text_raw(p, entry.get("before", ""))
-                except OSError as e:
-                    ui.error(f"undo failed: {e}")
+                entry = hist[-1]
+                reverted, problems = _revert_edits([entry])
+                for problem in problems:
+                    ui.error(f"undo refused: {problem}")
+                if not reverted:
                     continue
-                agent.state.update(edit_history=hist)
-                ui.info(f"reverted {entry.get('op', 'edit')} on {p}")
+                agent.state.update(edit_history=hist[:-1])
+                ui.info(f"reverted {entry.get('op', 'edit')} on {Path(entry['path'])}")
+                continue
+            if cmd == "rewind":
+                hist = list(agent.state.edit_history or [])
+                turns = _turn_summary(agent, hist)
+                if not arg1:
+                    if not turns:
+                        ui.info("(nothing to rewind — no turns in this session yet)")
+                        continue
+                    ui.heading("Rewind points")
+                    print()
+                    for number, prompt_text, edits in turns:
+                        detail = f"{edits} edit{'s' if edits != 1 else ''}" if edits else "no edits"
+                        ui.list_item(f"turn {number}: {prompt_text}", detail=detail, marker="·")
+                    print()
+                    ui.meta("/rewind <n> undoes turn n and everything after it")
+                    continue
+                try:
+                    target = int(arg1)
+                except ValueError:
+                    ui.warn("usage: /rewind [n] — n is a turn number from /rewind")
+                    continue
+                if not any(number == target for number, _t, _e in turns):
+                    ui.warn(f"no turn {target} in this session; run /rewind to list them")
+                    continue
+                # Newest first: a later edit to the same file must be undone
+                # before an earlier one, or the earlier "before" text gets
+                # clobbered by the later restore.
+                doomed = [e for e in hist if int(e.get("turn", 0)) >= target]
+                _reverted, problems = _revert_edits(list(reversed(doomed)))
+                for problem in problems:
+                    ui.error(f"rewind refused: {problem}")
+                if problems:
+                    ui.warn("no files were reverted; resolve the conflicts above and retry")
+                    continue
+                agent.state.update(edit_history=[e for e in hist if int(e.get("turn", 0)) < target])
+                dropped = _truncate_to_turn(agent, target)
+                ui.info(
+                    f"rewound to before turn {target} — reverted {len(doomed)} file "
+                    f"edit(s), dropped {dropped} message(s)"
+                )
+                if not _persist_session():
+                    continue
                 continue
             if cmd == "new":
                 title = full_arg or None
@@ -1689,7 +1868,11 @@ def repl(agent: Agent, cfg: dict, gateway_holder: dict | None = None) -> int:
                 from .token_count import count_messages
 
                 used = count_messages(agent.messages, agent.state.active_model_spec or agent.model)
-                limit = command_utils.context_window(cfg)
+                # Ask about the model actually in play — a /model switch that
+                # hasn't been persisted still has to report the right window.
+                limit = command_utils.context_window(
+                    cfg, model_spec=agent.state.active_model_spec or agent.model
+                )
                 ui.info(f"context: {used:,} / {limit:,} tokens ({used / max(1, limit):.0%})")
                 continue
             if cmd == "compact":
@@ -1750,6 +1933,65 @@ def repl(agent: Agent, cfg: dict, gateway_holder: dict | None = None) -> int:
                 else:
                     ui.warn("delete failed")
                 continue
+            if cmd == "accept":
+                on = command_utils.switch_value(arg1, agent.state.approval_mode == "accept_edits")
+                if on is None:
+                    ui.warn("usage: /accept [on|off]")
+                    continue
+                agent.state.update(approval_mode="accept_edits" if on else "ask")
+                if on:
+                    ui.info("accept-edits: ON — file changes inside the workspace apply")
+                    ui.meta("shell, browser and network calls still ask")
+                else:
+                    ui.info("accept-edits: OFF — every change asks again")
+                continue
+            if cmd == "rules":
+                from .permissions import effective_rules
+
+                parts = arg1.split(maxsplit=1)
+                action = parts[0].lower() if parts else ""
+                rule = parts[1].strip() if len(parts) > 1 else ""
+                cfg_rules = cfg.setdefault("permissions", {"allow": [], "deny": []})
+                if action in ("allow", "deny"):
+                    if not rule:
+                        ui.warn(f"usage: /rules {action} <tool> or <tool(glob)>")
+                        continue
+                    bucket = cfg_rules.setdefault(action, [])
+                    if rule not in bucket:
+                        bucket.append(rule)
+                    agent.state.update(permission_rules=copy.deepcopy(cfg_rules))
+                    if not _persist_config():
+                        continue
+                    ui.info(f"{action}: {rule} (saved)")
+                    continue
+                if action == "remove":
+                    removed = False
+                    for key in ("allow", "deny"):
+                        bucket = cfg_rules.get(key) or []
+                        if rule in bucket:
+                            bucket.remove(rule)
+                            removed = True
+                    if not removed:
+                        ui.warn(f"no such rule: {rule}")
+                        continue
+                    agent.state.update(permission_rules=copy.deepcopy(cfg_rules))
+                    if not _persist_config():
+                        continue
+                    ui.info(f"removed: {rule} (saved)")
+                    continue
+                if action:
+                    ui.warn("usage: /rules [allow|deny|remove <rule>]")
+                    continue
+                in_force = effective_rules(agent.state)
+                if not in_force["allow"] and not in_force["deny"]:
+                    ui.info("no permission rules configured")
+                    ui.meta("example: /rules allow run_bash(git status*)")
+                    ui.meta("deny beats everything, including yolo")
+                    continue
+                for key, marker in (("deny", "✗"), ("allow", "✓")):
+                    for listed_rule in in_force[key]:
+                        ui.list_item(listed_rule, detail=key, marker=marker)
+                continue
             if cmd == "yolo":
                 yolo_enabled = command_utils.switch_value(arg1, agent.state.yolo)
                 if yolo_enabled is None:
@@ -1783,10 +2025,147 @@ def repl(agent: Agent, cfg: dict, gateway_holder: dict | None = None) -> int:
             retry_messages = _retry_snapshot(agent)
         last_user_input = line
         try:
-            agent.turn(line)
+            agent.turn(line, typeahead=typeahead)
         except KeyboardInterrupt:
             ui.warn("interrupted")
             continue
+        queued = agent.pending_input
+
+
+# Built-in slash commands, derived from the one catalog so a project command
+# can never shadow /quit or /yolo — and so this can't drift as commands are
+# added. `reminders` is the documented alias the catalog carries separately.
+def _project_facts(workspace: Path, limit: int = 60) -> str:
+    """A short, factual sketch of the repo for /init to write against.
+
+    Deliberately shallow and bounded: the point is to anchor the model in this
+    project's real shape (build files, entry points, test layout) without
+    spending the turn's context on a full tree walk.
+    """
+    interesting = (
+        "pyproject.toml",
+        "setup.py",
+        "setup.cfg",
+        "requirements.txt",
+        "Pipfile",
+        "package.json",
+        "tsconfig.json",
+        "Cargo.toml",
+        "go.mod",
+        "pom.xml",
+        "build.gradle",
+        "Gemfile",
+        "composer.json",
+        "Makefile",
+        "Justfile",
+        "Dockerfile",
+        "docker-compose.yml",
+        ".pre-commit-config.yaml",
+        "README.md",
+        "CONTRIBUTING.md",
+    )
+    lines: list[str] = []
+    try:
+        present = [n for n in interesting if (workspace / n).is_file()]
+        if present:
+            lines.append("Build/config files: " + ", ".join(present))
+        entries = sorted(p for p in workspace.iterdir() if not p.name.startswith("."))[:limit]
+        dirs = [p.name + "/" for p in entries if p.is_dir()]
+        files = [p.name for p in entries if p.is_file()]
+        if dirs:
+            lines.append("Top-level directories: " + ", ".join(dirs))
+        if files:
+            lines.append("Top-level files: " + ", ".join(files))
+        # Test layout is the single most useful thing to get right, and the
+        # convention differs enough between projects to be worth stating.
+        for candidate in ("tests", "test", "spec", "__tests__"):
+            d = workspace / candidate
+            if d.is_dir():
+                names = sorted(p.name for p in d.iterdir() if p.is_file())[:12]
+                lines.append(f"{candidate}/ contains: " + ", ".join(names))
+                break
+    except OSError as exc:
+        lines.append(f"(could not fully inspect the workspace: {exc})")
+    return "\n".join(lines) or "(empty workspace)"
+
+
+_BUILTIN_COMMAND_NAMES = frozenset(name.lstrip("/") for name in ALL_COMMANDS)
+
+
+def _revert_edits(entries: list[dict]) -> tuple[int, list[str]]:
+    """Restore the given edit-history entries. Returns (reverted, problems).
+
+    Shared by /undo and /rewind so both enforce the same guard: never revert a
+    file the user has touched since Cagentic wrote it. Entries must already be
+    ordered newest-first, because two edits to one file only unwind correctly
+    in reverse.
+    """
+    from .tools import _read_text_robust, _write_text_raw
+
+    reverted = 0
+    problems: list[str] = []
+    for entry in entries:
+        path = Path(entry["path"])
+        op = entry.get("op", "edit")
+        try:
+            if not path.exists() and op != "create":
+                problems.append(f"{path} no longer exists")
+                continue
+            if path.exists() and _read_text_robust(path) != entry.get("after", ""):
+                problems.append(f"{path} changed after Cagentic's edit; review it before reverting")
+                continue
+            if op == "create":
+                path.unlink(missing_ok=True)
+            else:
+                # Same raw write the edit tools use: Path.write_text would
+                # translate "\n" to os.linesep and turn an LF file into CRLF
+                # on Windows, so a revert would leave a whole-file diff behind.
+                _write_text_raw(path, entry.get("before", ""))
+            reverted += 1
+        except OSError as exc:
+            problems.append(f"{path}: {exc}")
+    return reverted, problems
+
+
+def _user_message_indices(messages: list[dict]) -> list[int]:
+    """Positions of the real user turns, skipping tool results and injections.
+
+    Tool results are stored with role "tool", but background notifications are
+    injected as plain user messages — those aren't turns the user typed, and
+    counting them would make /rewind's numbering drift from what it printed.
+    """
+    return [
+        i
+        for i, m in enumerate(messages)
+        if m.get("role") == "user" and not str(m.get("content") or "").startswith("[background]")
+    ]
+
+
+def _turn_summary(agent: Agent, history: list[dict]) -> list[tuple[int, str, int]]:
+    """(turn number, prompt preview, edit count) for each turn this session."""
+    edits_per_turn: dict[int, int] = {}
+    for entry in history:
+        turn = int(entry.get("turn", 0))
+        edits_per_turn[turn] = edits_per_turn.get(turn, 0) + 1
+    out: list[tuple[int, str, int]] = []
+    for number, index in enumerate(_user_message_indices(agent.messages), start=1):
+        text = str(agent.messages[index].get("content") or "").strip()
+        # Attachments are appended after a blank line; the first line is what
+        # the user actually typed.
+        preview = ui.single_line(text.split("\n\n")[0])
+        out.append((number, ui.truncate(preview, 60), edits_per_turn.get(number, 0)))
+    return out
+
+
+def _truncate_to_turn(agent: Agent, target: int) -> int:
+    """Drop the conversation from turn `target` onward. Returns messages removed."""
+    indices = _user_message_indices(agent.messages)
+    if target < 1 or target > len(indices):
+        return 0
+    cut = indices[target - 1]
+    dropped = len(agent.messages) - cut
+    agent.load_messages(agent.messages[:cut])
+    return dropped
 
 
 def _list_models_with_retry(client, attempts: int = 5, delay: float = 2.0):
@@ -1987,6 +2366,9 @@ def _run_runtime(args: RuntimeOptions) -> int:
         insecure_ssl=_configured_bool(cfg, "insecure_ssl", False),
         dry_run=args.dry_run,
         plan_mode=args.dry_run,
+        # Copy, so /rules edits mutate the config dict and the state together
+        # only where we intend to (via an explicit state.update).
+        permission_rules=copy.deepcopy(config.get_value(cfg, "permissions", {}) or {}),
     )
 
     saved_groups = config.get_value(cfg, "tool_groups", None)
@@ -2011,7 +2393,10 @@ def _run_runtime(args: RuntimeOptions) -> int:
     if not args.dry_run and command_utils.boolean_value(br_cfg.get("enabled", True), True):
         from .browser import BrowserBridge
 
-        bridge = BrowserBridge(port=_configured_port(cfg, "browser", 8765))
+        bridge = BrowserBridge(
+            port=_configured_port(cfg, "browser", 8765),
+            site_rules=config.get_value(cfg, "browser.sites"),
+        )
         if bridge.start():
             bridge.set_status(model=model, activity="idle")
             agent.state.update(browser=bridge)
@@ -2078,6 +2463,20 @@ def _run_runtime(args: RuntimeOptions) -> int:
         if gw.start_notice:
             ui.warn(gw.start_notice)
         ui.info(f"gateway running at {gw.url()} — press Ctrl-C to stop.")
+
+        # Auto-reload: the daemon installed by --install-service outlives every
+        # edit to the source it imported, so without this you change a file and
+        # the background gateway keeps serving yesterday's code. Only in serve
+        # mode — the REPL's own `/gateway on` shares this process, and
+        # re-execing would kill the user's session.
+        reloader = None
+        if _configured_bool(cfg, "gateway.auto_reload", True):
+            from .autoreload import GatewayReloader
+
+            reloader = GatewayReloader(is_busy=gw.is_busy, shutdown=gw.stop)
+            reloader.start()
+            ui.meta(f"watching {reloader.root} — restarts on code change")
+
         try:
             import threading
 
@@ -2092,6 +2491,8 @@ def _run_runtime(args: RuntimeOptions) -> int:
                 pass
         except KeyboardInterrupt:
             pass
+        if reloader is not None:
+            reloader.stop()
         _shutdown()
         return 0
 
@@ -2422,6 +2823,10 @@ def cli(
     """Local-first AI assistant for terminal work, memory, and automation."""
     global _DEBUG_ACTIVE
     _DEBUG_ACTIVE = debug
+    # Route package logging to a file before anything can log. Without this,
+    # Python's lastResort handler prints every warning + traceback to stderr,
+    # straight into the middle of the assistant's reply.
+    _logs.setup(debug=debug)
     root_mode_requested = any(
         (
             prompt is not None,
@@ -3265,6 +3670,9 @@ def main(argv: list[str] | None = None) -> int:
     """Run the Click app and convert every failure into a stable exit code."""
     global _DEBUG_ACTIVE
     _DEBUG_ACTIVE = False
+    # Configure logging up front too: Click can fail before cli() runs, and a
+    # crash during option parsing must not dump a traceback into the terminal.
+    _logs.setup(debug="--debug" in (argv if argv is not None else sys.argv[1:]))
     json_output = _json_requested(argv)
     try:
         result = cli.main(args=argv, prog_name="cagentic", standalone_mode=False)

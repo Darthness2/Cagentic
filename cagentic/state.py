@@ -46,6 +46,20 @@ class AppState:
     # per-tool permission cache: name -> "always"|"once"|"never"|None
     permissions: dict[str, str] = field(default_factory=dict)
 
+    # Approval mode between "prompt for everything" and yolo:
+    #   "ask"          — prompt for every mutating tool (the default)
+    #   "accept_edits" — file changes inside the workspace go through without a
+    #                    prompt; shell, network and browser still ask.
+    # yolo stays a separate switch because it means "approve literally
+    # everything", including shell commands, and several call sites read it.
+    approval_mode: str = "ask"
+
+    # Pattern permission rules, {"allow": [...], "deny": [...]}, merged from
+    # user config and the workspace's .cagentic/settings*.json. Empty means
+    # "none configured" — resolved lazily so a /cd picks up the new project's
+    # rules without every caller having to remember to refresh them.
+    permission_rules: dict[str, list[str]] = field(default_factory=dict)
+
     # files we've read/edited this session (relative paths, in order)
     file_history: list[str] = field(default_factory=list)
 
@@ -66,9 +80,15 @@ class AppState:
     # None means "use tools.DEFAULT_GROUPS".
     tool_groups: set[str] | None = None
 
-    # Edit history for /undo and /diff: list of
-    #   {"ts", "path", "before", "after", "op"}
+    # Edit history for /undo, /diff and /rewind: list of
+    #   {"ts", "path", "before", "after", "op", "turn"}
+    # `turn` groups edits by the user turn that caused them, which is what
+    # makes /rewind able to undo "everything since turn N" as one unit.
     edit_history: list[dict] = field(default_factory=list)
+
+    # Monotonic counter of user turns this session. Incremented by the engine
+    # at the start of each turn; edits recorded during it carry this value.
+    turn_index: int = 0
 
     # Per-turn map of {absolute_path: failed_edit_count}. Reset by the engine.
     edit_fails: dict = field(default_factory=dict)

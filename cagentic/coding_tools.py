@@ -333,38 +333,44 @@ def _apply_one_edit(text: str, old: str, new: str, replace_all: bool):
     return None, "old_string not found"
 
 
-def t_multi_edit(args: dict, ctx: ToolContext) -> str:
-    """Apply MANY edits to a single file in one call. Edits apply in order,
-    each against the result of the previous one. The batch is atomic: if any
-    edit fails to match, NOTHING is written and the failing edit is named."""
-    path = args["path"]
-    edits = args.get("edits") or []
+def plan_multi_edit(raw: str, edits: list) -> tuple[str | None, str, list[str]]:
+    """Pure core of t_multi_edit — returns (new_text, error, per-edit notes).
+
+    Extracted so tools.preview_change can render the batch's real diff at the
+    approval prompt using the identical sequencing (each edit applied to the
+    previous result), rather than a second implementation that could disagree.
+    """
     if not isinstance(edits, list) or not edits:
-        return "ERROR: 'edits' must be a non-empty list of {old_string, new_string} objects."
-    try:
-        p = _resolve_contained(path, ctx.root)
-    except PathEscapeError as exc:
-        return f"ERROR: {exc}"
-    if not p.exists():
-        return f"ERROR: file not found: {path}"
-    raw = _read_text_robust(p)
+        return (
+            None,
+            "ERROR: 'edits' must be a non-empty list of {old_string, new_string} objects.",
+            [],
+        )
 
     text = raw
     notes: list[str] = []
     for idx, edit in enumerate(edits, start=1):
         if not isinstance(edit, dict):
-            return f"ERROR: edit #{idx} is not an object. Nothing written."
+            return None, f"ERROR: edit #{idx} is not an object. Nothing written.", []
         old = edit.get("old_string")
         new = edit.get("new_string")
         if old is None or new is None:
-            return f"ERROR: edit #{idx} is missing old_string or new_string. Nothing written."
+            return (
+                None,
+                f"ERROR: edit #{idx} is missing old_string or new_string. Nothing written.",
+                [],
+            )
         new_text, note = _apply_one_edit(text, old, new, bool(edit.get("replace_all", False)))
         if new_text is None:
             return (
-                f"ERROR: edit #{idx} of {len(edits)} failed: {note}.\n"
-                f"The batch is ATOMIC — nothing was written. Fix edit #{idx} "
-                f"(copy old_string exactly from a recent read_file) and resend the "
-                f"whole batch, or apply it separately with replace_lines."
+                None,
+                (
+                    f"ERROR: edit #{idx} of {len(edits)} failed: {note}.\n"
+                    f"The batch is ATOMIC — nothing was written. Fix edit #{idx} "
+                    f"(copy old_string exactly from a recent read_file) and resend the "
+                    f"whole batch, or apply it separately with replace_lines."
+                ),
+                [],
             )
         text = new_text
         notes.append(f"#{idx}:{note}")
@@ -373,6 +379,27 @@ def t_multi_edit(args: dict, ctx: ToolContext) -> str:
     # single whitespace-tolerant edit doesn't rewrite every line ending.
     if ("\r\n" in raw) and any(not n.endswith(":exact") for n in notes):
         text = text.replace("\r\n", "\n").replace("\n", "\r\n")
+    return text, "", notes
+
+
+def t_multi_edit(args: dict, ctx: ToolContext) -> str:
+    """Apply MANY edits to a single file in one call. Edits apply in order,
+    each against the result of the previous one. The batch is atomic: if any
+    edit fails to match, NOTHING is written and the failing edit is named."""
+    path = args["path"]
+    edits = args.get("edits") or []
+    try:
+        p = _resolve_contained(path, ctx.root)
+    except PathEscapeError as exc:
+        return f"ERROR: {exc}"
+    if not p.exists():
+        return f"ERROR: file not found: {path}"
+    raw = _read_text_robust(p)
+
+    text, error, notes = plan_multi_edit(raw, edits)
+    if error:
+        return error
+    assert text is not None
 
     if text == raw:
         return f"OK: no-op — all {len(edits)} edits left {path} unchanged."

@@ -61,6 +61,9 @@ class Agent:
         self.on_turn_complete = on_turn_complete
         self.on_tools_disabled = on_tools_disabled
         self.last_turn_failed = False
+        # Text the user typed *during* the last turn (type-ahead). The REPL
+        # submits it as the next turn instead of prompting.
+        self.pending_input: str | None = None
 
         if on_tools_disabled is not None:
 
@@ -104,7 +107,6 @@ class Agent:
             tasks=self.engine.task_graph,
             teams=self.engine.teams,
             read_cache=self.engine._read_cache,
-            phone_action=self.engine.executor.phone_action,
             widget_action=self.engine.executor.widget_action,
         )
 
@@ -119,13 +121,27 @@ class Agent:
 
     _refresh_system_prompt = refresh_system_prompt
 
-    def turn(self, user_input: str) -> str:
+    def turn(self, user_input: str, typeahead=None) -> str:
+        """Run one turn. Returns the final text.
+
+        `typeahead` (optional) lets the user compose while the model streams:
+        plain Enter queues a message for the next turn, Ctrl-C interrupts this
+        one and sends what was typed. The queued text is collected afterwards
+        via `pending_input`, so the REPL submits it without re-prompting.
+        """
         self.last_turn_failed = False
+        self.pending_input = None
+        active_ta = typeahead if (typeahead is not None and typeahead.can_run) else None
         pre_ctx = sum(len(str(m.get("content") or "")) // 4 for m in self.engine.messages)
-        bar = ui.StatusBar(ctx_tokens=pre_ctx)
+        # The echo row must live outside the scroll region, or streamed output
+        # scrolls straight over what the user is typing.
+        bar = ui.StatusBar(ctx_tokens=pre_ctx, extra_reserved_rows=1 if active_ta else 0)
         bar.start()
+        if active_ta:
+            active_ta.start_after_bar(bar)
         rs = _RenderState()
         gen = self.engine.submit_message(user_input)
+        interrupt_check = active_ta.make_interrupt_check() if active_ta else None
         try:
             for msg in gen:
                 if msg.kind == "delta":
@@ -136,7 +152,20 @@ class Agent:
                     )
                     bar.on_done(post_ctx)
                 render_event(msg, rs)
+                # POSIX Ctrl-C reaches the reader thread as \x03 rather than a
+                # signal (the reader disables ISIG), so the loop has to poll.
+                if interrupt_check is not None and interrupt_check():
+                    close = getattr(gen, "close", None)
+                    if callable(close):
+                        close()
+                    ui.stop_all_spinners()
+                    rs.failed = True
+                    break
         except KeyboardInterrupt:
+            # Windows path: Ctrl-C arrives here as a signal instead. Keep
+            # whatever was typed so it isn't lost with the interrupted turn.
+            if active_ta:
+                active_ta.capture_interrupt()
             close = getattr(gen, "close", None)
             if callable(close):
                 close()
@@ -145,6 +174,11 @@ class Agent:
             ui.warn("turn interrupted — back to prompt")
             rs.failed = True
         finally:
+            if active_ta:
+                active_ta.stop()
+                # Ctrl-C text wins over an Enter-queued message: it's the more
+                # recent, more deliberate instruction.
+                self.pending_input = active_ta.consume_interrupt() or active_ta.take_pending()
             bar.stop()
             self.last_turn_failed = rs.failed or not rs.completed
             if self.on_turn_complete:

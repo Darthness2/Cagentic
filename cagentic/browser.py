@@ -71,11 +71,70 @@ def _version() -> str:
         return "0.1.0"
 
 
+def _clean_site_rules(raw: object) -> dict:
+    """Normalise {"allow": [...], "deny": [...]} out of untrusted config."""
+    out: dict[str, list[str]] = {"allow": [], "deny": []}
+    if isinstance(raw, dict):
+        for key in ("allow", "deny"):
+            entries = raw.get(key)
+            if isinstance(entries, list):
+                out[key] = [e.strip().lower() for e in entries if isinstance(e, str) and e.strip()]
+    return out
+
+
+# Actions whose params name the site being acted on, so the bridge can decide
+# without asking the extension where the tab currently is.
+URL_ACTIONS = {"open", "navigate", "download"}
+
+
+def host_allowed(url: str, rules: dict) -> tuple[bool, str]:
+    """Is `url`'s host permitted by the site rules? Returns (ok, reason)."""
+    import fnmatch
+    from urllib.parse import urlparse
+
+    allow = list((rules or {}).get("allow") or [])
+    deny = list((rules or {}).get("deny") or [])
+    if not allow and not deny:
+        return True, ""
+    try:
+        host = (urlparse(url).hostname or "").lower()
+    except ValueError:
+        return False, "unparseable URL"
+    if not host:
+        return (not allow), "no host in URL"
+
+    def matches(patterns: list[str]) -> str | None:
+        for pat in patterns:
+            # "example.com" also covers its subdomains — what a user means when
+            # they type a bare domain into a site list.
+            if fnmatch.fnmatch(host, pat) or host == pat or host.endswith("." + pat):
+                return pat
+        return None
+
+    hit = matches(deny)
+    if hit:
+        return False, f"{host} is blocked by site rule '{hit}'"
+    if allow:
+        hit = matches(allow)
+        if not hit:
+            return False, f"{host} is not in the allowed-sites list"
+    return True, ""
+
+
 class BrowserBridge:
     """Localhost command channel to the Chrome extension."""
 
-    def __init__(self, port: int = 8765) -> None:
+    def __init__(self, port: int = 8765, site_rules: dict | None = None) -> None:
         self.port = port
+        # Per-site permissions: {"allow": [host glob, …], "deny": [...]}.
+        # Empty allow means "any site not explicitly denied"; a non-empty allow
+        # turns the bridge into an allow-list. Deny always wins.
+        #
+        # Enforced in two places on purpose: here for actions that name a URL
+        # (open/navigate/download), and in the extension for actions that act
+        # on the *current* tab — only the extension knows that tab's URL, and
+        # asking for it first would cost a round trip on every single call.
+        self.site_rules: dict = _clean_site_rules(site_rules)
         # Shared secret required on /next, /result and /status. Generated lazily
         # in start(); the user copies it from the token file into the extension.
         self.token: str = ""
@@ -91,6 +150,11 @@ class BrowserBridge:
         # Token rejections are throttled — see note_auth_failure().
         self._auth_warn_at = 0.0
         self._auth_warn_suppressed = 0
+        # Wall-clock of the most recent token rejection, independent of the
+        # warn throttle. /browser uses it to tell 'extension not installed'
+        # apart from 'installed but mis-paired' — two problems whose fixes
+        # have nothing in common.
+        self._last_auth_failure = 0.0
         self.error: str | None = None  # set if start() failed
         # Live status surfaced to the extension popup.
         self.model: str | None = None  # the loaded Ollama model
@@ -185,6 +249,7 @@ class BrowserBridge:
         """
         now = time.monotonic()
         with self._lock:
+            self._last_auth_failure = time.time()
             if now < self._auth_warn_at:
                 self._auth_warn_suppressed += 1
                 return
@@ -204,6 +269,17 @@ class BrowserBridge:
         if not self.token or not presented:
             return False
         return hmac.compare_digest(self.token, presented)
+
+    def auth_failing(self, window: float = 90.0) -> bool:
+        """Has a client been rejected for a bad token recently?
+
+        True means something IS talking to the bridge — so the extension is
+        installed and running — but presenting the wrong secret. That needs a
+        re-paste, not the install instructions.
+        """
+        with self._lock:
+            last = self._last_auth_failure
+        return bool(last) and (time.time() - last) < window
 
     @property
     def running(self) -> bool:
@@ -237,6 +313,24 @@ class BrowserBridge:
             )
             del self._recent[8:]
 
+    def set_site_rules(self, raw: object) -> dict:
+        """Replace the per-site rules and persist them to config."""
+        rules = _clean_site_rules(raw)
+        with self._lock:
+            self.site_rules = rules
+        try:
+            from . import config as _config
+
+            cfg = _config.load()
+            _config.set_value(cfg, "browser.sites", rules)
+            _config.save(cfg)
+        except Exception:
+            # A failed save must not lose the in-memory change for this
+            # session; the user just has to re-set it next launch.
+            _log.warning("could not persist browser.sites", exc_info=True)
+            return {"ok": True, "sites": rules, "persisted": False}
+        return {"ok": True, "sites": rules, "persisted": True}
+
     def status(self) -> dict:
         with self._lock:
             return {
@@ -247,6 +341,8 @@ class BrowserBridge:
                 "activity": self.activity,
                 "activity_at": self.activity_at,
                 "recent": list(self._recent),
+                # Surfaced so the popup can show what the agent may touch.
+                "sites": dict(self.site_rules),
             }
 
     # -- agent side ---------------------------------------------------------
@@ -258,6 +354,11 @@ class BrowserBridge:
         summary = _command_summary(action, params)
         if self._server is None:
             return {"ok": False, "error": "browser bridge is not running"}
+        if action in URL_ACTIONS:
+            ok, why = host_allowed(str(params.get("url") or ""), self.site_rules)
+            if not ok:
+                self._record(action, summary, False)
+                return {"ok": False, "error": f"blocked: {why}"}
         # Bookkeeping (_record, is_connected) happens OUTSIDE the condition, so
         # the wait loop only ever holds the one lock it needs.
         result: dict | None = None
@@ -265,7 +366,11 @@ class BrowserBridge:
             cmd_id = self._next_id
             self._next_id += 1
             self._pending.add(cmd_id)
-            self._queue.append({"id": cmd_id, "action": action, "params": params})
+            # Ship the rules with the command so the extension can enforce them
+            # on the tab it resolves, without a second request per action.
+            self._queue.append(
+                {"id": cmd_id, "action": action, "params": params, "sites": dict(self.site_rules)}
+            )
             self._cv.notify_all()
             deadline = time.monotonic() + timeout
             while cmd_id not in self._results:
@@ -433,17 +538,27 @@ class _Handler(BaseHTTPRequestHandler):
         self._send_json({"error": "not found"}, status=404)
 
     def do_POST(self) -> None:  # noqa: N802
-        if self.path.split("?")[0] != "/result":
+        path = self.path.split("?")[0]
+        if path not in ("/result", "/sites"):
             self._send_json({"error": "not found"}, status=404)
             return
         if not self._authed():
             return
         length = int(self.headers.get("Content-Length") or 0)
+        if length > 64 * 1024:
+            self._send_json({"error": "body too large"}, status=413)
+            return
         raw = self.rfile.read(length) if length else b"{}"
         try:
             data = json.loads(raw or b"{}")
         except json.JSONDecodeError:
             self._send_json({"error": "bad json"}, status=400)
+            return
+        if path == "/sites":
+            # The popup is the user's own UI, and the token gates it, so a
+            # change here is a user decision — persist it rather than losing it
+            # on restart.
+            self._send_json(self._bridge().set_site_rules(data))
             return
         self._bridge()._deliver_result(
             int(data.get("id", 0)),

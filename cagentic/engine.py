@@ -45,7 +45,19 @@ LOOP_THRESHOLD = 4
 # tokens. Was 12000 — wired for tiny local models. Cloud models routinely
 # carry 100k+ tokens of context, and dropping below 32k means a couple of
 # web_fetch results force a compact that loses substance.
+#
+# This is now only the fallback for when the active model's window is unknown:
+# the live threshold is COMPACT_FRACTION of that window (see
+# QueryEngine.compact_threshold). A flat constant was wrong in both
+# directions — it made a 200k model compact at 16% full, and let an 8k local
+# model sail past its own window without ever triggering.
 COMPACT_TOKENS = 32000
+# Leave headroom for the model's reply and the next few tool results rather
+# than compacting the instant the window is nominally full.
+COMPACT_FRACTION = 0.6
+# Don't let a tiny configured window produce a threshold so small that every
+# single turn triggers a compact.
+COMPACT_MIN_TOKENS = 4000
 # Keep this many of the most recent messages full-fidelity (the rest get
 # bulletized). With many tool calls per turn 12 didn't span a full user
 # turn; 24 keeps roughly the last 2–3 turns intact.
@@ -535,10 +547,32 @@ def _resolve_mention(
     return None
 
 
+# Raster formats worth handing to a vision model. Reading one as text (which is
+# what every mention used to do) produces a screenful of mojibake and burns
+# context for nothing, so these take the image path instead.
+_IMAGE_SUFFIXES = {".png", ".jpg", ".jpeg", ".gif", ".webp", ".bmp"}
+# A single inlined image is expensive in context and some providers cap the
+# request size outright; refuse rather than blow up the turn.
+_MAX_IMAGE_BYTES = 8 * 1024 * 1024
+
+
+def _encode_image(path: Path) -> str | None:
+    """Base64 an image file for the provider's vision input, or None."""
+    try:
+        if path.stat().st_size > _MAX_IMAGE_BYTES:
+            return None
+        import base64
+
+        return base64.b64encode(path.read_bytes()).decode("ascii")
+    except OSError:
+        return None
+
+
 def process_user_input(raw: str, workspace: Path | None = None, home: Path | None = None) -> dict:
     if not workspace or "@" not in raw:
         return {"role": "user", "content": raw}
     attachments: list[str] = []
+    images: list[str] = []
     seen: set[Path] = set()
     for m in _MENTION_RX.finditer(raw):
         path_part = m.group("double") or m.group("single") or m.group("bare")
@@ -558,6 +592,15 @@ def process_user_input(raw: str, workspace: Path | None = None, home: Path | Non
         if p in seen:
             continue
         seen.add(p)
+        # An image goes to the model as an image, not as decoded bytes.
+        if p.suffix.lower() in _IMAGE_SUFFIXES:
+            encoded = _encode_image(p)
+            if encoded:
+                images.append(encoded)
+                attachments.append(f"--- @{p}  (image attached) ---")
+            else:
+                attachments.append(f"--- @{p} (image too large or unreadable) ---")
+            continue
         # @-mentioning a PDF or .docx inlines its extracted text, same as
         # any plain file — so "summarize @report.pdf" works in one shot.
         try:
@@ -582,7 +625,12 @@ def process_user_input(raw: str, workspace: Path | None = None, home: Path | Non
     if not attachments:
         return {"role": "user", "content": raw}
     body = raw + "\n\n" + "\n\n".join(attachments)
-    return {"role": "user", "content": body, "_attachment_count": len(attachments)}
+    msg: dict = {"role": "user", "content": body, "_attachment_count": len(attachments)}
+    if images:
+        # normalize_messages_for_api keeps "images", so this reaches any
+        # vision-capable provider without further plumbing.
+        msg["images"] = images
+    return msg
 
 
 def normalize_messages_for_api(messages: list[dict]) -> list[dict]:
@@ -615,7 +663,6 @@ class StreamingToolExecutor:
         self.background = background
         self.tasks = tasks
         self.teams = teams
-        self.phone_action: Callable[[str, dict], dict | None] | None = None
         self.widget_action: Callable[[str, str, dict], str | None] | None = None
 
     def execute(self, calls):
@@ -693,7 +740,6 @@ class StreamingToolExecutor:
             tasks=self.tasks,
             teams=self.teams,
             read_cache=getattr(self.engine, "_read_cache", None),
-            phone_action=self.phone_action,
             widget_action=self.widget_action,
         )
 
@@ -800,8 +846,27 @@ class QueryEngine:
         self._counted_results_this_turn: set[tuple[str, str]] = set()
         self._abort_turn = False
         self._plan_shown_this_turn = False
-        self._usage = {"input": 0, "output": 0, "ms": 0}
+        self._usage = {"input": 0, "output": 0, "ms": 0, "cache_read": 0, "cache_write": 0}
         self._read_cache: dict = {}
+
+    def context_window(self) -> int:
+        """The active model's input window, in tokens."""
+        from .providers import context_window_for
+
+        spec = self.state.active_model_spec or self.model
+        return context_window_for(spec, self.config or {})
+
+    def compact_threshold(self) -> int:
+        """Token count above which older history gets compacted.
+
+        Derived from the active model's window so switching between a 8k local
+        model and a 200k cloud model moves the threshold with it — mid-session,
+        since `/model` changes `active_model_spec` and this is read per turn.
+        """
+        window = self.context_window()
+        if window <= 0:
+            return COMPACT_TOKENS
+        return max(COMPACT_MIN_TOKENS, int(window * COMPACT_FRACTION))
 
     def _system_content(self) -> str:
         prompt = fetch_system_prompt_parts(self.state)
@@ -815,7 +880,7 @@ class QueryEngine:
 
     def reset(self) -> None:
         self.messages = [{"role": "system", "content": self._system_content()}]
-        self._usage = {"input": 0, "output": 0, "ms": 0}
+        self._usage = {"input": 0, "output": 0, "ms": 0, "cache_read": 0, "cache_write": 0}
 
     def _record_transcript(self, role: str, content: Any, **extra: Any) -> None:
         if not self.state.dry_run:
@@ -863,13 +928,17 @@ class QueryEngine:
 
         self._record_transcript("user", prompt)
         self.messages.append(user_msg)
+        # Stamp edits made from here on with this turn's number, so /rewind can
+        # restore "everything since turn N" as one unit.
+        self.state.update(turn_index=int(getattr(self.state, "turn_index", 0)) + 1)
 
         _pre = estimate_tokens(self.messages)
-        will_compact = _pre > COMPACT_TOKENS
+        _budget = self.compact_threshold()
+        will_compact = _pre > _budget
         if will_compact:
             yield Message(
                 "info",
-                {"text": f"compacting context (~{_pre:,} → ≤{COMPACT_TOKENS:,} tokens)…"},
+                {"text": f"compacting context (~{_pre:,} → ≤{_budget:,} tokens)…"},
             )
         ollama_config = self.config.get("ollama") if self.config else None
         summarize_fn = (
@@ -879,7 +948,7 @@ class QueryEngine:
         )
         for r in manage_context(
             self.messages,
-            max_tokens=COMPACT_TOKENS,
+            max_tokens=_budget,
             keep_recent=COMPACT_KEEP_RECENT,
             summarize_with_model=summarize_fn,
         ):
@@ -958,7 +1027,10 @@ class QueryEngine:
                         if msg is None:
                             yield Message("error", {"text": "non-streaming retry also failed"})
                             return
-                        usage = {}
+                        # Pop rather than drop: the retry still reports tokens,
+                        # and taking it off the message keeps what lands in
+                        # self.messages a plain assistant message.
+                        usage = dict(msg.pop("usage", None) or {})
                         final_msg = "RETRIED"
                     finally:
                         spinner.stop()
@@ -979,6 +1051,8 @@ class QueryEngine:
                             "input": final_msg.get("prompt_eval_count", 0),
                             "output": final_msg.get("eval_count", 0),
                             "ms": final_msg.get("total_duration_ns", 0) // 1_000_000,
+                            "cache_read": final_msg.get("cache_read_count", 0),
+                            "cache_write": final_msg.get("cache_write_count", 0),
                         }
             except ToolsUnsupportedError:
                 yield Message(
@@ -1004,6 +1078,8 @@ class QueryEngine:
             self._usage["input"] += usage.get("input", 0)
             self._usage["output"] += usage.get("output", 0)
             self._usage["ms"] += usage.get("ms", 0)
+            self._usage["cache_read"] += usage.get("cache_read", 0)
+            self._usage["cache_write"] += usage.get("cache_write", 0)
 
             raw = msg.get("content") or ""
             had_fakes, cleaned = _strip_fakes(raw)
@@ -1110,7 +1186,11 @@ class QueryEngine:
                 tools=tools,
                 options={"temperature": self.temperature},
             )
-        return msg, {}
+        # Providers that report usage on the non-streaming path (Anthropic)
+        # attach it to the message; the streaming path gets it from the 'done'
+        # payload instead. Without this the non-stream route silently recorded
+        # zero tokens, which made cache hits unmeasurable.
+        return msg, dict(msg.pop("usage", None) or {})
 
     def _chat_nonstream(self) -> dict | None:
         api_messages = normalize_messages_for_api(self.messages)

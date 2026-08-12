@@ -28,7 +28,7 @@ def request(gw: Gateway, path: str, body=None):
     req = urllib.request.Request(
         f"http://127.0.0.1:{gw.port}{path}",
         data=data,
-        headers={"X-Cagentic-Link": gw.token, "Content-Type": "application/json"},
+        headers={"X-Cagentic-Token": gw.token, "Content-Type": "application/json"},
     )
     try:
         with urllib.request.urlopen(req) as response:
@@ -102,7 +102,7 @@ def test_collama_requires_project_but_normal_new_chat_does_not(tmp_path, monkeyp
         req = urllib.request.Request(
             f"http://127.0.0.1:{gw.port}/api/chat",
             data=json.dumps({"message": "hello"}).encode(),
-            headers={"X-Cagentic-Link": gw.token, "Content-Type": "application/json"},
+            headers={"X-Cagentic-Token": gw.token, "Content-Type": "application/json"},
         )
         with urllib.request.urlopen(req) as response:
             assert response.status == 200
@@ -193,18 +193,6 @@ def test_missing_folder_project_load_does_not_switch_session(tmp_path, monkeypat
     result = gw.load_chat(folder_id)
     assert "cannot load chat project" in result["error"]
     assert gw.session["id"] == current_id
-
-
-def test_email_verification_rate_limit(tmp_path, monkeypatch):
-    gw = make_gateway(tmp_path, monkeypatch, 19002)
-    assert [gw.allow_email_verification() for _ in range(6)] == [
-        True,
-        True,
-        True,
-        True,
-        True,
-        False,
-    ]
 
 
 def test_gateway_model_switch_changes_provider_and_persists_full_spec(tmp_path, monkeypatch):

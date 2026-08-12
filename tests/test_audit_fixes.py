@@ -7,7 +7,6 @@ from cagentic.background import BackgroundExecutor
 from cagentic.browser import BrowserBridge
 from cagentic.coding_tools import t_enter_worktree
 from cagentic.coordinator import tick
-from cagentic.emailer import send_verification
 from cagentic.tasks import TaskGraph
 from cagentic.teams import TeamRegistry
 from cagentic.tools import ToolContext, t_set_workspace
@@ -93,13 +92,6 @@ def test_browser_result_delivery_round_trip():
     bridge._pending.add(7)
     bridge._deliver_result(7, True, {"title": "ok"})
     assert bridge._results[7] == {"ok": True, "result": {"title": "ok"}}
-
-
-def test_invalid_smtp_port_returns_error():
-    cfg = {"email": {"smtp_host": "example.test", "smtp_port": "invalid"}}
-    assert send_verification(cfg, "user@example.test", "123456") == (
-        "email.smtp_port must be an integer"
-    )
 
 
 def test_coordinator_marks_subagent_errors_failed(tmp_path, monkeypatch):

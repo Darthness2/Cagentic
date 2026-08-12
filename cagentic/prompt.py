@@ -57,8 +57,10 @@ COMMAND_GROUPS: list[tuple[str, list[tuple[str, str, str]]]] = [
         "files",
         [
             ("/cd", "[path]", "show or change the workspace directory"),
+            ("/init", "[force]", "write an AGENTS.md describing this project"),
             ("/diff", "[N]", "show file edits from this session"),
             ("/undo", "", "revert the most recent file edit"),
+            ("/rewind", "[n]", "undo a whole turn — files and conversation"),
         ],
     ),
     (
@@ -67,7 +69,9 @@ COMMAND_GROUPS: list[tuple[str, list[tuple[str, str, str]]]] = [
             ("/tools", "", "list the tools I can call"),
             ("/groups", "[enable|disable <g>]", "which tool groups I'm given"),
             ("/plan", "[on|off]", "plan mode — read-only, no changes"),
+            ("/accept", "[on|off]", "auto-approve file edits in the workspace"),
             ("/yolo", "[on|off]", "auto-approve tool calls"),
+            ("/rules", "[allow|deny <rule>|remove <rule>]", "pattern permission rules"),
         ],
     ),
     (

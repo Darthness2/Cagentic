@@ -21,6 +21,7 @@ import secrets
 import threading
 import time
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
+from pathlib import Path
 from typing import TYPE_CHECKING
 from urllib.parse import parse_qs, urlparse
 
@@ -133,6 +134,54 @@ class _ClientGone(Exception):
 from .engine import _PLAN_RX, _THINK_RX
 
 _STEP_RX = re.compile(r"<step\s+\d+(?:\s*/\s*\d+)?\s*>", re.IGNORECASE)
+
+# Browser attachments live inside the workspace so the existing @path mention
+# pipeline can read them back; see Gateway.save_upload.
+UPLOAD_DIR = ".cagentic/uploads"
+MAX_UPLOAD_BYTES = 16 * 1024 * 1024
+# One page of browser context; a whole article would swamp the turn.
+MAX_PAGE_CONTEXT = 8000
+_IMAGE_SUFFIXES = {".png", ".jpg", ".jpeg", ".gif", ".webp", ".bmp"}
+_UNSAFE_NAME_RX = re.compile(r"[^A-Za-z0-9._-]+")
+
+
+def _safe_upload_name(name: str) -> str:
+    """Reduce a browser-supplied filename to something safe to join onto a path.
+
+    Deliberately strict rather than clever: strip every directory component,
+    collapse anything outside [A-Za-z0-9._-], and refuse names that are only
+    dots. `_resolve_contained` is still the real boundary — this just means a
+    hostile name never gets that far.
+    """
+    base = str(name or "").replace("\\", "/").split("/")[-1].strip()
+    base = _UNSAFE_NAME_RX.sub("_", base).strip("._")
+    if not base:
+        return ""
+    return base[:120]
+
+
+def _search_snippet(messages: list, needle: str, width: int = 90) -> str:
+    """A short window of text around the first match, for the search results."""
+    for m in messages:
+        if not isinstance(m, dict) or m.get("role") not in ("user", "assistant"):
+            continue
+        content = str(m.get("content") or "")
+        at = content.lower().find(needle)
+        if at < 0:
+            continue
+        lo = max(0, at - width // 3)
+        text = " ".join(content[lo : lo + width].split())
+        return ("…" if lo else "") + text + ("…" if lo + width < len(content) else "")
+    return ""
+
+
+def _upload_kind(path: Path) -> str:
+    suffix = path.suffix.lower()
+    if suffix in _IMAGE_SUFFIXES:
+        return "image"
+    if suffix in {".pdf", ".docx"}:
+        return "document"
+    return "text"
 
 
 def _clean(text: str) -> str:
@@ -271,7 +320,7 @@ class Gateway:
         # localhost only, but this token defends against other local users
         # and (with the Host/Origin checks) against DNS-rebinding / CSRF.
         # A stable token can be pinned via config gateway.token so paired
-        # devices (the iOS app) survive gateway restarts.
+        # clients survive gateway restarts.
         raw_gw_cfg = config.get("gateway")
         gw_cfg = raw_gw_cfg if isinstance(raw_gw_cfg, dict) else {}
         raw_token = gw_cfg.get("token")
@@ -279,7 +328,7 @@ class Gateway:
         self.token = pinned or secrets.token_urlsafe(32)
 
         # Opt-in LAN exposure (config gateway.lan=true): binds all interfaces
-        # so phones/tablets on the network can connect. Every /api/* request
+        # so other machines on the network can connect. Every /api/* request
         # still requires the secret token — set gateway.token and enter it on
         # the device. Off by default: loopback only.
         raw_lan = gw_cfg.get("lan", False)
@@ -292,15 +341,11 @@ class Gateway:
 
         # Simple in-memory rate limit for the email-verification endpoint:
         # list of monotonic timestamps of recent sends.
-        self._email_send_times: list[float] = []
-        self._email_send_lock = threading.Lock()
-
         self._turn_lock = threading.Lock()
         self._actors_lock = threading.Lock()
         self._actors: dict[str, dict] = {}
         self._thread_context = threading.local()
         self._active_emit = None
-        self._active_source: str = "pc"  # "ios" or "pc" — who initiated this turn
         self._default_workspace = agent.state.workspace.resolve()
         self.workspace_policy = WorkspacePolicy.from_config(config, self._default_workspace)
         self.proactive_monitor = proactive.ProactiveMonitor(
@@ -317,14 +362,14 @@ class Gateway:
         self._perm_id: str | None = None  # id of the prompt currently awaiting an answer
         self._perm_pending: set[str] = set()
         self._perm_answers: dict[str, str] = {}  # prompt_id -> answer
+        # prompt_id -> the rule strings that prompt offered, so an answer
+        # can only install a rule the user was actually shown.
+        self._perm_rules: dict[str, tuple[str, ...]] = {}
 
-        # Computer control approval bridge (iOS client approves/denies PC actions)
-        self._comp_cv = threading.Condition()
-        self._comp_approvals: dict[str, bool] = {}  # action_id -> approved
-
-        # Phone action result bridge (iOS client returns results from phone actions)
-        self._phone_cv = threading.Condition()
-        self._phone_results: dict[str, dict] = {}  # action_id -> result dict
+        # Page context queued by the extension side panel, folded into the
+        # next message the user sends.
+        self._context_lock = threading.Lock()
+        self._pending_context: list[str] = []
 
         # The gateway's own engine — a separate conversation, but the SAME
         # shared state (notes, reminders, browser bridge, MCP, workspace).
@@ -348,8 +393,6 @@ class Gateway:
             configured_prompt.strip() if isinstance(configured_prompt, str) else ""
         )
         self._rebuild_suffix()
-        # Wire up phone action callback — will be activated when source=ios
-        self._setup_phone_action()
         # Wire up widget action callback — emits SSE widget events
         self._setup_widget_action()
         # The current chat is a session record (shared store with the REPL).
@@ -443,16 +486,49 @@ class Gateway:
         import uuid
 
         from .engine import _summarize_args
+        from .permissions import describe_change, suggest_rule
 
         prompt_id = str(uuid.uuid4())
         with self._perm_cv:
             self._perm_answers.pop(prompt_id, None)
             self._perm_pending.add(prompt_id)
             self._perm_id = prompt_id
-        emit(
-            "permission",
-            {"id": prompt_id, "tool": name, "summary": _summarize_args(name, args)},
-        )
+        payload: dict[str, object] = {
+            "id": prompt_id,
+            "tool": name,
+            "summary": _summarize_args(name, args),
+        }
+        # Same patch the REPL shows before a y/n — plain text, since ANSI
+        # escapes would be rendered literally in the browser.
+        patch = describe_change(name, args, state, colorize=False)
+        if patch:
+            payload["diff"] = patch
+        # The narrow standing approval the terminal already offers. Without it
+        # the browser's only durable choice is "always allow this whole tool",
+        # which is exactly the coarse grant Phase 1d set out to replace.
+        rule = suggest_rule(name, args)
+        if rule:
+            payload["rule"] = rule
+            with self._perm_cv:
+                self._perm_rules[prompt_id] = (rule,)
+        # Say which confinement a shell command will actually run under —
+        # "approve this command" means something different with the sandbox off.
+        if name in ("run_bash", "bash_async"):
+            from . import sandbox as _sandbox
+
+            shell_cfg = self.config.get("shell") if isinstance(self.config, dict) else None
+            shell_cfg = shell_cfg if isinstance(shell_cfg, dict) else {}
+            if str(shell_cfg.get("sandbox", "auto")).lower() == "off":
+                payload["sandbox"] = "unconfined (shell.sandbox=off)"
+            else:
+                net = bool(args.get("network")) or (
+                    str(shell_cfg.get("network", "deny")).lower() == "allow"
+                )
+                payload["sandbox"] = _sandbox.describe() + (
+                    " · network allowed" if net else " · no network"
+                )
+            payload["network"] = bool(args.get("network"))
+        emit("permission", payload)
         try:
             with self._perm_cv:
                 deadline = time.monotonic() + 300
@@ -467,14 +543,35 @@ class Gateway:
                 if self._perm_id == prompt_id:
                     self._perm_id = next(iter(self._perm_pending - {prompt_id}), None)
                 self._perm_pending.discard(prompt_id)
+                self._perm_rules.pop(prompt_id, None)
 
-    def deliver_permission(self, answer: str, prompt_id: str | None = None) -> None:
+    def deliver_permission(
+        self, answer: str, prompt_id: str | None = None, rule: str | None = None
+    ) -> None:
         """Record an answer for a pending permission prompt.
 
         When `prompt_id` is given it must match the prompt currently awaiting
         an answer; a mismatched/stale id is ignored. When omitted (e.g. an
         internal abort), the answer is applied to whatever prompt is active.
+
+        `answer == "rule"` means "allow, and remember this narrow pattern" —
+        the browser's equivalent of the terminal resolver's `rule` choice. The
+        rule is session-scoped; persisting it stays an explicit /rules call so
+        a single click can't silently edit config on disk.
         """
+        if answer == "rule" and rule:
+            rules = dict(getattr(self.agent.state, "permission_rules", None) or {})
+            allow = list(rules.get("allow") or [])
+            # Only accept a rule this prompt actually offered, so a crafted
+            # request can't inject an arbitrary standing approval.
+            if rule in self._perm_rules.get(prompt_id or "", ()):
+                if rule not in allow:
+                    allow.append(rule)
+                rules["allow"] = allow
+                self.agent.state.update(permission_rules=rules)
+            else:
+                _log.warning("ignoring permission rule that was not offered for this prompt")
+            answer = "yes"
         answer = answer if answer in ("yes", "no", "always", "never") else "no"
         with self._perm_cv:
             target = prompt_id or self._perm_id
@@ -485,128 +582,6 @@ class Gateway:
                 return
             self._perm_answers[target] = answer
             self._perm_cv.notify_all()
-
-    # -- computer control approval bridge -----------------------------------
-
-    def deliver_computer_approval(self, action_id: str, approved: bool) -> None:
-        """Receive an approval/denial from the iOS client for a computer control action."""
-        with self._comp_cv:
-            self._comp_approvals[action_id] = approved
-            self._comp_cv.notify_all()
-
-    def wait_computer_approval(
-        self, action_id: str, emit, event_type: str, data: dict, timeout: float = 300
-    ) -> bool:
-        """Emit a computer control SSE event and wait for the iOS client to approve.
-        Returns True if approved, False if denied or timed out."""
-        with self._comp_cv:
-            self._comp_approvals.pop(action_id, None)
-        emit(event_type, data)
-        with self._comp_cv:
-            deadline = time.monotonic() + timeout
-            while action_id not in self._comp_approvals:
-                remaining = deadline - time.monotonic()
-                if remaining <= 0:
-                    return False
-                self._comp_cv.wait(remaining)
-            return self._comp_approvals.pop(action_id, False)
-
-    # -- phone action result bridge -----------------------------------------
-
-    def deliver_phone_result(self, action_id: str, result: dict) -> None:
-        """Receive an execution result from the iOS client for a phone action."""
-        with self._phone_cv:
-            self._phone_results[action_id] = result
-            self._phone_cv.notify_all()
-
-    def allow_email_verification(self) -> bool:
-        """Allow at most five verification emails per rolling ten minutes."""
-        now = time.monotonic()
-        with self._email_send_lock:
-            self._email_send_times = [t for t in self._email_send_times if now - t < 600]
-            if len(self._email_send_times) >= 5:
-                return False
-            self._email_send_times.append(now)
-            return True
-
-    def wait_phone_result(
-        self, action_id: str, emit, event_type: str, data: dict, timeout: float = 120
-    ) -> dict | None:
-        """Emit a phone action SSE event and wait for the iOS client to execute it.
-        Returns the result dict, or None on timeout."""
-        with self._phone_cv:
-            self._phone_results.pop(action_id, None)
-        emit(event_type, data)
-        with self._phone_cv:
-            deadline = time.monotonic() + timeout
-            while action_id not in self._phone_results:
-                remaining = deadline - time.monotonic()
-                if remaining <= 0:
-                    return None
-                self._phone_cv.wait(remaining)
-            return self._phone_results.pop(action_id, None)
-
-    # -- device context injection -------------------------------------------
-
-    _DEVICE_PROMPT_IOS = """
-
-=== DEVICE CONTEXT ===
-The user is prompting you from their iPhone (iOS device). You can control BOTH the PC (where this gateway runs) AND the iPhone. When you want to control the iPhone, use phone-specific tools:
-- phone_shell: Run a shell command on the iPhone
-- phone_clipboard_read: Read the iPhone clipboard
-- phone_clipboard_write: Write to the iPhone clipboard
-- phone_open_app: Open an app on the iPhone by scheme or URL
-- phone_open_url: Open a URL on the iPhone (in Safari)
-- phone_screenshot: The iPhone user can take a screenshot and share it with you
-
-When you want to control the PC, use the normal tools (shell, file operations, etc.) as usual. The user will approve PC actions from their phone.
-
-=== WIDGET DISPLAY ===
-You can display rich visual widgets on the user's iPhone using the show_widget tool. This renders structured data as native iOS cards — much better than plain text for visual information. Use show_widget whenever you have structured data to present:
-
-- **Stocks**: Use type "stocks" with items containing symbol, name, price, change, change_pct. Include a chart object with labels (time periods) and values (prices) to show an interactive stock graph: chart: {labels: ["9:30","10:00",...], values: [178.50,179.20,...]}
-- **Sports scores**: Use type "sports" with league and games containing home/away teams, scores, and status.
-- **Weather**: Use type "weather" with current conditions and forecast array.
-- **Crypto**: Use type "crypto" with items containing symbol, name, price, change_24h, change_pct. Include chart data for price graphs.
-- **Calendar**: Use type "calendar" with date and events array.
-- **Stats**: Use type "stats" with items containing label, value, and trend.
-- **Progress**: Use type "progress" with steps array showing build/deployment progress.
-- **Lists**: Use type "list" with items containing text and checked status.
-- **Tables**: Use type "table" with headers and rows for any tabular data.
-
-Always prefer show_widget over plain text when presenting visual/structured data. The user's phone will render it beautifully.
-
-IMPORTANT: When you use show_widget, do NOT repeat the widget title or type in your text response. The widget card already shows what it is. Just give a brief 1-sentence intro like "Here's the info:" or skip the text entirely — never say "Here are the stocks:" then also show a stocks widget with title "Stocks".
-"""
-
-    _DEVICE_PROMPT_PC = ""
-
-    def _inject_device_context(self, source: str, engine: QueryEngine | None = None) -> None:
-        """Update the system prompt and tool groups based on who initiated the turn."""
-        from .tools import DEFAULT_GROUPS
-
-        target = engine or self.engine
-        suffix = target.system_suffix or ""
-        marker = "\n\n=== DEVICE CONTEXT ==="
-        # Remove any previous device context injection
-        if marker in suffix:
-            suffix = suffix[: suffix.index(marker)]
-        if source == "ios":
-            suffix += self._DEVICE_PROMPT_IOS
-            # Enable phone tool group for iOS-originated turns
-            groups = target.state.tool_groups
-            if groups is None:
-                groups = set(DEFAULT_GROUPS)
-            groups = groups | {"phone"}
-            target.state.update(tool_groups=groups)
-        else:
-            # Disable phone tool group for PC-originated turns
-            groups = target.state.tool_groups
-            if groups is not None:
-                groups = groups - {"phone"}
-                target.state.update(tool_groups=groups)
-        target.system_suffix = suffix
-        target.refresh_system_prompt()
 
     def _composed_suffix(self) -> str:
         """Build the live gateway prompt without a per-turn device tail."""
@@ -623,24 +598,6 @@ IMPORTANT: When you use show_widget, do NOT repeat the widget title or type in y
         """Refresh the primary gateway engine's live, device-neutral context."""
         self.engine.system_suffix = self._composed_suffix()
         self.engine.refresh_system_prompt()
-
-    def _setup_phone_action(self) -> None:
-        """Wire up the phone_action callback on the engine's tool executor."""
-        gw = self
-
-        def phone_action(action_type: str, payload: dict) -> dict | None:
-            """Callback for phone control tools. Emits SSE event and waits for result."""
-            import uuid
-
-            action_id = str(uuid.uuid4())
-            emit = getattr(gw._thread_context, "emit", None) or gw._active_emit
-            if emit is None:
-                return {"success": False, "error": "no active connection"}
-            event_type = f"phone_{action_type}"
-            data = {"id": action_id, **payload}
-            return gw.wait_phone_result(action_id, emit, event_type, data)
-
-        self.engine.executor.phone_action = phone_action
 
     def _setup_widget_action(self) -> None:
         """Wire up the widget_action callback on the engine's tool executor."""
@@ -729,6 +686,19 @@ IMPORTANT: When you use show_widget, do NOT repeat the widget title or type in y
             self.engine._abort_turn = False
         return got
 
+    def is_busy(self) -> bool:
+        """Is a turn in flight, on the main engine or any saved-session actor?
+
+        Used by the auto-reloader to avoid restarting the daemon out from under
+        a request. Non-blocking and best-effort: a false negative costs at most
+        one dropped reply, and the reloader re-checks every second anyway.
+        """
+        if self._turn_lock.locked():
+            return True
+        with self._actors_lock:
+            actors = list(self._actors.values())
+        return any(a["lock"].locked() for a in actors)
+
     def list_chats(self) -> list[dict]:
         self._save_current()
         out = []
@@ -769,6 +739,128 @@ IMPORTANT: When you use show_widget, do NOT repeat the widget title or type in y
                         msg["tool_details"] = _tool_details(tool_calls, messages, i + 1)
                     out.append(msg)
         return out
+
+    def add_page_context(self, text: str) -> dict:
+        """Queue browser page context to ride along with the next message.
+
+        Used by the extension's side panel "Add page" button. Held rather than
+        sent immediately because context on its own isn't a turn — the user
+        still has to say what they want done with it.
+        """
+        text = (text or "").strip()
+        if not text:
+            return {"ok": False, "error": "empty context"}
+        if len(text) > MAX_PAGE_CONTEXT:
+            text = text[:MAX_PAGE_CONTEXT] + "\n…(truncated)"
+        with self._context_lock:
+            self._pending_context.append(text)
+            del self._pending_context[:-4]  # keep the last few, not a backlog
+            pending = len(self._pending_context)
+        return {"ok": True, "pending": pending}
+
+    def _consume_pending_context(self, message: str) -> str:
+        """Prepend and clear any queued page context. Called once per turn."""
+        with self._context_lock:
+            if not self._pending_context:
+                return message
+            blocks = list(self._pending_context)
+            self._pending_context.clear()
+        return "\n\n".join(blocks) + "\n\n" + message
+
+    def search_chats(self, query: str, limit: int = 40) -> dict:
+        """Title+content search over saved chats, for the sidebar's search box.
+
+        Reuses `sessions.search` (the same index behind `/search` and
+        `--search`) so the three surfaces can't disagree about what matches.
+        """
+        query = (query or "").strip()
+        if not query:
+            return {"query": "", "results": []}
+        try:
+            found = sessions.search(query, limit=limit)
+        except Exception:
+            _log.warning("chat search failed", exc_info=True)
+            return {"query": query, "results": []}
+        needle = query.lower()
+        results = []
+        for data in found:
+            if not isinstance(data, dict) or not data.get("id"):
+                continue
+            results.append(
+                {
+                    "id": data.get("id"),
+                    "title": data.get("title") or "Untitled",
+                    "project_id": data.get("project_id"),
+                    "snippet": _search_snippet(data.get("messages") or [], needle),
+                }
+            )
+        return {"query": query, "results": results}
+
+    # -- attachments ---------------------------------------------------------
+
+    def save_upload(self, name: str, data_b64: str) -> tuple[dict, int]:
+        """Persist a browser upload inside the workspace; return (payload, status).
+
+        Files land under `.cagentic/uploads/<chat-id>/` so the model can reach
+        them through the *existing* `@path` mention pipeline — that already
+        extracts PDF/DOCX text and, as of this phase, inlines images for vision
+        models. Routing uploads through it means one attachment code path
+        serves the terminal and the browser instead of two that drift.
+        """
+        import base64
+
+        from .tools import PathEscapeError, _resolve_contained
+
+        safe = _safe_upload_name(name)
+        if not safe:
+            return {"error": "invalid file name"}, 400
+        try:
+            raw = base64.b64decode(data_b64 or "", validate=True)
+        except (ValueError, TypeError):
+            return {"error": "attachment was not valid base64"}, 400
+        if not raw:
+            return {"error": "attachment was empty"}, 400
+        if len(raw) > MAX_UPLOAD_BYTES:
+            limit = MAX_UPLOAD_BYTES // (1024 * 1024)
+            return {"error": f"attachment is larger than {limit}MB"}, 413
+
+        chat_id = str(self.session.get("id") or "chat")
+        rel = f"{UPLOAD_DIR}/{_safe_upload_name(chat_id) or 'chat'}/{safe}"
+        workspace = self.agent.state.workspace
+        try:
+            # The one boundary that matters: an upload must not be able to
+            # write outside the workspace via a crafted name.
+            target = _resolve_contained(rel, workspace)
+        except PathEscapeError:
+            return {"error": "attachment path escapes the workspace"}, 400
+        try:
+            target.parent.mkdir(parents=True, exist_ok=True)
+            # Never silently clobber a same-named earlier upload.
+            stem, suffix = target.stem, target.suffix
+            n = 1
+            while target.exists():
+                target = target.with_name(f"{stem}-{n}{suffix}")
+                n += 1
+            target.write_bytes(raw)
+        except OSError as exc:
+            _log.warning("upload failed", exc_info=True)
+            return {"error": f"could not save attachment: {exc}"}, 500
+
+        try:
+            # Compare against the RESOLVED workspace: _resolve_contained hands
+            # back a realpath, so on macOS (/tmp -> /private/tmp) and anywhere
+            # with a symlinked project root the naive relative_to fails and the
+            # chip ends up showing an absolute path.
+            mention = str(target.relative_to(workspace.resolve())).replace("\\", "/")
+        except ValueError:  # pragma: no cover - _resolve_contained guarantees it
+            mention = str(target)
+        return {
+            "ok": True,
+            "name": target.name,
+            "path": mention,
+            "size": len(raw),
+            "kind": _upload_kind(target),
+        }, 200
 
     def current_chat(self) -> dict:
         current = {
@@ -1262,14 +1354,14 @@ IMPORTANT: When you use show_widget, do NOT repeat the widget title or type in y
             "current": self.current_chat(),
             "settings": settings,
             "projects": self.list_projects(),
-            # Collama-compat keys — the iOS coding tab reads these directly.
+            # Collama-compat keys, kept for existing API clients.
             "workspace": str(self.agent.state.workspace),
             "effort": getattr(self.agent.state, "effort", "medium"),
             "yolo": self.agent.state.yolo,
             "models": settings.get("models") or [],
         }
 
-    # -- Collama-compat surface (the iOS coding tab) -------------------------
+    # -- Collama-compat surface (alternate paths/shapes) ---------------------
 
     def set_workspace(self, path: object) -> dict:
         p = self.workspace_policy.validate(path)
@@ -1349,9 +1441,12 @@ IMPORTANT: When you use show_widget, do NOT repeat the widget title or type in y
             if pinned != requested_project:
                 return {"error": "project does not match the session's pinned project"}, 409
 
-            context_window = command_utils.context_window(self.config)
-            max_tokens = max(1, int(context_window * threshold_value))
+            # Size the budget against the session's own model, not the config
+            # default — a session saved under a 200k model must not be
+            # compacted as if it were running on an 8k local one.
             target_model = str(target.get("model") or self._model_spec)
+            context_window = command_utils.context_window(self.config, model_spec=target_model)
+            max_tokens = max(1, int(context_window * threshold_value))
             before = count_messages(working, target_model)
             report = auto_compact(
                 working,
@@ -1433,7 +1528,7 @@ IMPORTANT: When you use show_widget, do NOT repeat the widget title or type in y
         return {"ok": True, "effort": level}
 
     def list_sessions_compat(self) -> dict:
-        """Chats reshaped the way the iOS coding tab expects."""
+        """Chats reshaped the way Collama-compat clients expect."""
         return {
             "sessions": [
                 {
@@ -1447,7 +1542,7 @@ IMPORTANT: When you use show_widget, do NOT repeat the widget title or type in y
             ]
         }
 
-    # GitHub proxy — lets the phone browse/edit GitHub with the PC's token.
+    # GitHub proxy — lets the web UI browse/edit GitHub with the host's token.
     def _github_ctx(self):
         """Duck-typed ToolContext for cagentic.github._request: needs
         .github_token and .insecure_ssl. Falls back to config github.token."""
@@ -1572,7 +1667,6 @@ IMPORTANT: When you use show_widget, do NOT repeat the widget title or type in y
         self.engine.model = self.agent.model
         try:
             self._rebuild_suffix()
-            self._inject_device_context("pc")
             for ev in self.engine.submit_message(message):
                 emit(ev.kind, ev.data)
         except _ClientGone:
@@ -1605,19 +1699,17 @@ IMPORTANT: When you use show_widget, do NOT repeat the widget title or type in y
         finally:
             self._turn_lock.release()
 
-    def run_turn(self, message: str, emit, source: str = "pc", prelocked: bool = False) -> None:
+    def run_turn(self, message: str, emit, prelocked: bool = False) -> None:
         if not prelocked and not self._turn_lock.acquire(blocking=False):
             emit("error", {"text": "Cagentic is still working on the previous message."})
             return
         self._active_emit = emit
         self._thread_context.emit = emit
-        self._active_source = source
         self.engine.model = self.agent.model
         try:
-            # Refresh the user's live goals/calendar context before every turn,
-            # then add the device-specific capabilities for this request.
+            # Refresh the user's live goals/calendar context before every turn.
             self._rebuild_suffix()
-            self._inject_device_context(source)
+            message = self._consume_pending_context(message)
             for ev in self.engine.submit_message(message):
                 emit(ev.kind, ev.data)
         except _ClientGone:
@@ -1625,14 +1717,8 @@ IMPORTANT: When you use show_widget, do NOT repeat the widget title or type in y
         except Exception as e:
             emit("error", {"text": f"{type(e).__name__}: {e}"})
         finally:
-            if source == "ios":
-                try:
-                    self._inject_device_context("pc")
-                except Exception:
-                    _log.warning("failed to clear iOS device context", exc_info=True)
             self._active_emit = None
             self._thread_context.emit = None
-            self._active_source = "pc"
             try:
                 self._save_current()
             except Exception:
@@ -1659,7 +1745,6 @@ IMPORTANT: When you use show_widget, do NOT repeat the widget title or type in y
                 return None
             shared = self.agent.state
             shared_groups = set(shared.tool_groups) if shared.tool_groups else set()
-            shared_groups.discard("phone")
             state = AppState(
                 workspace=self._default_workspace,
                 home=shared.home,
@@ -1692,7 +1777,6 @@ IMPORTANT: When you use show_widget, do NOT repeat the widget title or type in y
                 permission_resolver=self._resolve,
                 stream=True,
             )
-            engine.executor.phone_action = self.engine.executor.phone_action
             engine.executor.widget_action = self.engine.executor.widget_action
             engine.system_suffix = self._composed_suffix()
             engine.project_context = context
@@ -1721,7 +1805,7 @@ IMPORTANT: When you use show_widget, do NOT repeat the widget title or type in y
             return {"error": "session is busy"}, 409
         return {"ok": True}, 200
 
-    def run_session_turn(self, session_id: str, message: str, emit, source: str = "pc") -> None:
+    def run_session_turn(self, session_id: str, message: str, emit) -> None:
         actor = self._session_actor(session_id)
         if actor is None or not actor["lock"].acquire(blocking=False):
             emit("error", {"text": "session is busy or unavailable"})
@@ -1730,7 +1814,6 @@ IMPORTANT: When you use show_widget, do NOT repeat the widget title or type in y
         self._thread_context.emit = emit
         try:
             engine.system_suffix = self._composed_suffix()
-            self._inject_device_context(source, engine)
             for event in engine.submit_message(message):
                 emit(event.kind, event.data)
         except _ClientGone:
@@ -1738,11 +1821,6 @@ IMPORTANT: When you use show_widget, do NOT repeat the widget title or type in y
         except Exception as exc:
             emit("error", {"text": f"{type(exc).__name__}: {exc}"})
         finally:
-            if source == "ios":
-                try:
-                    self._inject_device_context("pc", engine)
-                except Exception:
-                    _log.warning("failed to clear actor iOS device context", exc_info=True)
             self._thread_context.emit = None
             data = actor["session"]
             data["model"] = actor["model_spec"]
@@ -2200,10 +2278,8 @@ class _Handler(BaseHTTPRequestHandler):
             return False
         expected = self._gw().token
         # fetch() calls send the token via header; the SSE/EventSource stream
-        # (which can't set headers) sends it via ?token= query param. The iOS
-        # app sends its stored gateway token as X-Cagentic-Link — accept it
-        # as an alias so one saved credential works for the whole app.
-        supplied = self.headers.get("X-Cagentic-Token") or self.headers.get("X-Cagentic-Link")
+        # (which can't set headers) sends it via ?token= query param.
+        supplied = self.headers.get("X-Cagentic-Token")
         if not supplied:
             qs = parse_qs(urlparse(self.path).query)
             vals = qs.get("token")
@@ -2231,8 +2307,17 @@ class _Handler(BaseHTTPRequestHandler):
     def _json(self, obj, status: int = 200) -> None:
         self._send(json.dumps(obj).encode("utf-8"), "application/json", status)
 
-    def _body(self) -> dict:
+    # Cap on a normal JSON request body. Uploads carry base64 (≈4/3 overhead)
+    # plus the JSON envelope, so they get their own, larger ceiling — but both
+    # are bounded, because an unbounded read is a trivial memory DoS.
+    _MAX_JSON_BODY = 4 * 1024 * 1024
+    _MAX_UPLOAD_BODY = MAX_UPLOAD_BYTES * 4 // 3 + 64 * 1024
+
+    def _body(self, max_bytes: int | None = None) -> dict:
+        limit = max_bytes or self._MAX_JSON_BODY
         length = int(self.headers.get("Content-Length") or 0)
+        if length > limit:
+            return {}
         raw = self.rfile.read(length) if length else b"{}"
         try:
             return json.loads(raw or b"{}")
@@ -2271,7 +2356,7 @@ class _Handler(BaseHTTPRequestHandler):
         elif path == "/api/projects":
             self._json(self._gw().list_projects())
         elif path == "/api/sessions":
-            # Collama-compat: the iOS coding tab's session list.
+            # Collama-compat: the alternate session list shape.
             self._json(self._gw().list_sessions_compat())
         elif path == "/api/workspace/browse":
             qs = parse_qs(urlparse(self.path).query, keep_blank_values=True)
@@ -2323,9 +2408,8 @@ class _Handler(BaseHTTPRequestHandler):
             return
         if path == "/api/chat":
             b = self._body()
-            source = str(b.get("source", "pc"))
-            # "message" is the web UI's key; "prompt" is what the iOS coding
-            # tab sends (Collama-compat). Accept either.
+            # "message" is the web UI's key; "prompt" is the Collama-compat
+            # alias kept for existing clients. Accept either.
             message = str(b.get("message") or b.get("prompt") or "").strip()
             prelocked = False
             session_id = str(b.get("id") or "")
@@ -2344,7 +2428,6 @@ class _Handler(BaseHTTPRequestHandler):
                         return
             self._stream_chat(
                 message,
-                source=source,
                 prelocked=prelocked,
                 session_id=session_id or None,
             )
@@ -2362,25 +2445,12 @@ class _Handler(BaseHTTPRequestHandler):
             gw.deliver_permission(
                 str(b.get("answer", "no")),
                 str(b["id"]) if b.get("id") else None,
+                str(b["rule"]) if b.get("rule") else None,
             )
             self._json({"ok": True})
             return
-        if path == "/api/computer/approve":
-            b = self._body()
-            action_id = str(b.get("id", ""))
-            approved = bool(b.get("approved", False))
-            gw.deliver_computer_approval(action_id, approved)
-            self._json({"ok": True})
-            return
-        if path == "/api/computer/result":
-            b = self._body()
-            action_id = str(b.get("id", ""))
-            result = b.get("result", {})
-            gw.deliver_phone_result(action_id, result)
-            self._json({"ok": True})
-            return
-        # Collama-compat session routes (the iOS coding tab) — same chats,
-        # different paths and response shapes.
+        # Collama-compat session routes — same chats, different paths and
+        # response shapes.
         if path == "/api/session/new":
             b = self._body()
             try:
@@ -2494,6 +2564,22 @@ class _Handler(BaseHTTPRequestHandler):
                 )
             )
             return
+        if path == "/api/context/page":
+            b = self._body()
+            self._json(gw.add_page_context(str(b.get("text") or "")))
+            return
+        if path == "/api/chats/search":
+            b = self._body()
+            self._json(gw.search_chats(str(b.get("query") or "")))
+            return
+        if path == "/api/upload":
+            b = self._body(max_bytes=self._MAX_UPLOAD_BODY)
+            if not b:
+                self._json({"error": "attachment too large"}, status=413)
+                return
+            result, status = gw.save_upload(str(b.get("name") or ""), str(b.get("data") or ""))
+            self._json(result, status=status)
+            return
         if path == "/api/cmd":
             b = self._body()
             self._json(
@@ -2503,27 +2589,6 @@ class _Handler(BaseHTTPRequestHandler):
                     str(b.get("arg2", "")),
                 )
             )
-            return
-        if path == "/api/email/verification":
-            from . import emailer
-
-            if not gw.allow_email_verification():
-                self._json(
-                    {
-                        "ok": False,
-                        "error": "too many verification emails; try again later",
-                    },
-                    status=429,
-                )
-                return
-            b = self._body()
-            err = emailer.send_verification(
-                gw.config,
-                str(b.get("to", "")).strip(),
-                str(b.get("code", "")).strip(),
-                str(b.get("name", "")).strip(),
-            )
-            self._json({"ok": True} if err is None else {"ok": False, "error": err})
             return
         self._send(b"not found", "text/plain", status=404)
 
@@ -2548,7 +2613,6 @@ class _Handler(BaseHTTPRequestHandler):
     def _stream_chat(
         self,
         message: str,
-        source: str = "pc",
         prelocked: bool = False,
         session_id: str | None = None,
     ) -> None:
@@ -2563,9 +2627,9 @@ class _Handler(BaseHTTPRequestHandler):
             return
         try:
             if session_id and session_id != self._gw().session.get("id"):
-                self._gw().run_session_turn(session_id, message, emit, source=source)
+                self._gw().run_session_turn(session_id, message, emit)
             else:
-                self._gw().run_turn(message, emit, source=source, prelocked=prelocked)
+                self._gw().run_turn(message, emit, prelocked=prelocked)
             emit("end", {})
         except _ClientGone:
             return

@@ -1353,7 +1353,7 @@ def _os_home() -> str:
 # ---------------------------------------------------------------------------
 
 
-def _reserve_bottom_row_seq(rows: int, *, region_active: bool) -> str:
+def _reserve_bottom_row_seq(rows: int, *, region_active: bool, reserve: int = 1) -> str:
     """Escapes that reserve row `rows` for the status bar and leave the cursor
     INSIDE the resulting scroll region.
 
@@ -1398,9 +1398,15 @@ def _reserve_bottom_row_seq(rows: int, *, region_active: bool) -> str:
         + "\033D"  # IND: down one row, scrolling if we're at the bottom
         + "\033[A"  # CUU: back up one row (never scrolls)
         + "\0337"  # ESC 7: save cursor (DECSC)
-        + f"\033[1;{rows - 1}r"  # DECSTBM — reserve bottom row (homes)
+        + f"\033[1;{rows - reserve}r"  # DECSTBM — reserve the bottom row(s) (homes)
         + "\0338"  # ESC 8: restore cursor (DECRC)
     )
+
+
+# Seconds a new terminal size must hold still before we re-reserve the bar
+# row. A window drag emits dozens of sizes; acting on each one is what made
+# resizing mid-turn spray duplicate status lines into the scrollback.
+_RESIZE_SETTLE = 0.35
 
 
 class StatusBar:
@@ -1422,7 +1428,11 @@ class StatusBar:
         bar.stop()   # always in a finally block
     """
 
-    def __init__(self, ctx_tokens: int = 0) -> None:
+    def __init__(self, ctx_tokens: int = 0, extra_reserved_rows: int = 0) -> None:
+        # Rows kept below the scroll region IN ADDITION to the bar's own. The
+        # type-ahead echo lives on one of them; without the extra reservation
+        # streamed output would scroll straight over it.
+        self._reserve = 1 + max(0, int(extra_reserved_rows))
         self._t0 = time.monotonic()
         self._tok = 0  # output chars seen this turn ÷ 4 ≈ tokens
         self._ctx = ctx_tokens  # running context estimate, updated on done
@@ -1433,6 +1443,10 @@ class StatusBar:
         self._lock = threading.Lock()
         self._active = False
         self._last_rows = 0  # track height so resize re-reserves the row
+        # Resize debounce: a window drag emits sizes continuously, and each
+        # re-reserve is destructive, so act only once the size holds still.
+        self._pending_rows = 0
+        self._resize_at = 0.0
 
     # ------------------------------------------------------------------
     # Public API
@@ -1445,11 +1459,18 @@ class StatusBar:
             .lower()
         )
         rows = shutil.get_terminal_size((80, 24)).lines
-        if not motion_enabled() or configured in {"off", "0", "false", "no"} or rows < 4:
+        if (
+            not motion_enabled()
+            or configured in {"off", "0", "false", "no"}
+            or rows < 3 + self._reserve
+        ):
             return
         self._last_rows = rows
+        self._pending_rows = rows
         with _PAINT_LOCK:
-            sys.stdout.write(_reserve_bottom_row_seq(rows, region_active=False))
+            sys.stdout.write(
+                _reserve_bottom_row_seq(rows, region_active=False, reserve=self._reserve)
+            )
             sys.stdout.flush()
         self._active = True
         self._stop.clear()
@@ -1531,18 +1552,49 @@ class StatusBar:
     def _paint(self) -> None:
         text = self._compose()
         rows = shutil.get_terminal_size((80, 24)).lines
+        now = time.monotonic()
         with _PAINT_LOCK:
-            # On resize, re-reserve the bottom row against the new height —
-            # with the same make-room guard start() uses. Shrinking is the
-            # dangerous direction: the terminal clamps the cursor into the new,
-            # shorter screen, so it can land on the row we are about to reserve
-            # and every subsequent line of the turn gets painted over. This is
-            # emitted as its own statement rather than folded into the paint
-            # bracket below, because DECSC/DECRC is a single save slot on most
-            # terminals and nesting one pair inside another clobbers it.
             if rows != self._last_rows:
-                sys.stdout.write(_reserve_bottom_row_seq(rows, region_active=True))
+                # A resize is in flight. Dragging a window emits a continuous
+                # stream of new sizes, and re-reserving on each one costs a
+                # scrolled line *and* strands the previous bar text in the
+                # scrollback — which is what produced a ladder of duplicated
+                # "working …" lines every time the window was resized. So wait
+                # for the geometry to settle, and paint nothing meanwhile:
+                # painting against a size we're about to redo is what leaves
+                # the stale copies behind.
+                if rows != self._pending_rows:
+                    self._pending_rows = rows
+                    self._resize_at = now
+                    return
+                if now - self._resize_at < _RESIZE_SETTLE:
+                    return
+                # Growing leaves the old bar row mid-screen holding stale text;
+                # clear it before reserving the new one. (Shrinking pushes it
+                # into scrollback, which no escape can reach — hence the
+                # settle-first approach above, which keeps it to one line.)
+                if 0 < self._last_rows <= rows:
+                    sys.stdout.write(
+                        "\0337"  # ESC 7: save cursor
+                        + "\033[r"  # full-screen region so the row is addressable
+                        + f"\033[{self._last_rows};1H"
+                        + "\033[2K"  # clear the old bar row
+                        + "\0338"  # ESC 8: restore cursor
+                    )
+                # Re-reserve the bottom row against the new height — with the
+                # same make-room guard start() uses. Shrinking is the dangerous
+                # direction: the terminal clamps the cursor into the new,
+                # shorter screen, so it can land on the row we are about to
+                # reserve and every subsequent line of the turn gets painted
+                # over. Emitted as its own statement rather than folded into
+                # the paint bracket below, because DECSC/DECRC is a single save
+                # slot on most terminals and nesting one pair inside another
+                # clobbers it.
+                sys.stdout.write(
+                    _reserve_bottom_row_seq(rows, region_active=True, reserve=self._reserve)
+                )
                 self._last_rows = rows
+                self._pending_rows = rows
             sys.stdout.write(
                 "\0337"  # ESC 7: save cursor
                 + f"\033[{rows};1H"  # move to bottom row

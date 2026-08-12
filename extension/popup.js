@@ -77,6 +77,100 @@ function renderRecent(recent) {
   });
 }
 
+// ---- site permissions -----------------------------------------------------
+// Mirrors the bridge's rules and lets the user change them for the tab they're
+// looking at. Deny wins; a non-empty allow list turns it into an allow-list.
+let siteRules = { allow: [], deny: [] };
+
+async function currentHost() {
+  try {
+    const [tab] = await chrome.tabs.query({ active: true, currentWindow: true });
+    if (!tab || !tab.url) return "";
+    return new URL(tab.url).hostname.toLowerCase();
+  } catch (e) {
+    return "";
+  }
+}
+
+function renderSites(rules) {
+  siteRules = { allow: (rules && rules.allow) || [], deny: (rules && rules.deny) || [] };
+  const box = $("sites");
+  box.innerHTML = "";
+  if (!siteRules.allow.length && !siteRules.deny.length) {
+    const d = document.createElement("div");
+    d.className = "empty";
+    d.textContent = "Any site (no restrictions set).";
+    box.appendChild(d);
+    return;
+  }
+  const add = (host, kind) => {
+    const row = document.createElement("div");
+    row.className = "site " + kind;
+    const mk = document.createElement("span");
+    mk.className = "mk";
+    mk.textContent = kind === "deny" ? "\u2717" : "\u2713";
+    const name = document.createElement("span");
+    name.className = "name";
+    name.textContent = host;
+    const x = document.createElement("button");
+    x.className = "site-x";
+    x.textContent = "\u2715";
+    x.title = "Remove";
+    x.addEventListener("click", () => {
+      siteRules[kind] = siteRules[kind].filter((h) => h !== host);
+      saveSites();
+    });
+    row.append(mk, name, x);
+    box.appendChild(row);
+  };
+  siteRules.deny.forEach((h) => add(h, "deny"));
+  siteRules.allow.forEach((h) => add(h, "allow"));
+  if (siteRules.allow.length) {
+    const note = document.createElement("div");
+    note.className = "empty";
+    note.textContent = "Allow-list active: every other site is blocked.";
+    box.appendChild(note);
+  }
+}
+
+async function saveSites() {
+  try {
+    const res = await fetch("http://127.0.0.1:" + port + "/sites", {
+      method: "POST",
+      headers: { "Content-Type": "application/json", "X-Cagentic-Token": token },
+      body: JSON.stringify(siteRules),
+    });
+    const j = await res.json();
+    renderSites(j.sites || siteRules);
+  } catch (e) {
+    console.warn("Cagentic: could not save site rules", e);
+  }
+}
+
+async function setCurrentSite(kind) {
+  const host = await currentHost();
+  if (!host) return;
+  siteRules.allow = siteRules.allow.filter((h) => h !== host);
+  siteRules.deny = siteRules.deny.filter((h) => h !== host);
+  siteRules[kind].push(host);
+  await saveSites();
+}
+
+// Opening the side panel must happen synchronously inside the click handler —
+// Chrome rejects sidePanel.open() once the call stack loses its user gesture.
+$("openPanel").addEventListener("click", async () => {
+  try {
+    const [tab] = await chrome.tabs.query({ active: true, currentWindow: true });
+    await chrome.sidePanel.open({ windowId: tab.windowId });
+    window.close();
+  } catch (e) {
+    console.warn("Cagentic: could not open the side panel", e);
+  }
+});
+
+$("allowSite").addEventListener("click", () => setCurrentSite("allow"));
+$("denySite").addEventListener("click", () => setCurrentSite("deny"));
+
 function renderOnline(s) {
   $("dot").className = "dot on";
   $("statusText").textContent = "Connected";
@@ -84,6 +178,7 @@ function renderOnline(s) {
   $("details").classList.remove("hidden");
   $("vModel").textContent = s.model || "not loaded yet";
   renderActivity(s.activity);
+  renderSites(s.sites);
   renderRecent(s.recent);
   $("ver").textContent = "cagentic v" + (s.version || "?") + " · bridge on 127.0.0.1:" + port;
 }

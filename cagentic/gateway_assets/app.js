@@ -55,33 +55,66 @@ setInterval(updateClock, 1000); updateClock();
   function initParts(){ particles=[]; for(let i=0;i<220;i++) particles.push(mkPart()); }
   const ORBS=[{r:105,s:0.65,sz:3.5,ph:0},{r:105,s:0.65,sz:3.5,ph:Math.PI},
     {r:82,s:-1.05,sz:2.5,ph:Math.PI/2},{r:125,s:0.45,sz:2,ph:Math.PI/3},{r:82,s:-1.05,sz:2.5,ph:Math.PI*1.5}];
+  // The orb is additive glow, which reads as a muddy grey smear on a light
+  // page. On light it becomes a denser, darker-cored version of the same
+  // shape so it still looks deliberate instead of washed out.
+  function isLight(){
+    const t=document.documentElement.getAttribute('data-theme');
+    if(t==='light') return true;
+    if(t==='dark') return false;
+    return window.matchMedia('(prefers-color-scheme: light)').matches;
+  }
   function draw() {
     ctx.clearRect(0,0,W,H);
+    const light=isLight();
     // speed reacts to state: faster when busy/listening/speaking
     const sp = state.busy ? 0.03 : (window.__jSpeak ? 0.022 : 0.011);
     t += sp;
-    for(let r=120;r>=12;r-=18) {
-      const g=ctx.createRadialGradient(cx,cy,r*0.4,cx,cy,r);
-      g.addColorStop(0,`rgba(199,155,216,${0.022+(120-r)*0.0006})`); g.addColorStop(1,'rgba(0,0,0,0)');
-      ctx.beginPath(); ctx.arc(cx,cy,r,0,Math.PI*2); ctx.fillStyle=g; ctx.fill();
+    // The stacked wide halos are what give the dark orb its depth; on light
+    // they stack into a grey smudge, so light gets one tight halo instead.
+    if(light){
+      const g=ctx.createRadialGradient(cx,cy,20,cx,cy,78);
+      g.addColorStop(0,'rgba(123,79,146,0.10)'); g.addColorStop(1,'rgba(123,79,146,0)');
+      ctx.beginPath(); ctx.arc(cx,cy,78,0,Math.PI*2); ctx.fillStyle=g; ctx.fill();
+    } else {
+      for(let r=120;r>=12;r-=18) {
+        const g=ctx.createRadialGradient(cx,cy,r*0.4,cx,cy,r);
+        g.addColorStop(0,`rgba(199,155,216,${0.022+(120-r)*0.0006})`);
+        g.addColorStop(1,'rgba(0,0,0,0)');
+        ctx.beginPath(); ctx.arc(cx,cy,r,0,Math.PI*2); ctx.fillStyle=g; ctx.fill();
+      }
     }
-    const mg=ctx.createRadialGradient(cx,cy,0,cx,cy,65);
-    mg.addColorStop(0,'rgba(244,236,248,0.88)'); mg.addColorStop(0.22,'rgba(199,155,216,0.58)');
-    mg.addColorStop(0.6,'rgba(154,111,176,0.22)'); mg.addColorStop(1,'rgba(0,0,0,0)');
-    ctx.beginPath(); ctx.arc(cx,cy,65,0,Math.PI*2); ctx.fillStyle=mg; ctx.fill();
+    const mg=ctx.createRadialGradient(cx,cy,0,cx,cy,light?46:65);
+    if(light){
+      mg.addColorStop(0,'rgba(102,62,124,0.9)'); mg.addColorStop(0.35,'rgba(140,96,166,0.42)');
+      mg.addColorStop(0.7,'rgba(168,130,190,0.14)'); mg.addColorStop(1,'rgba(0,0,0,0)');
+    } else {
+      mg.addColorStop(0,'rgba(244,236,248,0.88)'); mg.addColorStop(0.22,'rgba(199,155,216,0.58)');
+      mg.addColorStop(0.6,'rgba(154,111,176,0.22)'); mg.addColorStop(1,'rgba(0,0,0,0)');
+    }
+    ctx.beginPath(); ctx.arc(cx,cy,light?46:65,0,Math.PI*2); ctx.fillStyle=mg; ctx.fill();
     const ic=ctx.createRadialGradient(cx,cy,0,cx,cy,20);
-    ic.addColorStop(0,'rgba(255,255,255,1)'); ic.addColorStop(0.5,'rgba(230,215,238,0.75)'); ic.addColorStop(1,'rgba(199,155,216,0)');
+    if(light){
+      ic.addColorStop(0,'rgba(86,48,108,1)'); ic.addColorStop(0.5,'rgba(123,79,146,0.7)'); ic.addColorStop(1,'rgba(123,79,146,0)');
+    } else {
+      ic.addColorStop(0,'rgba(255,255,255,1)'); ic.addColorStop(0.5,'rgba(230,215,238,0.75)'); ic.addColorStop(1,'rgba(199,155,216,0)');
+    }
     ctx.beginPath(); ctx.arc(cx,cy,20,0,Math.PI*2); ctx.fillStyle=ic; ctx.fill();
     particles.forEach(p=>{
       p.x+=p.vx; p.y+=p.vy; p.life-=p.decay; if(p.life<=0) resetPart(p);
       const a=Math.max(0,p.life)*p.alpha, br=0.5+p.z*0.5;
       ctx.beginPath(); ctx.arc(p.x,p.y,p.size,0,Math.PI*2);
-      ctx.fillStyle=`rgba(${Math.round(120+br*79)},${Math.round(85+br*70)},${Math.round(140+br*76)},${a})`; ctx.fill();
+      ctx.fillStyle=light
+        ? `rgba(${Math.round(150-br*60)},${Math.round(100-br*40)},${Math.round(175-br*55)},${a})`
+        : `rgba(${Math.round(120+br*79)},${Math.round(85+br*70)},${Math.round(140+br*76)},${a})`;
+      ctx.fill();
     });
     ORBS.forEach(o=>{
       const a=t*o.s+o.ph, ox=cx+o.r*Math.cos(a), oy=cy+o.r*0.38*Math.sin(a);
       ctx.beginPath(); ctx.arc(ox,oy,o.sz,0,Math.PI*2);
-      ctx.fillStyle='rgba(199,155,216,0.9)'; ctx.shadowColor='#c79bd8'; ctx.shadowBlur=12; ctx.fill(); ctx.shadowBlur=0;
+      ctx.fillStyle=light?'rgba(110,68,133,0.95)':'rgba(199,155,216,0.9)';
+      ctx.shadowColor=light?'#7b4f92':'#c79bd8'; ctx.shadowBlur=light?6:12;
+      ctx.fill(); ctx.shadowBlur=0;
     });
     requestAnimationFrame(draw);
   }
@@ -95,33 +128,259 @@ function esc(s){ return (s||'').replace(/[&<>"']/g,c=>({'&':'&amp;','<':'&lt;','
 // anything else (javascript:, data:text/html, etc.) is dropped to '#'.
 function safeUrl(u){ u=(u||'').trim(); return /^https?:\/\//i.test(u)?u:'#'; }
 function safeImgUrl(u){ u=(u||'').trim(); return (/^https?:\/\//i.test(u)||/^data:image\//i.test(u))?u:''; }
+// ---- SYNTAX HIGHLIGHTING ----------------------------------------------------
+// Self-contained on purpose: the gateway ships its own assets with no build
+// step and a strict same-origin posture, so pulling in highlight.js from a CDN
+// isn't an option. This is a small tokenizer — good enough to make code
+// scannable, deliberately not a parser.
+const HL_ALIASES={js:'js',jsx:'js',javascript:'js',ts:'js',tsx:'js',typescript:'js',json:'json',
+  py:'py',python:'py',rb:'py',sh:'sh',bash:'sh',zsh:'sh',shell:'sh',console:'sh',
+  html:'xml',xml:'xml',svg:'xml',css:'css',scss:'css',go:'js',rust:'js',rs:'js',
+  java:'js',c:'js',cpp:'js','c++':'js',cs:'js',php:'js',sql:'sql',yaml:'yaml',yml:'yaml',
+  toml:'yaml',ini:'yaml',diff:'diff',patch:'diff',md:'',markdown:'',text:'',txt:''};
+const HL_KEYWORDS={
+  js:/\b(const|let|var|function|return|if|else|for|while|class|extends|new|import|from|export|default|async|await|try|catch|finally|throw|typeof|instanceof|null|undefined|true|false|this|super|switch|case|break|continue|delete|in|of|yield|static|public|private|struct|impl|fn|pub|use|mut|match|package|type|interface|func|defer|go|nil|void|int|string|bool|float|double|final|abstract)\b/g,
+  py:/\b(def|class|return|if|elif|else|for|while|import|from|as|with|try|except|finally|raise|lambda|yield|pass|break|continue|and|or|not|in|is|None|True|False|self|async|await|global|nonlocal|assert|del)\b/g,
+  sh:/\b(if|then|else|elif|fi|for|while|do|done|case|esac|function|return|export|local|echo|cd|set|source|sudo|exit)\b/g,
+  sql:/\b(SELECT|FROM|WHERE|INSERT|INTO|VALUES|UPDATE|SET|DELETE|CREATE|TABLE|DROP|ALTER|JOIN|LEFT|RIGHT|INNER|OUTER|ON|GROUP|BY|ORDER|HAVING|LIMIT|AS|AND|OR|NOT|NULL|DISTINCT|UNION|INDEX|PRIMARY|KEY|FOREIGN|REFERENCES)\b/gi,
+};
+// Ordered: whichever pattern matches earliest wins, so a keyword inside a
+// string is never highlighted as a keyword.
+function _hlRules(lang){
+  const r=[];
+  if(lang==='diff') return [[/^[+][^+\n].*$/gm,'ha'],[/^[-][^-\n].*$/gm,'hr'],[/^@@.*$/gm,'hm'],[/^[+-]{3}.*$/gm,'hc']];
+  if(lang==='xml'){ return [[/&lt;!--[\s\S]*?--&gt;/g,'hc'],[/&lt;\/?[\w:-]+/g,'hk'],[/[\w:-]+=/g,'hf'],[/&quot;[^&]*?&quot;/g,'hs']]; }
+  if(lang==='css'){ return [[/\/\*[\s\S]*?\*\//g,'hc'],[/[.#]?[\w-]+(?=\s*\{)/g,'hk'],[/[\w-]+(?=\s*:)/g,'hf'],[/:[^;{}]+/g,'hs']]; }
+  if(lang==='json'||lang==='yaml'){
+    r.push([/&quot;(?:[^&\\]|\\.)*?&quot;|'(?:[^'\\]|\\.)*?'/g,'hs']);
+    if(lang==='yaml') r.push([/#.*$/gm,'hc'],[/^\s*[\w.-]+(?=\s*:)/gm,'hf']);
+    else r.push([/&quot;[\w .-]+&quot;(?=\s*:)/g,'hf']);
+    r.push([/\b-?\d+(?:\.\d+)?\b/g,'hn'],[/\b(true|false|null|yes|no)\b/gi,'hk']);
+    return r;
+  }
+  // Comments and strings first — they swallow anything inside them.
+  r.push([/\/\*[\s\S]*?\*\/|(?:^|\s)(?:\/\/|#).*$/gm,'hc']);
+  r.push([/&quot;(?:[^&\\]|\\.)*?&quot;|'(?:[^'\\\n]|\\.)*?'|`(?:[^`\\]|\\.)*?`/g,'hs']);
+  if(HL_KEYWORDS[lang]) r.push([HL_KEYWORDS[lang],'hk']);
+  r.push([/\b-?\d+(?:\.\d+)?\b/g,'hn']);
+  r.push([/\b([A-Za-z_$][\w$]*)(?=\s*\()/g,'hf']);
+  return r;
+}
+// Operates on ALREADY-ESCAPED text and only ever inserts <span class="h*">,
+// so it cannot introduce markup the escaper removed.
+function highlight(escaped, lang){
+  const kind=HL_ALIASES[(lang||'').toLowerCase()];
+  if(kind===undefined||kind==='') return escaped;
+  const rules=_hlRules(kind);
+  const spans=[];
+  for(const [rx,cls] of rules){
+    rx.lastIndex=0; let m;
+    while((m=rx.exec(escaped))!==null){
+      if(m[0]==='') { rx.lastIndex++; continue; }
+      // Keep the match offset honest when the pattern used a lookbehind-ish
+      // leading space (the comment rule does).
+      let start=m.index, text=m[0];
+      const lead=text.match(/^\s+/);
+      if(lead && cls==='hc'){ start+=lead[0].length; text=text.slice(lead[0].length); }
+      spans.push({start,end:start+text.length,cls});
+    }
+  }
+  spans.sort((a,b)=>a.start-b.start||b.end-a.end);
+  let out='',at=0;
+  for(const sp of spans){
+    if(sp.start<at) continue;            // already inside an earlier match
+    if(sp.start>=escaped.length) break;
+    out+=escaped.slice(at,sp.start)+'<span class="'+sp.cls+'">'+escaped.slice(sp.start,sp.end)+'</span>';
+    at=sp.end;
+  }
+  return out+escaped.slice(at);
+}
+
+// ---- MARKDOWN ---------------------------------------------------------------
+function _codeBlockHTML(lang, code){
+  const clean=code.replace(/\n$/,'');
+  const label=esc((lang||'text').toLowerCase());
+  // data-raw carries the *unhighlighted* source so COPY yields real code, not
+  // markup, no matter what the highlighter did to it.
+  return '<div class="codeblock" data-raw="'+esc(clean)+'">'+
+    '<div class="cb-head"><span class="cb-lang">'+label+'</span>'+
+    '<button class="cb-copy" title="Copy code">Copy</button></div>'+
+    '<pre><code>'+highlight(esc(clean),lang)+'</code></pre></div>';
+}
+function _tableHTML(rows, aligns){
+  const cell=(text,i,tag)=>{
+    const a=aligns[i]?' style="text-align:'+aligns[i]+'"':'';
+    return '<'+tag+a+'>'+_inline(text.trim())+'</'+tag+'>';
+  };
+  let out='<div class="md-table-wrap"><table class="md-table"><thead><tr>';
+  rows[0].forEach((c,i)=>{ out+=cell(c,i,'th'); });
+  out+='</tr></thead><tbody>';
+  rows.slice(1).forEach(r=>{
+    out+='<tr>'; r.forEach((c,i)=>{ out+=cell(c,i,'td'); }); out+='</tr>';
+  });
+  return out+'</tbody></table></div>';
+}
+function _splitRow(line){
+  return line.replace(/^\s*\|/,'').replace(/\|\s*$/,'').split('|');
+}
+// Inline formatting only — the caller has already escaped and de-blocked.
+function _inline(s){
+  s=s.replace(/`([^`\n]+)`/g,(m,c)=>'<code>'+c+'</code>');
+  s=s.replace(/\*\*([^*]+)\*\*/g,'<strong>$1</strong>');
+  s=s.replace(/(^|[^*\w])\*([^*\n]+)\*(?!\w)/g,'$1<em>$2</em>');
+  s=s.replace(/(^|\s)_([^_\n]+)_(?!\w)/g,'$1<em>$2</em>');
+  s=s.replace(/~~([^~]+)~~/g,'<del>$1</del>');
+  // Images before links — otherwise the link rule eats the ](…) and leaves a
+  // stray "!". safeImgUrl drops anything that isn't http(s) or a data:image.
+  s=s.replace(/!\[([^\]]*)\]\(([^)\s]+)\)/g,(m,alt,u)=>{
+    const safe=safeImgUrl(u.replace(/&amp;/g,'&'));
+    return safe?'<img class="md-img" src="'+esc(safe)+'" alt="'+alt+'" loading="lazy">':alt;
+  });
+  s=s.replace(/\[([^\]]+)\]\((https?:\/\/[^)\s]+)\)/g,
+    (m,t,u)=>'<a href="'+esc(safeUrl(u.replace(/&amp;/g,'&')))+'" target="_blank" rel="noopener noreferrer">'+t+'</a>');
+  return s;
+}
+// Block-level renderer. Line-oriented rather than one big regex chain, which
+// is what makes nested lists, tables and blockquotes tractable at all.
 function md(src) {
   const blocks=[];
   let s=(src||'').replace(/```(\w*)\n?([\s\S]*?)```/g,(m,lang,code)=>{
-    blocks.push('<div class="codeblock"><div class="cb-head"><span class="cb-lang">'+(lang||'text')+'</span>'+
-      '<button class="cb-copy">COPY</button></div><pre><code>'+esc(code.replace(/\n$/,''))+'</code></pre></div>');
+    blocks.push(_codeBlockHTML(lang,code));
     return '\x00B'+(blocks.length-1)+'\x00';
   });
   s=esc(s);
-  s=s.replace(/`([^`\n]+)`/g,'<code>$1</code>');
-  s=s.replace(/^\s*#{1,6}\s+(.+)$/gm,'<h3>$1</h3>');
-  s=s.replace(/\*\*([^*]+)\*\*/g,'<strong>$1</strong>');
-  s=s.replace(/(^|[^*\w])\*([^*\n]+)\*(?!\w)/g,'$1<em>$2</em>');
-  s=s.replace(/\[([^\]]+)\]\((https?:\/\/[^)\s]+)\)/g,'<a href="$2" target="_blank" rel="noopener">$1</a>');
-  s=s.replace(/(?:^|\n)((?:\s*[-*]\s+.+(?:\n|$))+)/g,(m,b)=>
-    '\n<ul>'+b.trim().split('\n').map(x=>'<li>'+x.replace(/^\s*[-*]\s+/,'')+'</li>').join('')+'</ul>');
-  s=s.split(/\n{2,}/).map(p=>p.trim()?'<p>'+p+'</p>':'').join('');
-  s=s.replace(/\n/g,'<br>');
-  s=s.replace(/<p>(<(?:ul|h3|div))/g,'$1').replace(/(<\/(?:ul|h3|div)>)<\/p>/g,'$1');
-  s=s.replace(/\x00B(\d+)\x00/g,(m,i)=>blocks[+i]);
-  return s;
+  let html=_mdBlocks(s.split('\n'));
+  html=html.replace(/\x00B(\d+)\x00/g,(m,idx)=>blocks[+idx]);
+  return html;
+}
+// Takes ALREADY-ESCAPED lines. Blockquotes recurse straight back in here
+// rather than un-escaping and re-running md(), which used to turn a literal
+// "&amp;" in the source into a visible "&amp;".
+function _mdBlocks(lines) {
+  const out=[];
+  let para=[];
+  const flushPara=()=>{ if(para.length){ out.push('<p>'+_inline(para.join('<br>'))+'</p>'); para=[]; } };
+
+  for(let i=0;i<lines.length;i++){
+    const line=lines[i];
+    const bare=line.trim();
+
+    if(!bare){ flushPara(); continue; }
+    if(/^\x00B\d+\x00$/.test(bare)){ flushPara(); out.push(bare); continue; }
+
+    // Table: a header row followed by a |---|---| delimiter.
+    if(bare.includes('|') && i+1<lines.length && /^\s*\|?[\s:|-]*-[\s:|-]*\|?\s*$/.test(lines[i+1]) && lines[i+1].includes('-')){
+      const header=_splitRow(bare);
+      const aligns=_splitRow(lines[i+1].trim()).map(c=>{
+        const t=c.trim();
+        if(t.startsWith(':')&&t.endsWith(':')) return 'center';
+        if(t.endsWith(':')) return 'right';
+        return '';
+      });
+      const rows=[header]; i+=2;
+      while(i<lines.length && lines[i].trim() && lines[i].includes('|')){ rows.push(_splitRow(lines[i].trim())); i++; }
+      i--;
+      flushPara(); out.push(_tableHTML(rows,aligns)); continue;
+    }
+
+    // Headings — real levels, not everything flattened to h3.
+    const h=bare.match(/^(#{1,6})\s+(.+)$/);
+    if(h){ flushPara(); const lv=Math.min(6,h[1].length); out.push('<h'+lv+'>'+_inline(h[2])+'</h'+lv+'>'); continue; }
+
+    if(/^(?:---|\*\*\*|___)$/.test(bare)){ flushPara(); out.push('<hr>'); continue; }
+
+    // Blockquote — consecutive "> " lines become one quote.
+    if(/^&gt;\s?/.test(bare)){
+      flushPara(); const buf=[];
+      while(i<lines.length && /^\s*&gt;\s?/.test(lines[i])){ buf.push(lines[i].replace(/^\s*&gt;\s?/,'')); i++; }
+      i--;
+      out.push('<blockquote>'+_mdBlocks(buf)+'</blockquote>');
+      continue;
+    }
+
+    // Lists, with indentation-driven nesting for both bullets and numbers.
+    const li=line.match(/^(\s*)([-*+]|\d+[.)])\s+(.*)$/);
+    if(li){
+      flushPara();
+      const items=[];
+      while(i<lines.length){
+        const m2=lines[i].match(/^(\s*)([-*+]|\d+[.)])\s+(.*)$/);
+        if(!m2){
+          // A plain indented line continues the previous item.
+          if(items.length && /^\s{2,}\S/.test(lines[i]) && lines[i].trim()){ items[items.length-1].text+='<br>'+lines[i].trim(); i++; continue; }
+          break;
+        }
+        items.push({depth:Math.floor(m2[1].replace(/\t/g,'  ').length/2), ordered:/\d/.test(m2[2]), text:m2[3]});
+        i++;
+      }
+      i--;
+      out.push(_renderList(items,0,{i:0}));
+      continue;
+    }
+
+    para.push(bare);
+  }
+  flushPara();
+  return out.join('');
+}
+function _renderList(items, depth, cur){
+  const ordered=items[cur.i] && items[cur.i].ordered;
+  let out='<'+(ordered?'ol':'ul')+'>';
+  while(cur.i<items.length){
+    const it=items[cur.i];
+    if(it.depth<depth) break;
+    if(it.depth>depth){ out+=_renderList(items,it.depth,cur); continue; }
+    cur.i++;
+    let inner='<li>'+_inline(it.text);
+    if(cur.i<items.length && items[cur.i].depth>depth) inner+=_renderList(items,items[cur.i].depth,cur);
+    out+=inner+'</li>';
+  }
+  return out+'</'+(ordered?'ol':'ul')+'>';
 }
 // strip plain text of markdown/HUD for speech
 function plain(text){
   return stripHud(text).replace(/```[\s\S]*?```/g,' code block ')
     .replace(/[#*`>_]/g,'').replace(/\[([^\]]+)\]\([^)]+\)/g,'$1').replace(/\s+/g,' ').trim();
 }
-function scrollDown(){ log.scrollTop=log.scrollHeight; }
+// Pin-to-bottom, but only when the user is already there. Unconditionally
+// yanking the viewport down on every streamed token makes it impossible to
+// read back through a long reply while it is still generating.
+const STICK_SLACK=80;   // px from the bottom that still counts as "at bottom"
+let _stick=true;
+function atBottom(){ return log.scrollHeight-log.scrollTop-log.clientHeight<=STICK_SLACK; }
+log.addEventListener('scroll',()=>{
+  _stick=atBottom();
+  const btn=$('#jumpBtn'); if(btn) btn.classList.toggle('hidden',_stick);
+});
+function scrollDown(force){
+  if(force===true) _stick=true;
+  if(!_stick) return;
+  log.scrollTop=log.scrollHeight;
+}
+// Long sessions otherwise grow an unbounded DOM: a few hundred tool rows and
+// code blocks visibly degrade scrolling. Trim from the top, which is the part
+// already scrolled past, and say so rather than silently dropping history —
+// the full transcript is still on the server.
+const MAX_THREAD_NODES=320;
+const TRIM_TO=240;
+function trimThread(){
+  const thread=log.querySelector('.j-thread');
+  if(!thread||thread.children.length<=MAX_THREAD_NODES) return;
+  const before=log.scrollHeight;
+  let drop=thread.children.length-TRIM_TO;
+  while(drop-- > 0 && thread.firstElementChild){
+    if(thread.firstElementChild.classList.contains('thread-trimmed')) break;
+    thread.firstElementChild.remove();
+  }
+  if(!thread.querySelector('.thread-trimmed')){
+    const note=document.createElement('div');
+    note.className='note-row thread-trimmed';
+    note.textContent='Earlier messages hidden to keep this page fast — reopen the chat to see them all.';
+    thread.insertBefore(note,thread.firstChild);
+  }
+  // Keep the viewport where the user was reading rather than jumping.
+  if(!_stick) log.scrollTop=Math.max(0,log.scrollTop-(before-log.scrollHeight));
+}
 function getThread(){ let t=log.querySelector('.j-thread'); if(!t){t=document.createElement('div');t.className='j-thread';log.appendChild(t);} return t; }
 function clearLog(){ log.innerHTML=''; }
 function avatarHTML(){ return '<div class="j-avatar">C</div>'; }
@@ -1255,18 +1514,59 @@ function showEmpty() {
 
 // ---- RENDERING --------------------------------------------------------------
 let _userMsgIdx=0;
-const MSG_ACTIONS_HTML='<button class="msg-act-btn" data-act="resend" title="Resend">&#8635; resend</button><button class="msg-act-btn" data-act="edit" title="Edit">&#9998; edit</button><button class="msg-act-btn del-btn" data-act="delete" title="Delete">&#10005; delete</button>';
+const _ICO={
+  copy:'<svg viewBox="0 0 24 24" width="13" height="13"><path fill="none" stroke="currentColor" stroke-width="1.7" stroke-linejoin="round" d="M9 9h10v12H9zM5 15V3h10v2"/></svg>',
+  redo:'<svg viewBox="0 0 24 24" width="13" height="13"><path fill="none" stroke="currentColor" stroke-width="1.7" stroke-linecap="round" stroke-linejoin="round" d="M20 11a8 8 0 1 0-2.3 5.7M20 5v6h-6"/></svg>',
+  edit:'<svg viewBox="0 0 24 24" width="13" height="13"><path fill="none" stroke="currentColor" stroke-width="1.7" stroke-linejoin="round" d="M4 20h4L20 8l-4-4L4 16z"/></svg>',
+  trash:'<svg viewBox="0 0 24 24" width="13" height="13"><path fill="none" stroke="currentColor" stroke-width="1.7" stroke-linecap="round" d="M4 7h16M9 7V4h6v3M6 7l1 13h10l1-13"/></svg>',
+};
+const MSG_ACTIONS_HTML=
+  '<button class="msg-act-btn" data-act="copy" title="Copy message">'+_ICO.copy+'<span>Copy</span></button>'+
+  '<button class="msg-act-btn" data-act="resend" title="Send again">'+_ICO.redo+'<span>Retry</span></button>'+
+  '<button class="msg-act-btn" data-act="edit" title="Edit and resend">'+_ICO.edit+'<span>Edit</span></button>'+
+  '<button class="msg-act-btn del-btn" data-act="delete" title="Delete from here">'+_ICO.trash+'<span>Delete</span></button>';
+// The assistant's own toolbar: copy the reply, or regenerate it from the user
+// turn above. Regenerate is what the REPL's /retry does, finally reachable here.
+const REPLY_ACTIONS_HTML=
+  '<button class="msg-act-btn" data-act="copy" title="Copy reply">'+_ICO.copy+'<span>Copy</span></button>'+
+  '<button class="msg-act-btn" data-act="regen" title="Regenerate this reply">'+_ICO.redo+'<span>Regenerate</span></button>';
+function _wireCopy(btn, getText){
+  btn.onclick=()=>{
+    const label=btn.querySelector('span');
+    copyText(getText()).then(()=>{
+      const was=label.textContent; label.textContent='Copied'; btn.classList.add('did-copy');
+      setTimeout(()=>{label.textContent=was;btn.classList.remove('did-copy');},1400);
+    }).catch(()=>{ label.textContent='Failed'; });
+  };
+}
 function wireMsgActions(row, idx, text){
+  _wireCopy(row.querySelector('[data-act="copy"]'), ()=>row.querySelector('.bubble').textContent||'');
   row.querySelector('[data-act="resend"]').onclick=()=>resendMsg(idx,row);
   row.querySelector('[data-act="edit"]').onclick=()=>editMsg(idx,row,text);
   row.querySelector('[data-act="delete"]').onclick=()=>deleteMsg(idx,row);
+}
+// Regenerate: find the user turn this reply answered and re-run it.
+function regenerate(replyRow){
+  if(state.busy) return;
+  const thread=getThread();
+  const kids=[...thread.children];
+  let userRow=null;
+  for(let i=kids.indexOf(replyRow)-1;i>=0;i--){
+    if(kids[i].classList.contains('msg-row')&&kids[i].classList.contains('user')){ userRow=kids[i]; break; }
+  }
+  if(!userRow){ addNote('Nothing to regenerate — no user message above this reply.',true); return; }
+  const rows=[...thread.querySelectorAll('.msg-row.user')];
+  const idx=rows.indexOf(userRow);
+  const text=userRow.querySelector('.bubble').textContent||'';
+  truncateAfter(userRow,false);
+  streamEdit(idx,text);
 }
 function addUser(text){
     const idx=_userMsgIdx++;
     const r=document.createElement('div'); r.className='msg-row user'; r.dataset.idx=idx;
     r.innerHTML='<div class="bubble">'+esc(text)+'</div><div class="msg-actions">'+MSG_ACTIONS_HTML+'</div>';
     wireMsgActions(r, idx, text);
-    getThread().appendChild(r); scrollDown(); return r;
+    getThread().appendChild(r); trimThread(); scrollDown(true); return r;
   }
 // ---- DOM HELPERS (shared) ---------------------------------------------------
 function truncateAfter(row, includeSelf){
@@ -1347,11 +1647,30 @@ function editMsg(idx,row,origText){
 }
 function addAssistant(html, tools){
     const r=document.createElement('div'); r.className='msg-row assistant';
-    r.innerHTML=avatarHTML()+'<div class="msg-body">'+(html||'')+'</div>';
+    r.innerHTML=avatarHTML()+'<div class="msg-body">'+(html||'')+'</div>'+
+      '<div class="msg-actions reply">'+REPLY_ACTIONS_HTML+'</div>';
+    wireReplyActions(r);
     getThread().appendChild(r);
     (tools||[]).forEach(t=>addToolRow({name:t},true));
-    scrollDown(); return r;
+    trimThread(); scrollDown(); return r;
   }
+function wireReplyActions(row){
+  const acts=row.querySelector('.msg-actions.reply'); if(!acts) return;
+  _wireCopy(acts.querySelector('[data-act="copy"]'), ()=>{
+    // Copy the reply as text the user can paste elsewhere — code blocks keep
+    // their fences, everything else loses its markup.
+    const body=row.querySelector('.msg-body'); if(!body) return '';
+    const parts=[];
+    body.childNodes.forEach(n=>{
+      if(n.nodeType===1&&n.classList&&n.classList.contains('codeblock')){
+        const lang=(n.querySelector('.cb-lang')||{}).textContent||'';
+        parts.push('```'+lang+'\n'+(n.dataset.raw||'')+'\n```');
+      } else parts.push((n.textContent||'').trim());
+    });
+    return parts.filter(Boolean).join('\n\n');
+  });
+  acts.querySelector('[data-act="regen"]').onclick=()=>regenerate(row);
+}
 function addToolRow(t, done){
   // Collapse same-name tool calls, skipping over non-tool-row elements
   // (info notes, assistant text, etc.) so that calls across iterations
@@ -1391,15 +1710,52 @@ function addNote(text, isErr){
 function showPermission(d){
   const box=document.createElement('div'); box.className='perm-box';
   box.innerHTML='<div class="pq">AUTHORIZATION REQUIRED: <code>'+esc(d.tool)+'</code>'+(d.summary?' &mdash; '+esc(d.summary):'')+' </div>';
+  // Show the patch before the buttons — approving a file change you can't see
+  // is exactly what this preview exists to prevent.
+  if(d.diff){
+    const pre=document.createElement('pre'); pre.className='perm-diff';
+    d.diff.split('\n').forEach(line=>{
+      const span=document.createElement('span');
+      span.className = line.startsWith('+++')||line.startsWith('---') ? 'dh'
+                     : line.startsWith('@@') ? 'dm'
+                     : line.startsWith('+') ? 'da'
+                     : line.startsWith('-') ? 'dd' : '';
+      span.textContent=line+'\n'; pre.appendChild(span);
+    });
+    box.appendChild(pre);
+  }
+  // What the user needs to know before deciding, not after: which sandbox a
+  // command will run under, and whether it asked for network access.
+  const facts=[];
+  if(d.sandbox) facts.push({text:d.sandbox, warn:/unconfined/.test(d.sandbox)});
+  if(d.network) facts.push({text:'requests network access', warn:true});
+  if(facts.length){
+    const row=document.createElement('div'); row.className='perm-facts';
+    facts.forEach(f=>{
+      const chip=document.createElement('span');
+      chip.className='perm-fact'+(f.warn?' warn':'');
+      chip.textContent=f.text; row.appendChild(chip);
+    });
+    box.appendChild(row);
+  }
   const btns=document.createElement('div'); btns.className='perm-btns';
-  const answer=(a,past)=>{
+  const answer=(a,past,rule)=>{
     box.innerHTML='<div class="pq"><code>'+esc(d.tool)+'</code></div><div class="perm-decided">&#8594; '+past.toUpperCase()+'</div>';
-    fetch('/api/permission',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({answer:a,id:d.id})});
+    fetch('/api/permission',{method:'POST',headers:{'Content-Type':'application/json'},
+      body:JSON.stringify(rule?{answer:a,id:d.id,rule}:{answer:a,id:d.id})});
   };
-  [['yes','APPROVE','approved'],['always','ALWAYS ALLOW','always allowed'],['no','DENY','denied']].forEach(([a,l,p])=>{
-    const b=document.createElement('button'); b.className=a; b.textContent=l; b.onclick=()=>answer(a,p); btns.appendChild(b);
+  const choices=[['yes','Approve','approved',null]];
+  // Offer the narrow standing grant ahead of the blanket one — "always allow
+  // git status" is a far smaller decision than "always allow every command".
+  if(d.rule) choices.push(['rule','Always allow '+d.rule,'rule added',d.rule]);
+  choices.push(['always','Always allow '+d.tool,'always allowed',null]);
+  choices.push(['no','Deny','denied',null]);
+  choices.forEach(([a,l,p,rule])=>{
+    const b=document.createElement('button');
+    b.className=a==='rule'?'rule':a; b.textContent=l;
+    b.onclick=()=>answer(a,p,rule); btns.appendChild(b);
   });
-  box.appendChild(btns); getThread().appendChild(box); scrollDown();
+  box.appendChild(btns); getThread().appendChild(box); scrollDown(true);
 }
 
 // ---- SSE STREAM READER (shared) -------------------------------------------
@@ -1496,10 +1852,38 @@ function handle(ev){
   } else if(k==='end'){ finishTurn(); }
   scrollDown();
 }
+// Clipboard helper that survives a non-secure origin (the gateway is plain
+// http on localhost, where navigator.clipboard is available in Chrome but not
+// everywhere) — falls back to a hidden textarea + execCommand.
+function copyText(text){
+  if(navigator.clipboard && window.isSecureContext){
+    return navigator.clipboard.writeText(text);
+  }
+  return new Promise((resolve,reject)=>{
+    try{
+      const ta=document.createElement('textarea');
+      ta.value=text; ta.setAttribute('readonly','');
+      ta.style.cssText='position:fixed;top:-1000px;opacity:0';
+      document.body.appendChild(ta); ta.select();
+      const ok=document.execCommand('copy');
+      document.body.removeChild(ta);
+      ok?resolve():reject(new Error('copy rejected'));
+    }catch(err){ reject(err); }
+  });
+}
+function flashBtn(btn, done, revert){
+  const original=btn.textContent;
+  btn.textContent=done; btn.classList.add('did-copy');
+  setTimeout(()=>{ btn.textContent=revert||original; btn.classList.remove('did-copy'); },1400);
+}
 log.addEventListener('click',e=>{
   const btn=e.target.closest('.cb-copy'); if(!btn) return;
-  const code=btn.closest('.codeblock').querySelector('pre code');
-  navigator.clipboard.writeText(code.textContent||'').then(()=>{ btn.textContent='COPIED'; setTimeout(()=>{btn.textContent='COPY';},1400); });
+  const block=btn.closest('.codeblock');
+  // Prefer the stashed raw source: textContent of a highlighted <code> is the
+  // same string today, but only because every span is inline — don't rely on it.
+  const raw=block.dataset.raw!==undefined ? block.dataset.raw
+    : (block.querySelector('pre code').textContent||'');
+  copyText(raw).then(()=>flashBtn(btn,'Copied','Copy')).catch(()=>flashBtn(btn,'Failed','Copy'));
 });
 
 // ---- VOICE OUTPUT (TTS) -----------------------------------------------------
@@ -1707,8 +2091,33 @@ $('#projConfigSave').onclick=async()=>{
 
 // ---- SESSIONS ---------------------------------------------------------------
 function currentTitle(){ const c=state.chats.find(c=>c.id===state.currentId); return c?c.title:'New Chat'; }
+function _highlightSnippet(text, q){
+  // esc() first, then wrap matches — never the other way round.
+  const safe=esc(text||'');
+  if(!q) return safe;
+  const needle=esc(q).replace(/[.*+?^${}()|[\]\\]/g,'\\$&');
+  return safe.replace(new RegExp(needle,'gi'), m=>'<mark>'+m+'</mark>');
+}
+function renderSearchResults(list){
+  const q=$('#chatSearch').value.trim();
+  const meta=document.createElement('div'); meta.className='search-meta';
+  meta.textContent=_searchResults.length
+    ? _searchResults.length+' chat'+(_searchResults.length===1?'':'s')+' matching "'+q+'"'
+    : 'No chats match "'+q+'"';
+  list.appendChild(meta);
+  _searchResults.forEach(r=>{
+    const el=document.createElement('div'); el.className='search-result'+(r.id===state.currentId?' active':'');
+    el.innerHTML='<div class="sr-title">'+_highlightSnippet(r.title,q)+'</div>'+
+      (r.snippet?'<div class="sr-snip">'+_highlightSnippet(r.snippet,q)+'</div>':'');
+    el.onclick=()=>{ clearChatSearch(); loadChat(r.id); };
+    list.appendChild(el);
+  });
+}
 function renderSessions(){
   const list=$('#sessionList'); if(!list) return; list.innerHTML='';
+  // Search replaces the tree entirely while active — a filtered tree with
+  // half-empty project groups reads worse than a flat ranked list.
+  if(_searchResults!==null){ renderSearchResults(list); return; }
   // Build a map of project_id -> chat list
   const projChats={};
   state.projects.forEach(p=>{ projChats[p.id]=state.chats.filter(c=>c.project_id===p.id); });
@@ -1784,6 +2193,7 @@ function setCurrent(cur){
   if(!cur.messages||!cur.messages.length){ showEmpty(); compactOrb(false); return; }
   compactOrb(true);
   let idx=0;
+  _stick=true;
   cur.messages.forEach(m=>{
     let row;
     if(m.role==='user'){ row=addUser(m.content); idx++; }
@@ -1795,7 +2205,7 @@ function setCurrent(cur){
     }
     if(row) row.style.setProperty('--i',idx-1);
   });
-  scrollDown();
+  scrollDown(true);
 }
 
 // ---- NETWORK ----------------------------------------------------------------
@@ -1943,9 +2353,148 @@ async function send(text){
   clearThinking(); if(state.busy) finishTurn();
 }
 
+// ---- ATTACHMENTS ------------------------------------------------------------
+// Uploads land inside the workspace and are referenced with @path, which is the
+// same mention pipeline the terminal uses — so PDF/DOCX text extraction and
+// image-to-vision plumbing come for free instead of being reimplemented here.
+const MAX_ATTACH_BYTES=16*1024*1024;
+let _attachments=[];
+function fmtBytes(n){
+  if(n<1024) return n+' B';
+  if(n<1024*1024) return (n/1024).toFixed(0)+' KB';
+  return (n/(1024*1024)).toFixed(1)+' MB';
+}
+function _attachIcon(kind){
+  if(kind==='image') return '<svg viewBox="0 0 24 24" width="13" height="13"><path fill="none" stroke="currentColor" stroke-width="1.7" d="M3 5h18v14H3zM3 16l5-5 4 4 3-3 6 6"/></svg>';
+  if(kind==='document') return '<svg viewBox="0 0 24 24" width="13" height="13"><path fill="none" stroke="currentColor" stroke-width="1.7" stroke-linejoin="round" d="M14 3H6v18h12V7z M14 3v4h4"/></svg>';
+  return '<svg viewBox="0 0 24 24" width="13" height="13"><path fill="none" stroke="currentColor" stroke-width="1.7" stroke-linecap="round" d="M9 9h6M9 13h6M9 17h4M6 3h8l4 4v14H6z"/></svg>';
+}
+function renderAttachments(){
+  const bar=$('#attachBar');
+  bar.classList.toggle('hidden', !_attachments.length);
+  bar.innerHTML='';
+  _attachments.forEach(a=>{
+    const chip=document.createElement('div');
+    chip.className='attach-chip'+(a.pending?' pending':'')+(a.error?' failed':'');
+    const thumb=a.thumb?'<img class="ac-thumb" src="'+esc(a.thumb)+'" alt="">':_attachIcon(a.kind);
+    chip.innerHTML=thumb+'<span class="ac-name">'+esc(a.name)+'</span>'+
+      '<span class="ac-meta">'+(a.error?esc(a.error):(a.pending?'uploading…':fmtBytes(a.size)))+'</span>'+
+      '<button class="ac-x" title="Remove">&#10005;</button>';
+    chip.querySelector('.ac-x').onclick=()=>{ _attachments=_attachments.filter(x=>x!==a); renderAttachments(); };
+    bar.appendChild(chip);
+  });
+}
+function _readAsBase64(file){
+  return new Promise((resolve,reject)=>{
+    const fr=new FileReader();
+    fr.onerror=()=>reject(new Error('read failed'));
+    fr.onload=()=>{ const s=String(fr.result||''); resolve(s.slice(s.indexOf(',')+1)); };
+    fr.readAsDataURL(file);
+  });
+}
+async function addFiles(files){
+  for(const file of Array.from(files||[])){
+    if(file.size>MAX_ATTACH_BYTES){
+      addNote(file.name+' is larger than '+fmtBytes(MAX_ATTACH_BYTES)+' — not attached.',true);
+      continue;
+    }
+    const entry={name:file.name,size:file.size,kind:'text',pending:true,path:null,thumb:null};
+    if(/^image\//.test(file.type)){
+      entry.kind='image';
+      try{ entry.thumb=URL.createObjectURL(file); }catch(e){}
+    }
+    _attachments.push(entry); renderAttachments();
+    try{
+      const data=await _readAsBase64(file);
+      const r=await api('/api/upload',{name:file.name,data});
+      if(r&&r.ok){ entry.path=r.path; entry.kind=r.kind||entry.kind; entry.size=r.size; entry.pending=false; }
+      else { entry.pending=false; entry.error=(r&&r.error)||'upload failed'; }
+    }catch(e){ entry.pending=false; entry.error='upload failed'; }
+    renderAttachments();
+  }
+}
+// Turn ready attachments into @path mentions appended to the outgoing message.
+function consumeAttachments(text){
+  const ready=_attachments.filter(a=>a.path&&!a.error);
+  if(!ready.length) return text;
+  // Quote paths containing spaces so the mention regex takes the whole path.
+  const mentions=ready.map(a=>a.path.includes(' ')?'@"'+a.path+'"':'@'+a.path).join(' ');
+  _attachments=[]; renderAttachments();
+  return text?text+'\n\n'+mentions:mentions;
+}
+$('#attachBtn').onclick=()=>$('#fileInput').click();
+$('#fileInput').addEventListener('change',e=>{ addFiles(e.target.files); e.target.value=''; });
+input.addEventListener('paste',e=>{
+  const items=[...(e.clipboardData&&e.clipboardData.items||[])];
+  const files=items.filter(it=>it.kind==='file').map(it=>it.getAsFile()).filter(Boolean);
+  if(files.length){ e.preventDefault(); addFiles(files); }
+});
+// Drag/drop over the whole page, with a counter so nested dragleave events
+// (every child element fires one) don't flicker the overlay off.
+let _dragDepth=0;
+const dropOverlay=$('#dropOverlay');
+window.addEventListener('dragenter',e=>{
+  if(!e.dataTransfer||![...e.dataTransfer.types].includes('Files')) return;
+  e.preventDefault(); _dragDepth++; dropOverlay.classList.remove('hidden');
+});
+window.addEventListener('dragover',e=>{ if(e.dataTransfer&&[...e.dataTransfer.types].includes('Files')) e.preventDefault(); });
+window.addEventListener('dragleave',e=>{ if(--_dragDepth<=0){ _dragDepth=0; dropOverlay.classList.add('hidden'); } });
+window.addEventListener('drop',e=>{
+  if(!e.dataTransfer||!e.dataTransfer.files.length) return;
+  e.preventDefault(); _dragDepth=0; dropOverlay.classList.add('hidden');
+  addFiles(e.dataTransfer.files);
+});
+
+// ---- CHAT SEARCH ------------------------------------------------------------
+let _searchTimer=null, _searchResults=null;
+async function runChatSearch(q){
+  if(!q.trim()){ _searchResults=null; renderSessions(); return; }
+  try{
+    const r=await api('/api/chats/search',{query:q});
+    _searchResults=r.results||[];
+  }catch(e){ _searchResults=[]; }
+  renderSessions();
+}
+$('#chatSearch').addEventListener('input',e=>{
+  const q=e.target.value;
+  $('#chatSearchClear').classList.toggle('hidden',!q);
+  clearTimeout(_searchTimer);
+  _searchTimer=setTimeout(()=>runChatSearch(q),180);
+});
+$('#chatSearch').addEventListener('keydown',e=>{ if(e.key==='Escape'){ e.stopPropagation(); clearChatSearch(); } });
+function clearChatSearch(){
+  $('#chatSearch').value=''; $('#chatSearchClear').classList.add('hidden');
+  _searchResults=null; renderSessions();
+}
+$('#chatSearchClear').onclick=clearChatSearch;
+
+// ---- THEME ------------------------------------------------------------------
+// Three states so "follow the OS" stays reachable after an explicit choice.
+const THEMES=['auto','dark','light'];
+function applyTheme(t){
+  document.documentElement.setAttribute('data-theme',t);
+  const btn=$('#themeBtn');
+  if(btn) btn.innerHTML='[ '+(t==='light'?'&#9788;':t==='dark'?'&#9789;':'&#9681;')+' '+t[0].toUpperCase()+t.slice(1)+' ]';
+  try{ localStorage.setItem('cagentic_theme',t); }catch(e){}
+}
+function cycleTheme(){
+  const cur=document.documentElement.getAttribute('data-theme')||'auto';
+  applyTheme(THEMES[(THEMES.indexOf(cur)+1)%THEMES.length]);
+}
+(function initTheme(){
+  let saved='auto';
+  try{ saved=localStorage.getItem('cagentic_theme')||'auto'; }catch(e){}
+  applyTheme(THEMES.includes(saved)?saved:'auto');
+})();
+
 // ---- COMPOSER + WIRING ------------------------------------------------------
 function autoGrow(){ input.style.height='auto'; input.style.height=Math.min(input.scrollHeight,130)+'px'; }
-function submit(){ const t=input.value.trim(); if(!t||state.busy)return; input.value=''; autoGrow(); send(t); }
+function submit(){
+  const typed=input.value.trim();
+  const t=consumeAttachments(typed);
+  if(!t||state.busy)return;
+  input.value=''; autoGrow(); send(t);
+}
 input.addEventListener('input', autoGrow);
 input.addEventListener('keydown', e=>{ if(e.key==='Enter'&&!e.shiftKey){e.preventDefault();submit();} });
 sendBtn.onclick=submit;
@@ -1954,6 +2503,8 @@ $('#micBtn').onclick=toggleMic;
 $('#logsBtn').onclick=openSessions;
 $('#newMissionBtn').onclick=newChat;
 $('#configBtn').onclick=openSettings;
+$('#themeBtn').onclick=cycleTheme;
+$('#jumpBtn').onclick=()=>{ scrollDown(true); $('#jumpBtn').classList.add('hidden'); };
 $('#voiceOutBtn').onclick=toggleVoiceOut;
 
 $('#closeSessionsBtn').onclick=closeSessions;
@@ -1976,7 +2527,11 @@ document.addEventListener('keydown',e=>{
   if((e.ctrlKey||e.metaKey)&&e.key==='k'){ e.preventDefault(); newChat(); return; }
   if((e.ctrlKey||e.metaKey)&&e.key==='m'){ e.preventDefault(); toggleMic(); return; }
   if((e.ctrlKey||e.metaKey)&&e.key==='s'){ e.preventDefault(); openSettings(); return; }
+  if((e.ctrlKey||e.metaKey)&&e.key==='f'){ e.preventDefault(); openSessions(); $('#chatSearch').focus(); return; }
   if(e.key==='Escape'){
+    // Stop takes priority: mid-generation, Escape should mean "stop", which is
+    // what it means in both competitors.
+    if(state.busy){ abortGeneration(); return; }
     if(!$('#confirmModal').classList.contains('hidden')){ $('#confirmModal').classList.add('hidden'); _confirmCb=null; }
     else if(!$('#newProjectModal').classList.contains('hidden')) closeNewProjectModal();
     else if(!$('#renameModal').classList.contains('hidden')) closeRename();

@@ -100,7 +100,7 @@ async function pollLoop() {
         let ok = true;
         let result;
         try {
-          result = await dispatch(command.action, command.params || {});
+          result = await dispatch(command.action, command.params || {}, command.sites);
         } catch (e) {
           ok = false;
           result = String((e && e.message) || e);
@@ -199,12 +199,53 @@ function blockedIPv4(ip) {
   return null;
 }
 
-async function dispatch(action, p) {
+// Per-site permissions, evaluated here because only the extension knows which
+// URL the *current* tab is on. The bridge enforces the same rules for actions
+// that name a URL up front (open/navigate/download); this covers the rest.
+// Deny always wins; a non-empty allow list makes it an allow-list.
+function hostAllowed(url, rules) {
+  const allow = (rules && rules.allow) || [];
+  const deny = (rules && rules.deny) || [];
+  if (!allow.length && !deny.length) return null;
+  let host = "";
+  try {
+    host = new URL(url).hostname.toLowerCase();
+  } catch (e) {
+    return "the page URL could not be parsed";
+  }
+  const hit = (pats) =>
+    pats.find((pat) => {
+      const pt = String(pat || "").toLowerCase();
+      if (!pt) return false;
+      // A bare domain also covers its subdomains, and '*' globs are honoured.
+      if (host === pt || host.endsWith("." + pt)) return true;
+      if (pt.includes("*")) {
+        const rx = new RegExp(
+          "^" + pt.split("*").map((x) => x.replace(/[.*+?^${}()|[\]\\]/g, "\\$&")).join(".*") + "$"
+        );
+        return rx.test(host);
+      }
+      return false;
+    });
+  const blocked = hit(deny);
+  if (blocked) return host + " is blocked by site rule '" + blocked + "'";
+  if (allow.length && !hit(allow)) return host + " is not in the allowed-sites list";
+  return null;
+}
+
+async function dispatch(action, p, sites) {
   // Resolve the target tab up-front so we can apply the accent glow and the
   // "Cagentic" tab group around the actual work.
   let tabId = null;
   if (PER_TAB_ACTIONS.has(action)) {
     tabId = await resolveTab(p.tab_id);
+    // Check BEFORE the glow/group side effects, so a blocked action leaves no
+    // trace on a page the assistant was never allowed to touch.
+    if (action !== "navigate") {
+      const tab = await chrome.tabs.get(tabId);
+      const why = hostAllowed(tab.url || "", sites);
+      if (why) return { ok: false, error: "blocked: " + why };
+    }
   }
 
   if (tabId != null) {
@@ -592,6 +633,32 @@ async function fillInPage(selector, value) {
 
   const el = document.querySelector(selector);
   if (!el) return { ok: false, error: "no field matching: " + selector };
+
+  // Never type into a credential or payment field. The assistant has no
+  // business filling these even when asked: if the value came from the model
+  // it is fabricated, and if it came from the page it is being exfiltrated.
+  // Refuse at the point of contact rather than trusting every caller upstream.
+  const type = String(el.type || "").toLowerCase();
+  const auto = String(el.getAttribute("autocomplete") || "").toLowerCase();
+  const name = (String(el.name || "") + " " + String(el.id || "")).toLowerCase();
+  const SENSITIVE_AUTOCOMPLETE = [
+    "current-password", "new-password", "one-time-code",
+    "cc-number", "cc-csc", "cc-exp", "cc-name",
+  ];
+  const SENSITIVE_NAME = /pass(word|wd)|passcode|\bpin\b|\botp\b|\bcvv\b|\bcvc\b|card.?number|ssn|social.?security|secret|api.?key|token/;
+  if (
+    type === "password" ||
+    SENSITIVE_AUTOCOMPLETE.includes(auto) ||
+    SENSITIVE_NAME.test(name)
+  ) {
+    return {
+      ok: false,
+      error:
+        "refused: '" + selector + "' looks like a password, one-time code or " +
+        "payment field. Cagentic never fills credentials — ask the user to type it.",
+    };
+  }
+
   el.scrollIntoView({ block: "center" });
   await new Promise((r) => setTimeout(r, 90));
   const r = el.getBoundingClientRect();

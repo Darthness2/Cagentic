@@ -19,6 +19,7 @@ that drives ``app.run()`` on its own main thread: ``create_pipe_input()`` +
 thread hangs silently — and a hung event loop would hang the whole suite. The
 subprocess is given a hard timeout, so a hang becomes a clean failure instead.
 """
+
 from __future__ import annotations
 
 import os
@@ -64,6 +65,7 @@ class _GridOutput:
     # --- size ---
     def get_size(self):
         from prompt_toolkit.data_structures import Size
+
         return Size(rows=self._rows, columns=self._cols)
 
     def get_rows_below_cursor_position(self):
@@ -76,10 +78,13 @@ class _GridOutput:
 
     def cursor_forward(self, amount):
         self._c += amount
+
     def cursor_backward(self, amount):
         self._c -= amount
+
     def cursor_up(self, amount):
         self._r -= amount
+
     def cursor_down(self, amount):
         self._r += amount
 
@@ -95,7 +100,7 @@ class _GridOutput:
                 continue
             if ch == "\n":
                 self._r += 1  # next frame row (the renderer separates rows
-                self._c = 0    # with newlines, so we must advance, not skip)
+                self._c = 0  # with newlines, so we must advance, not skip)
                 continue
             if 0 <= self._r < self._rows and 0 <= self._c < self._cols:
                 self._grid[self._r][self._c] = ch
@@ -103,6 +108,7 @@ class _GridOutput:
 
     def write(self, data):
         self._put(data)
+
     def write_raw(self, data):
         self._put(data)
 
@@ -124,21 +130,22 @@ class _GridOutput:
                 return c
         return None
 
+
 # (keystrokes, default_prefill, expected_exc_name) for each subprocess-driven
 # case. Keystrokes use the bytes prompt_toolkit's vt100 parser maps: \r is
 # Enter (Keys.ControlM == Keys.Enter), \x03 is Ctrl-C, \x04 is Ctrl-D, \x7f is
 # backspace.
 _CASES = {
-    "enter":     ("hello world\r", None,   None),
-    "default":   ("\r",             "prefilled", None),
-    "backspace": ("\x7f\r",         "abc",  None),
-    "ctrl_c":    ("\x03",            None,   "KeyboardInterrupt"),
-    "ctrl_d":    ("\x04",            None,   "EOFError"),
-    "menu":      ("/he\r",           None,   None),
+    "enter": ("hello world\r", None, None),
+    "default": ("\r", "prefilled", None),
+    "backspace": ("\x7f\r", "abc", None),
+    "ctrl_c": ("\x03", None, "KeyboardInterrupt"),
+    "ctrl_d": ("\x04", None, "EOFError"),
+    "menu": ("/he\r", None, None),
     # A line far longer than the input column must still return in full — the
     # fixed-width middle column scrolls the viewport horizontally rather than
     # truncating, so the right rail stays pinned and the whole text is kept.
-    "long":      ("x" * 100 + "\r",  None,   None),
+    "long": ("x" * 100 + "\r", None, None),
 }
 
 
@@ -155,9 +162,16 @@ def _run_case_main(name: str) -> None:
     completer, history, style, _err = _build_pt_components()
     with create_pipe_input() as inp:
         app, _buf = _build_prompt_layout(
-            completer, history, style,
-            prompt="│ ✦ ", top_border="╭──╮", bottom_border="╰──╯",
-            right_border="│", default=default, input=inp, output=DummyOutput(),
+            completer,
+            history,
+            style,
+            prompt="│ ✦ ",
+            top_border="╭──╮",
+            bottom_border="╰──╯",
+            right_border="│",
+            default=default,
+            input=inp,
+            output=DummyOutput(),
         )
         inp.send_text(text)
         try:
@@ -176,17 +190,22 @@ class PromptFrameLayoutTests(unittest.TestCase):
 
         completer, history, style, _err = _build_pt_components()
         app, _buf = _build_prompt_layout(
-            completer, history, style,
-            prompt="│ ✦ ", top_border="╭──╮", bottom_border="╰──╯",
-            right_border="│", input=DummyInput(), output=DummyOutput(),
+            completer,
+            history,
+            style,
+            prompt="│ ✦ ",
+            top_border="╭──╮",
+            bottom_border="╰──╯",
+            right_border="│",
+            input=DummyInput(),
+            output=DummyOutput(),
         )
         # Root is a FloatContainer wrapping an HSplit of exactly three rows.
         root = app.layout.container
         self.assertIsInstance(root, FloatContainer)
         hsplit = root.content
         self.assertIsInstance(hsplit, HSplit)
-        self.assertEqual(len(hsplit.children), 3,
-                         "frame must be exactly 3 rows (top/input/bottom)")
+        self.assertEqual(len(hsplit.children), 3, "frame must be exactly 3 rows (top/input/bottom)")
         top_win, middle_row, bottom_win = hsplit.children
 
         # Top and bottom are plain border windows; the middle row is a VSplit of
@@ -194,32 +213,38 @@ class PromptFrameLayoutTests(unittest.TestCase):
         # the right end of the input row too.
         self.assertIsInstance(top_win, Window)
         self.assertIsInstance(bottom_win, Window)
-        self.assertIsInstance(middle_row, VSplit,
-                         "middle row must be a VSplit to host the right rail")
-        self.assertEqual(len(middle_row.children), 3,
-                         "input row must be left-rail | buffer | right-rail")
+        self.assertIsInstance(
+            middle_row, VSplit, "middle row must be a VSplit to host the right rail"
+        )
+        self.assertEqual(
+            len(middle_row.children), 3, "input row must be left-rail | buffer | right-rail"
+        )
         left_win, input_win, right_win = middle_row.children
         for i, win in enumerate((top_win, left_win, input_win, right_win, bottom_win)):
             self.assertIsInstance(win, Window, f"part {i} is not a Window")
             # dont_extend_height must be truthy on every row — this is the whole
             # point: without it the input row extends to fill the terminal and
             # the box reopens into the gap glitch.
-            self.assertTrue(win.dont_extend_height(),
-                            f"part {i} extends vertically — would reintroduce the gap")
+            self.assertTrue(
+                win.dont_extend_height(), f"part {i} extends vertically — would reintroduce the gap"
+            )
             # Fixed height of exactly 1 so the rows stack tightly.
-            self.assertEqual(win.height.max, 1,
-                             f"part {i} height must be capped at 1")
+            self.assertEqual(win.height.max, 1, f"part {i} height must be capped at 1")
 
         # The two rails are pinned to their visible widths so they never give
         # ground to the buffer — the box stays closed at both ends.
-        self.assertEqual(left_win.width.max, 4,
-                         f"left rail `│ ✦ ` must be 4 cols, got {left_win.width}")
-        self.assertEqual(right_win.width.max, 1,
-                         f"right rail `│` must be 1 col, got {right_win.width}")
-        self.assertTrue(left_win.dont_extend_width(),
-                        "left rail must not grow wider than its content")
-        self.assertTrue(right_win.dont_extend_width(),
-                        "right rail must not grow wider than its content")
+        self.assertEqual(
+            left_win.width.max, 4, f"left rail `│ ✦ ` must be 4 cols, got {left_win.width}"
+        )
+        self.assertEqual(
+            right_win.width.max, 1, f"right rail `│` must be 1 col, got {right_win.width}"
+        )
+        self.assertTrue(
+            left_win.dont_extend_width(), "left rail must not grow wider than its content"
+        )
+        self.assertTrue(
+            right_win.dont_extend_width(), "right rail must not grow wider than its content"
+        )
 
         # The smoking gun: the whole root's preferred height is capped at 3, so
         # the inline renderer can only ever draw 3 rows. The old bottom_toolbar
@@ -227,33 +252,45 @@ class PromptFrameLayoutTests(unittest.TestCase):
         # the terminal, leaving the blank gap). Capping the root kills the gap
         # at the source regardless of how the renderer behaves.
         ph = root.preferred_height(80, 24)
-        self.assertEqual(ph.max, 3,
-                         f"root preferred-height max must be 3 (tight frame), "
-                         f"got {ph!r} — an unbounded max reintroduces the gap")
+        self.assertEqual(
+            ph.max,
+            3,
+            f"root preferred-height max must be 3 (tight frame), "
+            f"got {ph!r} — an unbounded max reintroduces the gap",
+        )
 
     def _run_subprocess(self, name: str) -> str:
         # Run the child from the repo root with the repo root on PYTHONPATH so
         # `from cagentic.prompt import ...` resolves (pytest puts it on path
         # for the parent process, but the bare subprocess starts clean).
         repo_root = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
-        env = dict(os.environ, CAGENTIC_PROMPT_TEST_CASE=name,
-                   PYTHONPATH=repo_root + os.pathsep + os.environ.get("PYTHONPATH", ""),
-                   # Keep the child off any real console so prompt_toolkit can't
-                   # grab one; the DummyOutput we pass is what it renders to.
-                   COLLAMA_STATUS_BAR="off")
+        env = dict(
+            os.environ,
+            CAGENTIC_PROMPT_TEST_CASE=name,
+            PYTHONPATH=repo_root + os.pathsep + os.environ.get("PYTHONPATH", ""),
+            # Keep the child off any real console so prompt_toolkit can't
+            # grab one; the DummyOutput we pass is what it renders to.
+            COLLAMA_STATUS_BAR="off",
+        )
         try:
-            r = subprocess.run([sys.executable, os.path.abspath(__file__)],
-                               env=env, cwd=repo_root,
-                               capture_output=True, text=True, timeout=20)
+            r = subprocess.run(
+                [sys.executable, os.path.abspath(__file__)],
+                env=env,
+                cwd=repo_root,
+                capture_output=True,
+                text=True,
+                timeout=20,
+            )
         except subprocess.TimeoutExpired:
             self.fail(f"case {name}: app.run() hung past the 20s timeout")
-        self.assertEqual(r.returncode, 0,
-                         f"case {name} exited {r.returncode}; stderr:\n"
-                         f"{r.stderr[-800:]}")
+        self.assertEqual(
+            r.returncode, 0, f"case {name} exited {r.returncode}; stderr:\n{r.stderr[-800:]}"
+        )
         out = r.stdout.strip()
-        self.assertTrue(out.startswith("RESULT=") or out.startswith("EXC="),
-                        f"case {name} produced no RESULT/EXC line; "
-                        f"stdout={out!r} stderr={r.stderr[-400:]!r}")
+        self.assertTrue(
+            out.startswith("RESULT=") or out.startswith("EXC="),
+            f"case {name} produced no RESULT/EXC line; stdout={out!r} stderr={r.stderr[-400:]!r}",
+        )
         return out
 
     def test_enter_returns_typed_text(self):
@@ -302,10 +339,16 @@ class PromptFrameLayoutTests(unittest.TestCase):
 
         completer, history, style, _err = _build_pt_components()
         app, _buf = _build_prompt_layout(
-            completer, history, style,
-            prompt="│ ✦ ", top_border="╭──╮", bottom_border="╰──╯",
-            right_border="│", width=lambda: 120,
-            input=DummyInput(), output=DummyOutput(),
+            completer,
+            history,
+            style,
+            prompt="│ ✦ ",
+            top_border="╭──╮",
+            bottom_border="╰──╯",
+            right_border="│",
+            width=lambda: 120,
+            input=DummyInput(),
+            output=DummyOutput(),
         )
         root = app.layout.container
         top_win, middle_row, bottom_win = root.content.children
@@ -314,14 +357,14 @@ class PromptFrameLayoutTests(unittest.TestCase):
         # Borders and input column get the DYNAMIC frame-width constraint
         # (callables — re-evaluated each render, so a resize re-matches live).
         for name, win in (("top", top_win), ("bottom", bottom_win)):
-            self.assertTrue(callable(win.width),
-                            f"{name} border width must be a dynamic callable")
-            self.assertEqual(win.width().max, 120,
-                             f"{name} border must cap at the frame width (120)")
-        self.assertTrue(callable(input_win.width),
-                        "input column width must be a dynamic callable")
-        self.assertEqual(input_win.width().max, 115,
-                         "input column must be frame(120) - rails(5) = 115")
+            self.assertTrue(callable(win.width), f"{name} border width must be a dynamic callable")
+            self.assertEqual(
+                win.width().max, 120, f"{name} border must cap at the frame width (120)"
+            )
+        self.assertTrue(callable(input_win.width), "input column width must be a dynamic callable")
+        self.assertEqual(
+            input_win.width().max, 115, "input column must be frame(120) - rails(5) = 115"
+        )
 
         # The rails are NOT part of the dynamic constraint — they stay pinned to
         # their visible content so they never give ground to the buffer.
@@ -346,10 +389,16 @@ class PromptFrameLayoutTests(unittest.TestCase):
         grid = _GridOutput(rows=40, columns=150)
         with create_pipe_input() as inp:
             app, _buf = _build_prompt_layout(
-                completer, history, style,
-                prompt="│ ✦ ", top_border=top_border, bottom_border=bottom_border,
-                right_border="│", width=lambda: 120,
-                input=inp, output=grid,
+                completer,
+                history,
+                style,
+                prompt="│ ✦ ",
+                top_border=top_border,
+                bottom_border=bottom_border,
+                right_border="│",
+                width=lambda: 120,
+                input=inp,
+                output=grid,
             )
             inp.send_text("\r")
             try:
@@ -378,14 +427,17 @@ class PromptFrameLayoutTests(unittest.TestCase):
         top_last = grid.last_nonblank_col(top_row)
         rail_last = grid.last_nonblank_col(rail_row)
         bottom_last = grid.last_nonblank_col(bottom_row)
-        self.assertEqual(top_last, 119,
-                         f"top border `╮` must sit at col 119, got {top_last}")
-        self.assertEqual(bottom_last, 119,
-                         f"bottom border `╯` must sit at col 119, got {bottom_last}")
-        self.assertEqual(rail_last, 119,
-                         f"closing right rail `│` must align with the corners "
-                         f"at col 119, got {rail_last} — this is the "
-                         f"'closing rail far away' regression")
+        self.assertEqual(top_last, 119, f"top border `╮` must sit at col 119, got {top_last}")
+        self.assertEqual(
+            bottom_last, 119, f"bottom border `╯` must sit at col 119, got {bottom_last}"
+        )
+        self.assertEqual(
+            rail_last,
+            119,
+            f"closing right rail `│` must align with the corners "
+            f"at col 119, got {rail_last} — this is the "
+            f"'closing rail far away' regression",
+        )
 
 
 if __name__ == "__main__":

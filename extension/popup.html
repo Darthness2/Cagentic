@@ -72,6 +72,41 @@
   .act .when { margin-left: auto; color: var(--text-3); font-size: 10.5px;
                flex-shrink: 0; }
 
+  /* Site permissions — which pages the assistant may read or act on. */
+  .sites { display: flex; flex-direction: column; gap: 4px; }
+  .sites .empty { color: var(--text-3); font-size: 11.5px; font-style: italic;
+                  padding: 3px 0; }
+  .site {
+    display: flex; align-items: center; gap: 8px; font-size: 12px;
+    padding: 6px 9px; background: var(--surface); border-radius: 8px;
+    border: 1px solid var(--border);
+  }
+  .site .mk { flex-shrink: 0; }
+  .site.allow .mk { color: var(--ok); }
+  .site.deny .mk { color: var(--err); }
+  .site .name { overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+  .site.deny .name { color: var(--text-3); text-decoration: line-through; }
+  .site-x { margin-left: auto; background: none; border: 0; cursor: pointer;
+            color: var(--text-3); font-size: 11px; padding: 2px 4px; border-radius: 4px; }
+  .site-x:hover { color: var(--err); background: rgba(0,0,0,.16); }
+  .site-actions { display: flex; gap: 6px; margin-top: 7px; }
+  .site-btn {
+    flex: 1; padding: 6px 8px; border-radius: 7px; cursor: pointer;
+    font-size: 11.5px; background: var(--surface); color: var(--text-2);
+    border: 1px solid var(--border);
+  }
+  .site-btn:hover { border-color: var(--orchid); color: var(--orchid); }
+  .site-btn.danger:hover { border-color: var(--err); color: var(--err); }
+
+  .panel-btn {
+    display: flex; align-items: center; justify-content: center; gap: 7px;
+    width: calc(100% - 32px); margin: 12px 16px 0; padding: 9px;
+    border-radius: 8px; cursor: pointer; font-size: 12.5px; font-weight: 600;
+    background: linear-gradient(135deg, var(--accent), var(--orchid));
+    color: #1a1420; border: 0;
+  }
+  .panel-btn:hover { filter: brightness(1.07); }
+
   footer { padding: 12px 16px 16px; margin-top: 6px; border-top: 1px solid var(--border); }
   footer label { font-size: 10.5px; color: var(--text-3); letter-spacing: .05em;
                  text-transform: uppercase; }
@@ -95,6 +130,11 @@
     <div class="sub">browser bridge</div>
   </header>
 
+  <button id="openPanel" class="panel-btn">
+    <svg viewBox="0 0 24 24" width="14" height="14" aria-hidden="true"><path fill="none" stroke="currentColor" stroke-width="1.8" stroke-linejoin="round" d="M3 4h18v16H3zM15 4v16"/></svg>
+    Open chat panel
+  </button>
+
   <div class="status-card">
     <span class="dot" id="dot"></span>
     <span class="status-text" id="statusText">connecting…</span>
@@ -109,6 +149,12 @@
     <div class="kv">
       <span class="k">Doing</span>
       <span class="v"><span class="activity" id="vActivity">&mdash;</span></span>
+    </div>
+    <div class="recent-label">Site permissions</div>
+    <div class="sites" id="sites"></div>
+    <div class="site-actions">
+      <button id="allowSite" class="site-btn">Allow this site</button>
+      <button id="denySite" class="site-btn danger">Block this site</button>
     </div>
     <div class="recent-label">Recent browser actions</div>
     <div class="recent" id="recent"></div>

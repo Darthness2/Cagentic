@@ -66,7 +66,15 @@ class BackgroundExecutor:
 
     # -- public ----------------------------------------------------------
 
-    def submit_bash(self, command: str, cwd: Path, *, timeout: int = 600) -> str:
+    def submit_bash(
+        self,
+        command: str,
+        cwd: Path,
+        *,
+        timeout: int = 600,
+        sandbox: bool = True,
+        network: bool = False,
+    ) -> str:
         if not self._slots.acquire(blocking=False):
             raise RuntimeError(
                 f"too many background jobs in flight (max {MAX_INFLIGHT}); wait for some to finish"
@@ -88,7 +96,7 @@ class BackgroundExecutor:
                 self._jobs[job_id] = job
             t = threading.Thread(
                 target=self._run_bash,
-                args=(job_id, command, cwd, timeout),
+                args=(job_id, command, cwd, timeout, sandbox, network),
                 daemon=True,
             )
             t.start()
@@ -188,13 +196,28 @@ class BackgroundExecutor:
             except Exception:
                 logger.warning("background: failed updating task %s", task_id, exc_info=True)
 
-    def _run_bash(self, job_id: str, command: str, cwd: Path, timeout: int) -> None:
+    def _run_bash(
+        self,
+        job_id: str,
+        command: str,
+        cwd: Path,
+        timeout: int,
+        sandbox: bool = True,
+        network: bool = False,
+    ) -> None:
         # On Windows, shell=True uses cmd.exe which rejects Unix shell syntax
         # the model emits; route through bash/sh when available. Lazy import to
         # avoid a tools<->background import-time dependency.
+        from . import sandbox as _sandbox
         from .tools import _shell_run_invocation
 
         run_cmd, use_shell = _shell_run_invocation(command)
+        # A backgrounded command is the same command — confining the foreground
+        # one and not this would leave the sandbox trivially bypassable by
+        # asking for bash_async instead.
+        run_cmd, use_shell, note = _sandbox.wrap(
+            run_cmd, use_shell, workspace=cwd, network=network, enabled=sandbox
+        )
         try:
             proc = subprocess.run(
                 run_cmd,
@@ -210,6 +233,17 @@ class BackgroundExecutor:
                 parts.append(f"--- stdout ---\n{proc.stdout}")
             if proc.stderr:
                 parts.append(f"--- stderr ---\n{proc.stderr}")
+            if (
+                not ok
+                and not network
+                and _sandbox.looks_like_network_denial(proc.stderr or "", proc.stdout or "")
+            ):
+                parts.append(
+                    "NOTE: the shell sandbox denies network access by default; "
+                    "re-run with network=true if this command needs it."
+                )
+            if note.startswith("NOT sandboxed"):
+                parts.append(f"NOTE: {note}")
             self._finish(job_id, "done" if ok else "failed", "\n".join(parts))
         except subprocess.TimeoutExpired:
             self._finish(job_id, "failed", f"timed out after {timeout}s")

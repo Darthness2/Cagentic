@@ -22,7 +22,7 @@ Cagentic **remembers things about you** across sessions, keeps a persistent remi
 - **Full coding agent** (absorbed from Collama) — atomic `multi_edit` batches, parser-only `check_syntax` for 12+ languages, Jupyter `notebook_edit`, a worktree stack for sub-projects, PowerShell support, sub-agents (`agent_call` / `agent_call_async`), a persistent cross-session task graph, and an `/effort low|medium|high` dial for how hard the model works.
 - **Agent teams** (optional, `/groups enable teams`) — long-lived teammate personas with mailboxes; a coordinator processes each teammate's mail by forking sub-agents and can auto-claim matching tasks from the task graph.
 - **Multi-provider** — use Ollama locally, or connect OpenAI and Anthropic for cloud models when you need more power.
-- **iOS companion** — the Cagentic iOS app's chat *and* coding tabs both connect to the same `/gateway`, with phone actions and native cards for structured results. To reach it from your phone, set `"gateway": {"lan": true, "token": "<secret>"}` in `~/.config/cagentic/config.json` (LAN exposure is off by default; the token is required on every request).
+- **LAN access** — to reach the web UI from another machine, set `"gateway": {"lan": true, "token": "<secret>"}` in `~/.config/cagentic/config.json` (LAN exposure is off by default; the token is required on every request).
 
 ## Requirements
 
@@ -201,7 +201,7 @@ Cagentic launches each server as a subprocess on first use and keeps a long-live
 | | |
 |---|---|
 | `/tools` | list every tool the model can call |
-| `/groups [enable\|disable <name>]` | manage which tool groups are sent (default: files, web, notes, reminders, life, mcp, browser, shell, tasks, interaction, planning, system, coding, worktree, subagent; opt-in: teams, github; phone is enabled for iOS turns) |
+| `/groups [enable\|disable <name>]` | manage which tool groups are sent (default: files, web, notes, reminders, life, mcp, browser, shell, tasks, interaction, planning, system, coding, worktree, subagent, widgets; opt-in: teams, github) |
 | `/plan on\|off` | read-only mode |
 | `/effort low\|medium\|high` | how hard the model works per turn |
 | `/todo [add <text>\|done <n>\|clear]` | manage the per-session todo list |
@@ -279,6 +279,35 @@ It runs its own conversation (separate from the terminal session) but shares you
 Type `/help` in the web composer for its focused command list. Chat saving is automatic, and the message **resend**, **edit**, and **delete** controls replace redundant web-only `/save` and `/undo` commands; `/retry` regenerates the latest reply.
 
 If the configured port is already occupied, Cagentic automatically tries the next 20 ports and prints the URL it selected. Set `gateway.auto_port` to `false` if you prefer startup to fail instead.
+
+### Running it as a background service
+
+```bash
+cagentic --install-service     # launchd (macOS) or a systemd user unit (Linux)
+cagentic --uninstall-service
+```
+
+The service runs `cagentic --serve` at every login and restarts if it crashes.
+
+**It also updates itself.** A daemon lives for weeks, so without this it would
+keep serving whatever source it imported at boot — you'd edit a file and the
+background gateway would silently stay on yesterday's code. It watches the
+installed package directory (Python plus the web UI's assets) and re-executes
+itself once the tree settles.
+
+It deliberately will *not* restart:
+
+- while a reply is in flight — your conversation isn't dropped mid-answer;
+- until edits stop landing, so a `git pull` or a save-all doesn't restart into
+  a half-written tree;
+- into code that doesn't compile — a syntax error would otherwise become a
+  crash loop, since the supervisor keeps restarting a process that dies on
+  import. It logs the error and keeps serving the last good code.
+
+Set `gateway.auto_reload` to `false` to turn it off. Restart activity is logged
+to `~/.config/cagentic/logs/cagentic.log`. This applies only to the standalone
+`--serve` daemon; `/gateway` from the REPL shares that process and is never
+re-executed out from under your session.
 
 The gateway is a chat surface, not a dashboard — there are no separate
 workspace pages to keep in sync. Ask for your inbox, calendar, deadlines,

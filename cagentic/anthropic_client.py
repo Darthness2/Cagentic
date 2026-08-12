@@ -42,9 +42,39 @@ _BUILTIN_MODELS = [
 _API_URL = "https://api.anthropic.com/v1/messages"
 _API_VERSION = "2023-06-01"
 
+# Anthropic allows at most 4 cache breakpoints per request. We spend them on
+# the two stable prefixes (tools, system) and a rolling pair at the tail of the
+# conversation — see _apply_cache_control for why the tail gets two.
+_MAX_CACHE_BREAKPOINTS = 4
+_CACHE_CONTROL = {"type": "ephemeral"}
+
+# Block types Anthropic accepts a cache_control marker on. Marking anything
+# else is a 400, so a message whose tail block isn't one of these is skipped
+# rather than marked.
+_CACHEABLE_BLOCKS = {"text", "tool_use", "tool_result", "image", "document"}
+
 
 def _make_tool_id() -> str:
     return f"toolu_{uuid.uuid4().hex[:12]}"
+
+
+def _as_blocks(content: Any) -> list[dict]:
+    """Normalise a message's content to a list of Anthropic content blocks."""
+    if isinstance(content, list):
+        return content
+    text = str(content or "")
+    return [{"type": "text", "text": text}] if text else []
+
+
+def _mark_last_block(blocks: list[dict]) -> bool:
+    """Attach cache_control to the final block. True if a marker was placed."""
+    if not blocks:
+        return False
+    last = blocks[-1]
+    if not isinstance(last, dict) or last.get("type") not in _CACHEABLE_BLOCKS:
+        return False
+    last["cache_control"] = dict(_CACHE_CONTROL)
+    return True
 
 
 def _merge_consecutive(messages: list[dict]) -> list[dict]:
@@ -74,9 +104,13 @@ def _merge_consecutive(messages: list[dict]) -> list[dict]:
 class AnthropicClient:
     """HTTP wrapper around the Anthropic Messages API."""
 
-    def __init__(self, api_key: str, timeout: float = 600.0) -> None:
+    def __init__(self, api_key: str, timeout: float = 600.0, prompt_cache: bool = True) -> None:
         self.api_key = api_key
         self.timeout = timeout
+        # Prompt caching is on by default: an agent loop re-sends the system
+        # prompt, ~120 tool schemas and the whole transcript on every single
+        # step, and without breakpoints all of it is re-billed at full price.
+        self.prompt_cache = prompt_cache
         self._session = requests.Session()
         self._session.headers.update(
             {
@@ -218,6 +252,17 @@ class AnthropicClient:
                     }
                 )
         msg: dict[str, Any] = {"role": "assistant", "content": text, "tool_calls": tcs}
+        usage = data.get("usage") or {}
+        if usage:
+            # Surfaced so the caller can report what prompt caching actually
+            # saved — a breakpoint that silently stops matching is otherwise
+            # invisible.
+            msg["usage"] = {
+                "input": usage.get("input_tokens", 0),
+                "output": usage.get("output_tokens", 0),
+                "cache_read": usage.get("cache_read_input_tokens", 0),
+                "cache_write": usage.get("cache_creation_input_tokens", 0),
+            }
         if data.get("stop_reason") == "max_tokens":
             # Response hit the output cap — surface so the engine warns and the
             # user knows the answer is cut short.
@@ -232,6 +277,59 @@ class AnthropicClient:
                 if isinstance(val, int) and val > 0:
                     return val
         return _DEFAULT_MAX_TOKENS
+
+    @staticmethod
+    def _apply_cache_control(body: dict) -> None:
+        """Place cache breakpoints on the request's stable prefix and its tail.
+
+        Budget is 4 markers, spent as:
+
+          1. last tool schema  — covers every tool definition (the largest
+             fixed cost: ~120 schemas re-sent on every step of every turn)
+          2. system prompt     — stable for the life of the session
+          3/4. the last two messages — a *rolling* pair. Each request writes a
+             cache entry ending at its own tail; the next request in the same
+             agent loop (one more tool result appended) matches that entry as a
+             prefix and reads it back at ~10% of the input price. Two markers
+             rather than one so a re-tried or edited final message still leaves
+             an intact breakpoint behind it to read from.
+
+        Markers are placed innermost-last so a message that can't carry one
+        (empty content, or a block type Anthropic won't accept) simply yields
+        its slot to an earlier message instead of wasting it.
+        """
+        used = 0
+
+        tools = body.get("tools")
+        if tools:
+            tools[-1]["cache_control"] = dict(_CACHE_CONTROL)
+            used += 1
+
+        system = body.get("system")
+        if system:
+            # A str system prompt has to become a block list to carry a marker.
+            if isinstance(system, str):
+                system = [{"type": "text", "text": system}]
+                body["system"] = system
+            if _mark_last_block(system):
+                used += 1
+
+        messages = body.get("messages") or []
+        # Normalise EVERY message to block form, not just the ones that end up
+        # marked. A cache read only happens on a byte-identical prefix, and if
+        # marking is what promotes a message from "text" to [{"type":"text"}],
+        # then a message drifting out of the rolling window silently changes
+        # the prefix representation and voids the cache for everything after
+        # it. Uniform shape makes request N's prefix identical to N+1's.
+        for m in messages:
+            m["content"] = _as_blocks(m.get("content"))
+
+        remaining = _MAX_CACHE_BREAKPOINTS - used
+        for m in reversed(messages):
+            if remaining <= 0:
+                break
+            if _mark_last_block(m["content"]):
+                remaining -= 1
 
     def _build_body(
         self,
@@ -255,6 +353,8 @@ class AnthropicClient:
             body["temperature"] = options["temperature"]
         if stream:
             body["stream"] = True
+        if self.prompt_cache:
+            self._apply_cache_control(body)
         return body
 
     # ------------------------------------------------------------------
@@ -298,6 +398,8 @@ class AnthropicClient:
         current_id: str | None = None
         in_tokens = 0
         out_tokens = 0
+        cache_read = 0
+        cache_write = 0
         stop_reason: str | None = None
         saw_message_stop = False
 
@@ -358,6 +460,8 @@ class AnthropicClient:
                     elif etype == "message_start":
                         usage = (event.get("message") or {}).get("usage") or {}
                         in_tokens = usage.get("input_tokens", 0)
+                        cache_read = usage.get("cache_read_input_tokens", 0)
+                        cache_write = usage.get("cache_creation_input_tokens", 0)
 
                     elif etype == "message_stop":
                         saw_message_stop = True
@@ -390,6 +494,10 @@ class AnthropicClient:
             "eval_count": out_tokens,
             "prompt_eval_count": in_tokens,
             "total_duration_ns": 0,
+            # Anthropic reports cached input separately from input_tokens, so
+            # these are additional to prompt_eval_count, not a subset of it.
+            "cache_read_count": cache_read,
+            "cache_write_count": cache_write,
         }
         if truncated:
             done["truncated"] = True

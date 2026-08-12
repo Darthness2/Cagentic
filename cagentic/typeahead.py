@@ -45,6 +45,7 @@ called only after the bar has reserved both rows. All cursor writes go through
 ``ui.sync_write`` (the shared ``_PAINT_LOCK``) bracketed in DECSC/DECRC, so a
 StatusBar repaint can't slip between the write and its cursor restore.
 """
+
 from __future__ import annotations
 
 import os
@@ -67,29 +68,31 @@ class TypeAhead:
         self._stop = threading.Event()
         self._thread: threading.Thread | None = None
         self._lock = threading.Lock()
-        self._bar = None                 # the StatusBar whose rows we echo above
+        self._bar = None  # the StatusBar whose rows we echo above
         self._active = False
 
         # Per-turn state (reset in start_after_bar).
-        self._buf = ""                   # text typed this turn, not yet Enter'd
+        self._buf = ""  # text typed this turn, not yet Enter'd
         self._pending: str | None = None  # message queued by Enter for next turn
-        self._interrupted = False         # Ctrl-C requested (POSIX reader path)
+        self._interrupted = False  # Ctrl-C requested (POSIX reader path)
         self._interrupt_msg: str | None = None  # message to send fresh on Ctrl-C
-        self._consumed = False            # consume_interrupt once-guard
+        self._consumed = False  # consume_interrupt once-guard
 
         # Pick a key backend. "none" → disabled, every method no-ops.
         self._backend = "none"
         if os.name == "nt" or sys.platform == "win32":
             try:
                 import msvcrt  # noqa: F401
+
                 self._backend = "msvcrt"
             except Exception:
                 pass
         else:
             try:
+                import select  # noqa: F401
                 import termios  # noqa: F401
-                import tty       # noqa: F401
-                import select    # noqa: F401
+                import tty  # noqa: F401
+
                 self._backend = "posix"
             except Exception:
                 pass
@@ -122,6 +125,7 @@ class TypeAhead:
         def _check() -> bool:
             with self._lock:
                 return self._interrupted
+
         return _check
 
     # ------------------------------------------------------------------
@@ -146,8 +150,7 @@ class TypeAhead:
         self._bar = bar
         self._active = True
         self._stop.clear()
-        self._thread = threading.Thread(target=self._run, daemon=True,
-                                        name="cagentic-typeahead")
+        self._thread = threading.Thread(target=self._run, daemon=True, name="cagentic-typeahead")
         self._thread.start()
         # Show the input affordance immediately so the user knows they can type
         # while the model works.
@@ -241,10 +244,11 @@ class TypeAhead:
 
     def _run_msvcrt(self) -> None:
         import msvcrt
+
         while not self._stop.is_set():
-            if msvcrt.kbhit():
+            if msvcrt.kbhit():  # type: ignore[attr-defined]
                 try:
-                    ch = msvcrt.getwch()
+                    ch = msvcrt.getwch()  # type: ignore[attr-defined]
                 except Exception:
                     ch = ""
                 if ch:
@@ -254,8 +258,9 @@ class TypeAhead:
                     return
 
     def _run_posix(self) -> None:
-        import termios
         import select
+        import termios
+
         fd = sys.stdin.fileno()
         try:
             old = termios.tcgetattr(fd)
@@ -310,7 +315,8 @@ class TypeAhead:
             if self._backend == "msvcrt":
                 try:
                     import msvcrt
-                    msvcrt.getwch()
+
+                    msvcrt.getwch()  # type: ignore[attr-defined]
                 except Exception:
                     pass
             return
@@ -362,7 +368,7 @@ class TypeAhead:
     def _paint(self) -> None:
         if not self._active or not sys.stdout.isatty():
             return
-        prefix = ui.input_prefix()  # "│ ✦ " — matches the framed input rail
+        prefix = ui.prompt_prefix()  # "│ ✦ " — matches the framed input rail
         avail = ui.width() - ui._vlen(prefix)
         if avail < 1:
             return
@@ -370,15 +376,15 @@ class TypeAhead:
             buf = self._buf
             pending = self._pending
         if buf:
-            content = prefix + ui._trunc(buf, avail)
+            content = prefix + ui.truncate(buf, avail)
             if pending:
                 content += ui.color(" ✉", ui.GOLD)
         elif pending:
             mark = ui.color("✉ ", ui.GOLD)
-            content = prefix + mark + ui._trunc(pending, max(1, avail - ui._vlen(mark)))
+            content = prefix + mark + ui.truncate(pending, max(1, avail - ui._vlen(mark)))
         else:
             hint = ui.color("type to queue · Ctrl-C to interrupt", ui.SOFT)
-            content = prefix + ui._trunc(hint, avail)
+            content = prefix + ui.truncate(hint, avail)
         row = self._echo_row()
         # Move to the echo row, clear it, write the content, restore the cursor
         # — all under the shared paint lock so a StatusBar frame can't interleave.

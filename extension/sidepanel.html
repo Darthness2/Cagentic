@@ -1,0 +1,92 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8" />
+<title>Cagentic</title>
+<style>
+  /* The panel is a thin shell around the gateway's own chat UI: it frames the
+     iframe and handles the "not running / not paired" states. Everything
+     inside the frame is the same app served at localhost, so there is exactly
+     one chat implementation to maintain. */
+  :root {
+    --bg: #161118; --surface: #221b2a;
+    --border: rgba(236,231,240,.08);
+    --text: #ece7f0; --text-2: #b0a6ba; --text-3: #7d7388;
+    --accent: #f0a87a; --orchid: #c79ccf; --ok: #8ecf95; --err: #e5928f;
+  }
+  @media (prefers-color-scheme: light) {
+    :root {
+      --bg: #f7f4f9; --surface: #ffffff;
+      --border: rgba(34,28,39,.12);
+      --text: #221c27; --text-2: #5d5366; --text-3: #8b8194;
+      --orchid: #7b4f92;
+    }
+  }
+  * { box-sizing: border-box; }
+  html, body { height: 100%; margin: 0; }
+  body {
+    display: flex; flex-direction: column;
+    background: var(--bg); color: var(--text);
+    font: 13px -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, sans-serif;
+  }
+  header {
+    display: flex; align-items: center; gap: 8px; flex-shrink: 0;
+    padding: 8px 10px; border-bottom: 1px solid var(--border);
+  }
+  .logo {
+    width: 20px; height: 20px; border-radius: 6px; flex-shrink: 0;
+    background: linear-gradient(135deg, var(--accent), var(--orchid));
+    display: flex; align-items: center; justify-content: center;
+    color: #1a1420; font-weight: 700; font-size: 11px;
+  }
+  .title { font-weight: 600; letter-spacing: .02em; }
+  .spacer { flex: 1; }
+  .ctx-btn {
+    display: inline-flex; align-items: center; gap: 5px;
+    padding: 5px 9px; border-radius: 7px; cursor: pointer; font-size: 11.5px;
+    background: var(--surface); color: var(--text-2); border: 1px solid var(--border);
+  }
+  .ctx-btn:hover { color: var(--orchid); border-color: var(--orchid); }
+  .ctx-btn.done { color: var(--ok); border-color: var(--ok); }
+  .ctx-btn:disabled { opacity: .45; cursor: default; }
+  #frame { flex: 1; width: 100%; border: 0; display: none; }
+  .fallback {
+    flex: 1; display: flex; flex-direction: column; align-items: center;
+    justify-content: center; gap: 10px; padding: 24px; text-align: center;
+  }
+  .fallback h2 { margin: 0; font-size: 14px; font-weight: 600; }
+  .fallback p { margin: 0; font-size: 12px; color: var(--text-2); line-height: 1.55; }
+  .fallback code {
+    font-family: ui-monospace, "SF Mono", Consolas, monospace; font-size: 11.5px;
+    background: var(--surface); border: 1px solid var(--border);
+    padding: 2px 6px; border-radius: 5px;
+  }
+  .retry {
+    margin-top: 4px; padding: 7px 14px; border-radius: 7px; cursor: pointer;
+    background: var(--surface); color: var(--text); border: 1px solid var(--border);
+  }
+  .retry:hover { border-color: var(--orchid); color: var(--orchid); }
+</style>
+</head>
+<body>
+  <header>
+    <span class="logo">C</span>
+    <span class="title">Cagentic</span>
+    <span class="spacer"></span>
+    <button id="ctxBtn" class="ctx-btn" title="Send this page's URL, title and any selected text into the chat">
+      <svg viewBox="0 0 24 24" width="13" height="13" aria-hidden="true"><path fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round" d="M14 3H6v18h12V7z M14 3v4h4M9 12h6M9 16h4"/></svg>
+      Add page
+    </button>
+  </header>
+
+  <iframe id="frame" title="Cagentic chat"></iframe>
+
+  <div class="fallback" id="fallback">
+    <h2 id="fbTitle">Cagentic isn&rsquo;t running</h2>
+    <p id="fbBody">Start it with <code>cagentic --serve</code>, then reopen this panel.</p>
+    <button class="retry" id="retry">Try again</button>
+  </div>
+
+  <script src="sidepanel.js"></script>
+</body>
+</html>

@@ -27,7 +27,7 @@ from cagentic.prompt import (
     _toolbar_text,
 )
 from cagentic.state import AppState
-from cagentic.tools import all_tool_schemas, t_phone_shell, t_write_file
+from cagentic.tools import all_tool_schemas, t_write_file
 
 _RUN_SPEC = importlib.util.spec_from_file_location(
     "cagentic_source_runner", Path(__file__).resolve().parents[1] / "run.py"
@@ -62,8 +62,12 @@ class _MCPStub:
 class _BrowserStub:
     error = None
     port = 8765
+    token = "stub-token"
 
     def is_connected(self) -> bool:
+        return False
+
+    def auth_failing(self, window: float = 90.0) -> bool:
         return False
 
 
@@ -904,8 +908,9 @@ def test_failed_browser_command_can_be_retried(tmp_path, monkeypatch):
     class FailedBrowser:
         error = "port unavailable"
 
-        def __init__(self, *, port):
+        def __init__(self, *, port, site_rules=None):
             self.port = port
+            self.site_rules = site_rules
 
         def start(self):
             starts.append(self.port)
@@ -1008,19 +1013,19 @@ def test_gateway_model_switch_restores_per_model_tool_capability(tmp_path, monke
     assert gateway.agent.state.tools_enabled is False
 
 
-def test_ios_turn_enables_phone_tools_and_emits_widgets(tmp_path, monkeypatch):
+def test_show_widget_emits_a_widget_event_to_the_web_ui(tmp_path, monkeypatch):
+    """show_widget is rendered by the gateway web UI (app.js draws it as a HUD
+    window), so the tool has to reach the SSE stream — it outlived the iOS
+    client it was originally written for."""
     gateway = _gateway(tmp_path, monkeypatch)
     emitted: list[tuple[str, dict]] = []
     gateway._active_emit = lambda kind, data: emitted.append((kind, data))
 
-    gateway._inject_device_context("ios")
-    assert gateway.agent.state.tool_groups is not None
-    assert "phone" in gateway.agent.state.tool_groups
     schema_names = {
         schema["function"]["name"]
         for schema in all_tool_schemas(gateway.agent.state.tool_groups, compact=False)
     }
-    assert {"phone_shell", "phone_screenshot", "show_widget"} <= schema_names
+    assert "show_widget" in schema_names
 
     events = list(
         gateway.engine.executor._run_one(
@@ -1035,39 +1040,14 @@ def test_ios_turn_enables_phone_tools_and_emits_widgets(tmp_path, monkeypatch):
     assert result.data["ok"] is True
     assert emitted == [("widget", {"type": "stats", "title": "Build", "data": {"items": []}})]
 
-    gateway._inject_device_context("pc")
-    assert gateway.agent.state.tool_groups is not None
-    assert "phone" not in gateway.agent.state.tool_groups
 
+def test_no_phone_tools_remain_in_the_registry():
+    """The iOS backend is gone; nothing should re-introduce a phone tool
+    without also rebuilding the client bridge that used to execute it."""
+    from cagentic.tools import TOOL_GROUPS, TOOLS
 
-def test_phone_callbacks_reach_tools_and_screenshots_attach(tmp_path, monkeypatch):
-    agent = _agent(tmp_path, monkeypatch)
-    assert "active iOS gateway turn" in t_phone_shell({"command": "pwd"}, agent.ctx)
-
-    calls: list[tuple[str, dict]] = []
-
-    def phone_action(action: str, payload: dict) -> dict:
-        calls.append((action, payload))
-        if action == "screenshot":
-            return {
-                "success": True,
-                "result": {"data": "ZmFrZQ==", "width": 100, "height": 200},
-            }
-        return {"success": True, "result": "mobile-ok"}
-
-    agent.state.update(yolo=True)
-    agent.engine.executor.phone_action = phone_action
-    shell_events = list(
-        agent.engine.executor._run_one(("phone_shell", {"command": "pwd"}, "assistant"))
-    )
-    shell_result = next(event for event in shell_events if event.kind == "tool_result")
-    assert shell_result.data["result"] == "OK: mobile-ok"
-
-    screenshot_events = list(agent.engine.executor._run_one(("phone_screenshot", {}, "assistant")))
-    screenshot_result = next(event for event in screenshot_events if event.kind == "tool_result")
-    assert screenshot_result.data["ok"] is True
-    assert screenshot_result.data["images"] == ["ZmFrZQ=="]
-    assert calls == [("shell", {"command": "pwd"}), ("screenshot", {})]
+    assert not [name for name in TOOLS if name.startswith("phone_")]
+    assert "phone" not in TOOL_GROUPS
 
 
 @pytest.mark.parametrize(
@@ -1220,7 +1200,7 @@ def test_retry_restores_the_history_before_the_previous_turn(tmp_path, monkeypat
     agent = _agent(tmp_path, monkeypatch)
     histories: list[list[dict]] = []
 
-    def turn(text: str) -> str:
+    def turn(text: str, typeahead=None) -> str:
         histories.append(copy.deepcopy(agent.messages))
         agent.engine.messages.extend(
             [
@@ -1317,12 +1297,16 @@ def test_every_terminal_catalog_command_has_a_safe_smoke_path(tmp_path, monkeypa
         "/todo": "/todo",
         "/name": "/name",
         "/cd": "/cd",
+        "/init": "/init",
         "/diff": "/diff",
         "/undo": "/undo",
+        "/rewind": "/rewind",
         "/tools": "/tools",
         "/groups": "/groups",
         "/plan": "/plan off",
+        "/accept": "/accept off",
         "/yolo": "/yolo off",
+        "/rules": "/rules",
         "/mcp": "/mcp",
         "/browser": "/browser",
         "/gateway": "/gateway off",
@@ -1341,6 +1325,11 @@ def test_every_terminal_catalog_command_has_a_safe_smoke_path(tmp_path, monkeypa
     }
     catalog = {name for _section, entries in COMMAND_GROUPS for name, _args, _hint in entries}
     assert set(probes) == catalog
+
+    # /init asks the model to draft an AGENTS.md, which a stub client can't
+    # answer. An existing file makes it take its refuse-and-explain branch,
+    # which is the path this smoke test is here to check.
+    (tmp_path / "AGENTS.md").write_text("# already here\n", encoding="utf-8")
 
     monkeypatch.setattr(cli, "_settle_in", lambda _agent: None)
     monkeypatch.setattr(cli.config, "save", lambda _cfg: None)
