@@ -308,11 +308,51 @@ function trimThread(){
 }
 function getThread(){ let t=log.querySelector('.j-thread'); if(!t){t=document.createElement('div');t.className='j-thread';log.appendChild(t);} return t; }
 function clearLog(){ log.innerHTML=''; }
-function avatarHTML(){ return '<div class="j-avatar">C</div>'; }
+function avatarHTML(){
+  return '<div class="j-avatar" aria-hidden="true"><svg class="ico"><use href="#i-spark"/></svg></div>';
+}
 /* setOrbLabel is a no-op defined near the top of the file; compactOrb went
    with the orb it collapsed. Both are kept callable so the call sites that
    only ever drove decoration don't need touching. */
 function compactOrb(){ /* no-op: the orb is gone */ }
+
+// Dialog focus belongs inside the dialog until it closes. The gateway has no
+// framework, so this small shared helper provides initial focus, trapping and
+// return-to-opener behavior for every modal instead of duplicating it six times.
+const _dialogReturnFocus=new WeakMap();
+function _visibleDialog(){ return document.querySelector('.modal:not(.hidden)'); }
+function _focusableIn(el){
+  return [...el.querySelectorAll('button:not([disabled]), input:not([disabled]), select:not([disabled]), textarea:not([disabled]), [tabindex]:not([tabindex="-1"])')]
+    .filter(node=>!node.hidden&&node.getClientRects().length);
+}
+function openDialog(target, initialSelector, returnFocus){
+  const modal=typeof target==='string'?$(target):target; if(!modal) return;
+  hideCtx(); closeModelMenu();
+  $('#restorePill').classList.remove('open');
+  $('#restorePillBtn').setAttribute('aria-expanded','false');
+  _dialogReturnFocus.set(modal,returnFocus||document.activeElement);
+  modal.classList.remove('hidden');
+  syncSidebarUI();
+  requestAnimationFrame(()=>{
+    const initial=initialSelector?modal.querySelector(initialSelector):null;
+    (initial||_focusableIn(modal)[0]||modal).focus();
+  });
+}
+function closeDialog(target){
+  const modal=typeof target==='string'?$(target):target; if(!modal) return;
+  modal.classList.add('hidden');
+  const opener=_dialogReturnFocus.get(modal); _dialogReturnFocus.delete(modal);
+  syncSidebarUI();
+  if(!_visibleDialog()&&opener&&opener.isConnected) requestAnimationFrame(()=>opener.focus());
+}
+document.addEventListener('keydown',e=>{
+  if(e.key!=='Tab') return;
+  const modal=_visibleDialog(); if(!modal) return;
+  const items=_focusableIn(modal); if(!items.length){ e.preventDefault(); modal.focus(); return; }
+  const first=items[0], last=items[items.length-1];
+  if(e.shiftKey&&document.activeElement===first){ e.preventDefault(); last.focus(); }
+  else if(!e.shiftKey&&document.activeElement===last){ e.preventDefault(); first.focus(); }
+});
 
 // ---- HUD --------------------------------------------------------------------
 const HUD_RX = /```hud\s*\n?([\s\S]*?)```/g;
@@ -382,10 +422,10 @@ function renderPanels(text){
     win.style.cssText='left:'+pos.x+'px;top:'+pos.y+'px;--i:'+idx;
     const title=obj.title||(type.charAt(0).toUpperCase()+type.slice(1));
     win.innerHTML='<div class="hud-win-head"><span class="hud-win-title">'+esc(title)+'</span>'+
-      '<button class="hud-win-close" title="Close">&times;</button></div>'+
+      '<button class="hud-win-close" type="button" title="Close" aria-label="Close '+esc(title)+' panel"><svg class="ico sm" aria-hidden="true"><use href="#i-close"/></svg></button></div>'+
       '<div class="hud-win-body">'+inner+'</div>'+
       '<div class="hud-win-resize"></div>';
-    win.querySelector('.hud-win-close').addEventListener('pointerdown',e=>{e.stopPropagation();_closeWindow(win);});
+    win.querySelector('.hud-win-close').addEventListener('click',e=>{e.stopPropagation();_closeWindow(win);});
     layer.appendChild(win);
     _initWindow(win);
   });
@@ -1331,10 +1371,10 @@ function renderWidget(d){
   const win=document.createElement('div'); win.className='hud-window sw-window sw-'+type;
   win.style.cssText='left:'+pos.x+'px;top:'+pos.y+'px;--i:'+idx;
   win.innerHTML='<div class="hud-win-head"><span class="hud-win-title">'+esc(title)+'</span>'+
-    '<button class="hud-win-close" title="Close">&times;</button></div>'+
+    '<button class="hud-win-close" type="button" title="Close" aria-label="Close '+esc(title)+' panel"><svg class="ico sm" aria-hidden="true"><use href="#i-close"/></svg></button></div>'+
     '<div class="hud-win-body sw-body">'+inner+'</div>'+
     '<div class="hud-win-resize"></div>';
-  win.querySelector('.hud-win-close').addEventListener('pointerdown',e=>{e.stopPropagation();_closeWindow(win);});
+  win.querySelector('.hud-win-close').addEventListener('click',e=>{e.stopPropagation();_closeWindow(win);});
   layer.appendChild(win);
   _initWindow(win);
 }
@@ -1350,7 +1390,10 @@ function _nextWinPos(){
   const cellW=(lw-40)/cols, cellH=(lh-40)/rows;
   const x=20+col*cellW+20, y=20+row*cellH+20;
   _winCascade++;
-  return {x: Math.min(x, lw-260), y: Math.min(y, lh-200)};
+  return {
+    x: Math.max(8,Math.min(x,Math.max(8,lw-260))),
+    y: Math.max(8,Math.min(y,Math.max(8,lh-200)))
+  };
 }
 // One shared pointer manager drives every window's drag + resize, so windows
 // don't each leak a set of document-level listeners. Pointer events unify
@@ -1359,7 +1402,7 @@ let _drag=null; // {win, mode:'move'|'resize', sx, sy, ox, oy, ow, oh}
 function _initWindow(win){
   const head=win.querySelector('.hud-win-head');
   if(head) head.addEventListener('pointerdown',e=>{
-    if(e.target.classList.contains('hud-win-close')) return;
+    if(e.target.closest('.hud-win-close')) return;
     _drag={win, mode:'move', sx:e.clientX, sy:e.clientY,
       ox:parseInt(win.style.left)||0, oy:parseInt(win.style.top)||0};
     win.classList.add('dragging'); e.preventDefault();
@@ -1386,6 +1429,7 @@ document.addEventListener('pointerup',()=>{
   if(!_drag) return;
   _drag.win.classList.remove('dragging','resizing');
   _drag=null;
+  clampHudWindows();
 });
 function _closeWindow(win){
   win.style.display='none';
@@ -1398,6 +1442,20 @@ function _restoreWindow(win){
   // Re-trigger entrance animation
   win.style.animation='none'; win.offsetHeight; win.style.animation='';
   _updateRestorePill();
+  requestAnimationFrame(clampHudWindows);
+}
+function clampHudWindows(){
+  const layer=$('#windowLayer'); if(!layer) return;
+  layer.querySelectorAll('.hud-window').forEach(win=>{
+    if(win.style.display==='none') return;
+    const edge=8;
+    const maxX=Math.max(edge,layer.clientWidth-win.offsetWidth-edge);
+    const maxY=Math.max(edge,layer.clientHeight-win.offsetHeight-edge);
+    const x=Number.parseFloat(win.style.left)||edge;
+    const y=Number.parseFloat(win.style.top)||edge;
+    win.style.left=Math.max(edge,Math.min(x,maxX))+'px';
+    win.style.top=Math.max(edge,Math.min(y,maxY))+'px';
+  });
 }
 function _updateRestorePill(){
   const pill=$('#restorePill');
@@ -1406,6 +1464,7 @@ function _updateRestorePill(){
   if(state.closedWindows.length===0){
     pill.style.display='none';
     pill.classList.remove('open');
+    $('#restorePillBtn').setAttribute('aria-expanded','false');
     return;
   }
   pill.style.display='';
@@ -1413,20 +1472,51 @@ function _updateRestorePill(){
   dd.innerHTML=state.closedWindows.map((w,i)=>{
     const t=w.querySelector('.hud-win-title');
     const label=t?t.textContent:('Panel '+(i+1));
-    return '<div class="restore-item" data-ri="'+i+'">↩ '+esc(label)+'</div>';
+    return '<button class="restore-item" type="button" role="menuitem" data-ri="'+i+'">'+
+      '<svg class="ico sm" aria-hidden="true"><use href="#i-retry"/></svg>'+esc(label)+'</button>';
   }).join('');
   dd.querySelectorAll('.restore-item').forEach(el=>{
-    el.onclick=()=>{ const idx=+el.dataset.ri; _restoreWindow(state.closedWindows[idx]); };
+    el.onclick=()=>{
+      const idx=+el.dataset.ri, win=state.closedWindows[idx]; _restoreWindow(win);
+      requestAnimationFrame(()=>{
+        const remaining=[...dd.querySelectorAll('.restore-item')];
+        if(remaining.length) remaining[Math.min(idx,remaining.length-1)].focus();
+        else win.querySelector('.hud-win-close')?.focus();
+      });
+    };
   });
 }
-$('#restorePill').addEventListener('click',e=>{
-  if(e.target.closest('.restore-item')) return;
-  e.currentTarget.classList.toggle('open');
+$('#restorePillBtn').addEventListener('click',e=>{
+  const pill=$('#restorePill'); pill.classList.toggle('open');
+  e.currentTarget.setAttribute('aria-expanded',pill.classList.contains('open')?'true':'false');
+});
+$('#restorePillBtn').addEventListener('keydown',e=>{
+  if(e.key==='ArrowUp'||e.key==='ArrowDown'){
+    e.preventDefault();
+    const pill=$('#restorePill'); pill.classList.add('open');
+    e.currentTarget.setAttribute('aria-expanded','true');
+    const items=[...$('#restoreDropdown').querySelectorAll('.restore-item')];
+    (e.key==='ArrowUp'?items[items.length-1]:items[0])?.focus();
+  }
+});
+$('#restoreDropdown').addEventListener('keydown',e=>{
+  const items=[...e.currentTarget.querySelectorAll('.restore-item')]; if(!items.length) return;
+  const at=Math.max(0,items.indexOf(document.activeElement));
+  if(e.key==='ArrowDown'||e.key==='ArrowUp'){
+    e.preventDefault(); items[(at+(e.key==='ArrowDown'?1:-1)+items.length)%items.length].focus();
+  } else if(e.key==='Home'){ e.preventDefault(); items[0].focus(); }
+  else if(e.key==='End'){ e.preventDefault(); items[items.length-1].focus(); }
+  else if(e.key==='Escape'){
+    e.preventDefault(); $('#restorePill').classList.remove('open');
+    $('#restorePillBtn').setAttribute('aria-expanded','false'); $('#restorePillBtn').focus();
+  }
 });
 // Close dropdown when clicking outside
 document.addEventListener('pointerdown',e=>{
   const pill=$('#restorePill');
-  if(pill && !pill.contains(e.target)) pill.classList.remove('open');
+  if(pill && !pill.contains(e.target)){
+    pill.classList.remove('open'); $('#restorePillBtn').setAttribute('aria-expanded','false');
+  }
 });
 function clearViewport(){
   state.renderedPanels.clear();
@@ -1440,7 +1530,7 @@ function clearViewport(){
 // bring window to front on interaction
 $('#windowLayer').addEventListener('pointerdown',e=>{
   const win=e.target.closest('.hud-window');
-  if(win && !e.target.classList.contains('hud-win-close')){
+  if(win && !e.target.closest('.hud-win-close')){
     // move to end of DOM = top of stack
     e.currentTarget.appendChild(win);
   }
@@ -1453,10 +1543,10 @@ $('#windowLayer').addEventListener('pointerdown',e=>{
    same sprite as the rest of the UI, and the list is shorter: eight cards is a
    menu, four is a suggestion. */
 const QUICK = [
-  {icon:'i-search', title:'Search the web',  sub:'Find and summarise anything online', prompt:'Search the web for '},
-  {icon:'i-folder', title:'Browse files',    sub:'List or read files on this machine', prompt:'List the files in my current directory'},
-  {icon:'i-edit',   title:'Take a note',     sub:'Remember something for later',       prompt:'Take a note: '},
-  {icon:'i-more',   title:'Interactive panel', sub:'Buttons and forms you can click',  prompt:'Show me an interactive panel with a few action buttons I can click'},
+  {icon:'i-search', title:'Research a topic', sub:'Search, compare, and summarize sources', prompt:'Research and summarize '},
+  {icon:'i-folder', title:'Explore this workspace', sub:'Understand files, structure, and recent work', prompt:'Help me understand this workspace'},
+  {icon:'i-edit', title:'Draft something', sub:'Turn an idea into clear, polished writing', prompt:'Help me draft '},
+  {icon:'i-more', title:'Create an interactive view', sub:'Build a useful panel with controls', prompt:'Create an interactive panel for '},
 ];
 function showEmpty() {
   clearLog();
@@ -1465,15 +1555,18 @@ function showEmpty() {
   const greet=hour<5?'Still up?':hour<12?'Good morning':hour<18?'Good afternoon':'Good evening';
   const who=(state.userName||'').trim();
   wrap.innerHTML=
+    '<div class="empty-mark" aria-hidden="true"><svg class="ico"><use href="#i-spark"/></svg></div>'+
     '<h1 class="j-empty-title">'+esc(greet)+(who?', '+esc(who):'')+'</h1>'+
-    '<p class="j-empty-sub">What would you like to do?</p>'+
+    '<p class="j-empty-sub">How can I help you today?</p>'+
     '<div class="quick-cards">'+
     QUICK.map((q,i)=>`<button class="qcard" style="--i:${i}" data-prompt="${esc(q.prompt)}">`+
       `<svg class="ico qcard-icon" aria-hidden="true"><use href="#${q.icon}"/></svg>`+
       `<span class="qcard-text"><span class="qcard-title">${esc(q.title)}</span>`+
       `<span class="qcard-sub">${esc(q.sub)}</span></span></button>`).join('')+'</div>';
   log.appendChild(wrap);
-  wrap.querySelectorAll('.qcard').forEach(c=>{ c.onclick=()=>{ input.value=c.dataset.prompt; autoGrow(); input.focus(); }; });
+  wrap.querySelectorAll('.qcard').forEach(c=>{
+    c.onclick=()=>{ input.value=c.dataset.prompt; autoGrow(); syncComposerState(); input.focus(); };
+  });
 }
 
 // ---- RENDERING --------------------------------------------------------------
@@ -1484,15 +1577,15 @@ const _ICO={
   edit:'<svg class="ico sm" aria-hidden="true"><use href="#i-edit"/></svg>',
   trash:'<svg class="ico sm" aria-hidden="true"><use href="#i-trash"/></svg>',
 };const MSG_ACTIONS_HTML=
-  '<button class="msg-act-btn" data-act="copy" title="Copy message">'+_ICO.copy+'<span>Copy</span></button>'+
-  '<button class="msg-act-btn" data-act="resend" title="Send again">'+_ICO.redo+'<span>Retry</span></button>'+
-  '<button class="msg-act-btn" data-act="edit" title="Edit and resend">'+_ICO.edit+'<span>Edit</span></button>'+
-  '<button class="msg-act-btn del-btn" data-act="delete" title="Delete from here">'+_ICO.trash+'<span>Delete</span></button>';
+  '<button class="msg-act-btn" type="button" data-act="copy" title="Copy message" aria-label="Copy message">'+_ICO.copy+'<span>Copy</span></button>'+
+  '<button class="msg-act-btn" type="button" data-act="resend" title="Send again" aria-label="Send again">'+_ICO.redo+'<span>Retry</span></button>'+
+  '<button class="msg-act-btn" type="button" data-act="edit" title="Edit and resend" aria-label="Edit and resend">'+_ICO.edit+'<span>Edit</span></button>'+
+  '<button class="msg-act-btn del-btn" type="button" data-act="delete" title="Delete from here" aria-label="Delete from here">'+_ICO.trash+'<span>Delete</span></button>';
 // The assistant's own toolbar: copy the reply, or regenerate it from the user
 // turn above. Regenerate is what the REPL's /retry does, finally reachable here.
 const REPLY_ACTIONS_HTML=
-  '<button class="msg-act-btn" data-act="copy" title="Copy reply">'+_ICO.copy+'<span>Copy</span></button>'+
-  '<button class="msg-act-btn" data-act="regen" title="Regenerate this reply">'+_ICO.redo+'<span>Regenerate</span></button>';
+  '<button class="msg-act-btn" type="button" data-act="copy" title="Copy reply" aria-label="Copy reply">'+_ICO.copy+'<span>Copy</span></button>'+
+  '<button class="msg-act-btn" type="button" data-act="regen" title="Regenerate this reply" aria-label="Regenerate this reply">'+_ICO.redo+'<span>Regenerate</span></button>';
 function _wireCopy(btn, getText){
   btn.onclick=()=>{
     const label=btn.querySelector('span');
@@ -1561,7 +1654,7 @@ function streamEdit(idx,text){
   fetch('/api/chat/edit',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({index:idx,message:text})})
   .then(r=>{ if(!r.ok||!r.body) throw new Error(r.status); return readSSE(r,handle); })
   .then(()=>{clearThinking();if(state.busy)finishTurn();})
-  .catch(()=>{clearThinking();addNote('CONNECTION FAILURE',true);finishTurn();});
+  .catch(()=>{clearThinking();addNote('Connection lost. Try again.',true);finishTurn();});
 }
 
 function deleteMsg(idx,row){
@@ -1656,6 +1749,7 @@ function addToolRow(t, done){
     scrollDown(); return prev;
   }
   const row=document.createElement('div'); row.className='tool-row'+(done?'':' pending');
+  row.setAttribute('role','status'); row.setAttribute('aria-live','polite');
   row.dataset.name=t.name||'';
   const isCmd=(t.name||'').startsWith('run_')||(t.name||'').startsWith('bash');
   const icon='<svg class="ico sm" aria-hidden="true"><use href="#'+(isCmd?'i-chevron-right':'i-check')+'"/></svg>';
@@ -1663,16 +1757,18 @@ function addToolRow(t, done){
   row.innerHTML='<span class="tool-icon" style="color:'+iconColor+'">'+icon+'</span>'+
     '<span class="tname">'+esc(t.name||'')+'</span>'+
     (t.summary?'<span class="tsum">'+esc(t.summary)+'</span>':'')+
-    (done?'':'<span class="tres">RUNNING&#8230;</span>');
+    (done?'':'<span class="tres">Running&#8230;</span>');
   getThread().appendChild(row); scrollDown(); return row;
 }
 function addNote(text, isErr){
   const n=document.createElement('div'); n.className='note-row'+(isErr?' err':'');
+  n.setAttribute('role',isErr?'alert':'status');
   n.textContent=text||''; getThread().appendChild(n); scrollDown();
 }
 function showPermission(d){
   const box=document.createElement('div'); box.className='perm-box';
-  box.innerHTML='<div class="pq">AUTHORIZATION REQUIRED: <code>'+esc(d.tool)+'</code>'+(d.summary?' &mdash; '+esc(d.summary):'')+' </div>';
+  box.setAttribute('role','group'); box.setAttribute('aria-label','Approval needed');
+  box.innerHTML='<div class="pq">Approval needed for <code>'+esc(d.tool)+'</code>'+(d.summary?' &mdash; '+esc(d.summary):'')+' </div>';
   // Show the patch before the buttons — approving a file change you can't see
   // is exactly what this preview exists to prevent.
   if(d.diff){
@@ -1737,13 +1833,14 @@ async function readSSE(response, onEvent){
 // ---- LIVE TURN --------------------------------------------------------------
 let live={body:null,raw:'',toolRow:null,thinking:null,thinkBox:null,turnStart:null,tokensIn:0,tokensOut:0};
 let _thinkTimer=null;
-const _VERBS=['hatching','orbiting','pondering','brewing','simmering','marinating','percolating','crystallizing','weaving','conjuring','manifesting','distilling','synthesizing','calculating','reverberating','catalyzing','assembling','composting','fermenting','spinning','dreaming','musing','ruminating','cooking','germinating','blossoming','incubating','metabolizing','transmuting','alchemizing'];
+const _VERBS=['Thinking','Reading context','Working','Reviewing'];
 let _curVerb='thinking';
 function randomVerb(){ return _VERBS[Math.floor(Math.random()*_VERBS.length)]; }
 function showThinking(){
   _curVerb=randomVerb();
   const t=document.createElement('div'); t.className='thinking-row';
-  t.innerHTML=avatarHTML()+'<span>'+_curVerb+'\u2026</span><div class="thinking-dots"><span></span><span></span><span></span></div><span class="thinking-timer" id="thinkTimer"></span>';
+  t.setAttribute('role','status'); t.setAttribute('aria-live','polite');
+  t.innerHTML=avatarHTML()+'<span>'+_curVerb+'\u2026</span><div class="thinking-dots" aria-hidden="true"><span></span><span></span><span></span></div><span class="thinking-timer" id="thinkTimer"></span>';
   getThread().appendChild(t); scrollDown(); live.thinking=t;
   live.turnStart=Date.now(); live.tokensIn=0; live.tokensOut=0;
   const timerEl=t.querySelector('#thinkTimer');
@@ -1791,7 +1888,7 @@ function handle(ev){
     /* If the info message mentions tokens, update live.tokensIn */
     const m=d.text&&d.text.match(/~(\d[\d,]*)\s*tokens/);
     if(m) live.tokensIn=parseInt(m[1].replace(/,/g,''),10);
-  } else if(k==='error'){ addNote(d.text||'ERROR: SYSTEM FAULT',true); live.body=null;
+  } else if(k==='error'){ addNote(d.text||'Something went wrong. Try again.',true); live.body=null;
   } else if(k==='widget'){
     // show_widget SSE event — render a dedicated specialty card. We translate
     // the (type, title, data) payload into a HUD panel so it benefits from
@@ -1905,7 +2002,7 @@ if(SR){
   recog.onerror=()=>{ recognizing=false; $('#micBtn').classList.remove('listening'); $('#cmdBox').classList.remove('listening'); };
   recog.onresult=e=>{
     let txt=''; for(let i=0;i<e.results.length;i++) txt+=e.results[i][0].transcript;
-    input.value=txt; autoGrow();
+    input.value=txt; autoGrow(); syncComposerState();
     if(e.results[e.results.length-1].isFinal){ setTimeout(()=>{ if(input.value.trim()) submit(); },350); }
   };
 }
@@ -1919,51 +2016,69 @@ let _confirmCb=null;
 function showConfirm(msg,cb){
   _confirmCb=cb;
   $('#confirmMsg').textContent=msg;
-  $('#confirmModal').classList.remove('hidden');
+  openDialog('#confirmModal','#confirmCancel');
 }
-$('#confirmOk').onclick=()=>{ $('#confirmModal').classList.add('hidden'); if(_confirmCb) _confirmCb(); _confirmCb=null; };
-$('#confirmCancel').onclick=()=>{ $('#confirmModal').classList.add('hidden'); _confirmCb=null; };
-$('#confirmClose').onclick=()=>{ $('#confirmModal').classList.add('hidden'); _confirmCb=null; };
-$('#confirmModal').addEventListener('click',e=>{ if(e.target.id==='confirmModal'){ $('#confirmModal').classList.add('hidden'); _confirmCb=null; } });
+$('#confirmOk').onclick=()=>{ closeDialog('#confirmModal'); if(_confirmCb) _confirmCb(); _confirmCb=null; };
+$('#confirmCancel').onclick=()=>{ closeDialog('#confirmModal'); _confirmCb=null; };
+$('#confirmClose').onclick=()=>{ closeDialog('#confirmModal'); _confirmCb=null; };
+$('#confirmModal').addEventListener('click',e=>{ if(e.target.id==='confirmModal'){ closeDialog('#confirmModal'); _confirmCb=null; } });
 
 // ---- CONTEXT MENU (⋮) -------------------------------------------------------
-let _ctxChatId=null, _projCtxId=null, _ctxMode='chat';
+let _ctxChatId=null, _projCtxId=null, _ctxMode='chat', _ctxOpener=null;
+function positionCtxMenu(menu,event){
+  const anchor=event.currentTarget?.getBoundingClientRect();
+  const keyboard=!event.clientX&&!event.clientY&&anchor;
+  const x=keyboard?anchor.right-24:event.clientX;
+  const y=keyboard?anchor.bottom:event.clientY;
+  menu.style.left=Math.max(8,Math.min(x,window.innerWidth-170))+'px';
+  menu.style.top=Math.max(8,Math.min(y,window.innerHeight-140))+'px';
+}
 function showCtx(e,chatId){
   _ctxChatId=chatId; _ctxMode='chat';
+  if(_ctxOpener&&_ctxOpener!==e.currentTarget) _ctxOpener.setAttribute('aria-expanded','false');
+  _ctxOpener=e.currentTarget; _ctxOpener?.setAttribute('aria-expanded','true');
   const m=$('#ctxMenu');
-  m.innerHTML='<div class="ctx-item" data-action="rename"><svg class="ico sm" aria-hidden="true"><use href="#i-edit"/></svg> Rename</div>'+
-    '<div class="ctx-item" data-action="project"><svg class="ico sm" aria-hidden="true"><use href="#i-folder"/></svg> Add to Project</div>'+
+  m.innerHTML='<button class="ctx-item" type="button" role="menuitem" data-action="rename"><svg class="ico sm" aria-hidden="true"><use href="#i-edit"/></svg> Rename</button>'+
+    '<button class="ctx-item" type="button" role="menuitem" data-action="project"><svg class="ico sm" aria-hidden="true"><use href="#i-folder"/></svg> Add to project</button>'+
     '<div class="ctx-sep"></div>'+
-    '<div class="ctx-item ctx-danger" data-action="delete"><svg class="ico sm" aria-hidden="true"><use href="#i-trash"/></svg> Delete</div>';
+    '<button class="ctx-item ctx-danger" type="button" role="menuitem" data-action="delete"><svg class="ico sm" aria-hidden="true"><use href="#i-trash"/></svg> Delete</button>';
   m.classList.remove('hidden');
-  m.style.left=Math.min(e.clientX,window.innerWidth-170)+'px';
-  m.style.top=Math.min(e.clientY,window.innerHeight-120)+'px';
+  positionCtxMenu(m,e);
+  requestAnimationFrame(()=>m.querySelector('.ctx-item')?.focus());
 }
 function showNewProjectModal(){
   $('#newProjectInput').value='';
-  $('#newProjectModal').classList.remove('hidden');
-  setTimeout(()=>$('#newProjectInput').focus(),50);
+  openDialog('#newProjectModal','#newProjectInput');
 }
-function closeNewProjectModal(){ $('#newProjectModal').classList.add('hidden'); }
+function closeNewProjectModal(){ closeDialog('#newProjectModal'); }
 
 function showProjectCtx(e,projectId){
   _projCtxId=projectId; _ctxMode='project';
+  if(_ctxOpener&&_ctxOpener!==e.currentTarget) _ctxOpener.setAttribute('aria-expanded','false');
+  _ctxOpener=e.currentTarget; _ctxOpener?.setAttribute('aria-expanded','true');
   const m=$('#ctxMenu');
-  m.innerHTML='<div class="ctx-item" data-action="proj-config"><svg class="ico sm" aria-hidden="true"><use href="#i-settings"/></svg> Config</div>'+
-    '<div class="ctx-item" data-action="proj-rename"><svg class="ico sm" aria-hidden="true"><use href="#i-edit"/></svg> Rename</div>'+
-    '<div class="ctx-item ctx-danger" data-action="proj-delete"><svg class="ico sm" aria-hidden="true"><use href="#i-trash"/></svg> Delete</div>';
+  m.innerHTML='<button class="ctx-item" type="button" role="menuitem" data-action="proj-config"><svg class="ico sm" aria-hidden="true"><use href="#i-settings"/></svg> Project settings</button>'+
+    '<button class="ctx-item" type="button" role="menuitem" data-action="proj-rename"><svg class="ico sm" aria-hidden="true"><use href="#i-edit"/></svg> Rename</button>'+
+    '<button class="ctx-item ctx-danger" type="button" role="menuitem" data-action="proj-delete"><svg class="ico sm" aria-hidden="true"><use href="#i-trash"/></svg> Delete</button>';
   m.classList.remove('hidden');
-  m.style.left=Math.min(e.clientX,window.innerWidth-170)+'px';
-  m.style.top=Math.min(e.clientY,window.innerHeight-120)+'px';
+  positionCtxMenu(m,e);
+  requestAnimationFrame(()=>m.querySelector('.ctx-item')?.focus());
 }
-function hideCtx(){ $('#ctxMenu').classList.add('hidden'); _ctxChatId=null; _projCtxId=null; }
+function hideCtx(restoreFocus=false){
+  const opener=_ctxOpener;
+  $('#ctxMenu').classList.add('hidden');
+  opener?.setAttribute('aria-expanded','false');
+  _ctxChatId=null; _projCtxId=null; _ctxOpener=null;
+  if(restoreFocus&&opener?.isConnected) opener.focus();
+}
 document.addEventListener('click',e=>{
   const m=$('#ctxMenu');
   if(m.contains(e.target)){
     e.stopPropagation();
-    const action=e.target.dataset.action; if(!action) return;
+    const item=e.target.closest('[data-action]');
+    const action=item&&item.dataset.action; if(!action) return;
     const chatId=_ctxChatId, projId=_projCtxId;
-    hideCtx();
+    hideCtx(true);
     if(action==='delete'){ showConfirm('Delete this chat?',()=>deleteChat(chatId)); }
     else if(action==='rename'){ showRename(chatId); }
     else if(action==='project'){ showProjectPicker(chatId); }
@@ -1977,6 +2092,18 @@ document.addEventListener('click',e=>{
     else if(action==='proj-config'){ showProjectConfig(projId); }
   } else { hideCtx(); }
 });
+$('#ctxMenu').addEventListener('keydown',e=>{
+  const items=[...e.currentTarget.querySelectorAll('.ctx-item')]; if(!items.length) return;
+  const at=Math.max(0,items.indexOf(document.activeElement));
+  if(e.key==='ArrowDown'||e.key==='ArrowUp'){
+    e.preventDefault(); items[(at+(e.key==='ArrowDown'?1:-1)+items.length)%items.length].focus();
+  } else if(e.key==='Home'){ e.preventDefault(); items[0].focus(); }
+  else if(e.key==='End'){ e.preventDefault(); items[items.length-1].focus(); }
+  else if(e.key==='Escape'){ e.preventDefault(); hideCtx(true); }
+});
+$('#ctxMenu').addEventListener('focusout',e=>{
+  if(e.relatedTarget&&!e.currentTarget.contains(e.relatedTarget)) hideCtx();
+});
 
 // ---- RENAME MODAL -----------------------------------------------------------
 let _renameId=null;
@@ -1985,17 +2112,15 @@ function showRename(chatId){
   _renameId=chatId; _renameMode='chat';
   const c=state.chats.find(c=>c.id===chatId);
   $('#renameInput').value=c?c.title:'';
-  $('#renameModal').classList.remove('hidden');
-  setTimeout(()=>$('#renameInput').focus(),50);
+  openDialog('#renameModal','#renameInput');
 }
 function showRenameProject(projectId){
   _renameId=projectId; _renameMode='project';
   const p=state.projects.find(p=>p.id===projectId);
   $('#renameInput').value=p?p.name:'';
-  $('#renameModal').classList.remove('hidden');
-  setTimeout(()=>$('#renameInput').focus(),50);
+  openDialog('#renameModal','#renameInput');
 }
-function closeRename(){ $('#renameModal').classList.add('hidden'); _renameId=null; _renameMode='chat'; }
+function closeRename(){ closeDialog('#renameModal'); _renameId=null; _renameMode='chat'; }
 $('#renameClose').onclick=closeRename;
 $('#renameCancel').onclick=closeRename;
 $('#renameOk').onclick=async()=>{
@@ -2005,7 +2130,9 @@ $('#renameOk').onclick=async()=>{
     state.projects=r.projects; renderSessions(); closeRename();
   } else {
     const r=await api('/api/chats/rename',{id:_renameId,title:val});
-    state.chats=r.chats; renderSessions(); closeRename();
+    state.chats=r.chats;
+    if(_renameId===state.currentId) setConversationTitle(val);
+    renderSessions(); closeRename();
   }
 };
 $('#renameInput').addEventListener('keydown',e=>{ if(e.key==='Enter') $('#renameOk').click(); });
@@ -2021,7 +2148,8 @@ async function showProjectPicker(chatId){
      body.innerHTML='<div class="empty-hint md">No projects yet. Create one below.</div>';
   } else {
     state.projects.forEach(p=>{
-      const d=document.createElement('div');
+      const d=document.createElement('button');
+      d.type='button';
       d.className='proj-item-j';
       d.innerHTML='<span class="proj-dot" style="background:'+esc(p.color)+'"></span><span class="proj-name">'+esc(p.name)+'</span>';
       d.onclick=async()=>{
@@ -2032,9 +2160,9 @@ async function showProjectPicker(chatId){
       body.appendChild(d);
     });
   }
-  $('#projectModal').classList.remove('hidden');
+  openDialog('#projectModal','.proj-item-j, #projectModalNewBtn');
 }
-function closeProjectPicker(){ $('#projectModal').classList.add('hidden'); _projPickChatId=null; }
+function closeProjectPicker(){ closeDialog('#projectModal'); _projPickChatId=null; }
 $('#projectModalClose').onclick=closeProjectPicker;
 $('#projectModalCancel').onclick=closeProjectPicker;
 $('#projectModal').addEventListener('click',e=>{ if(e.target.id==='projectModal') closeProjectPicker(); });
@@ -2051,10 +2179,9 @@ function showProjectConfig(projectId){
   const p=state.projects.find(p=>p.id===projectId);
   $('#projConfigPrompt').value=p?(p.system_prompt||''):'';
   $('#projConfigContext').value=p?(p.context||''):'';
-  $('#projConfigModal').classList.remove('hidden');
-  setTimeout(()=>$('#projConfigPrompt').focus(),50);
+  openDialog('#projConfigModal','#projConfigPrompt');
 }
-function closeProjectConfig(){ $('#projConfigModal').classList.add('hidden'); _projConfigId=null; }
+function closeProjectConfig(){ closeDialog('#projConfigModal'); _projConfigId=null; }
 $('#projConfigClose').onclick=closeProjectConfig;
 $('#projConfigCancel').onclick=closeProjectConfig;
 $('#projConfigModal').addEventListener('click',e=>{ if(e.target.id==='projConfigModal') closeProjectConfig(); });
@@ -2070,6 +2197,12 @@ $('#projConfigSave').onclick=async()=>{
 
 // ---- SESSIONS ---------------------------------------------------------------
 function currentTitle(){ const c=state.chats.find(c=>c.id===state.currentId); return c?c.title:'New Chat'; }
+function setConversationTitle(value){
+  let title=(value||'New chat').trim()||'New chat';
+  if(title.toLowerCase()==='new chat') title='New chat';
+  const heading=$('#conversationTitle'); if(heading) heading.textContent=title;
+  document.title=title==='New chat'?'Cagentic':title+' · Cagentic';
+}
 function _highlightSnippet(text, q){
   // esc() first, then wrap matches — never the other way round.
   const safe=esc(text||'');
@@ -2085,12 +2218,19 @@ function renderSearchResults(list){
     : 'No chats match "'+q+'"';
   list.appendChild(meta);
   _searchResults.forEach(r=>{
-    const el=document.createElement('div'); el.className='search-result'+(r.id===state.currentId?' active':'');
+    const el=document.createElement('button'); el.type='button';
+    el.className='search-result'+(r.id===state.currentId?' active':'');
+    if(r.id===state.currentId) el.setAttribute('aria-current','true');
     el.innerHTML='<div class="sr-title">'+_highlightSnippet(r.title,q)+'</div>'+
       (r.snippet?'<div class="sr-snip">'+_highlightSnippet(r.snippet,q)+'</div>':'');
     el.onclick=()=>{ clearChatSearch(); loadChat(r.id); };
     list.appendChild(el);
   });
+}
+function wireDisclosure(el,isOpen,label,onToggle){
+  el.setAttribute('aria-expanded',isOpen?'true':'false');
+  el.setAttribute('aria-label',(isOpen?'Collapse ':'Expand ')+label);
+  el.onclick=onToggle;
 }
 function renderSessions(){
   const list=$('#sessionList'); if(!list) return; list.innerHTML='';
@@ -2104,32 +2244,33 @@ function renderSessions(){
   // --- Projects expandable group ---
   const projGrp=document.createElement('div'); projGrp.className='sess-group';
   const projHead=document.createElement('div'); projHead.className='sess-group-head'+(state._openProjectsRoot?' open':'');
-  projHead.innerHTML='<svg class="ico sm sg-caret" aria-hidden="true"><use href="#i-chevron-right"/></svg><span class="sg-dot" style="background:var(--accent)"></span><span class="sg-name">Projects</span><span class="sg-count">'+state.projects.length+'</span><button class="sg-add" title="New Project">+</button>';
+  projHead.innerHTML='<button class="sg-disclosure" type="button"><svg class="ico sm sg-caret" aria-hidden="true"><use href="#i-chevron-right"/></svg><span class="sg-dot" style="background:var(--accent)"></span><span class="sg-name">Projects</span><span class="sg-count">'+state.projects.length+'</span></button><button class="sg-add" type="button" title="New project" aria-label="New project"><svg class="ico sm" aria-hidden="true"><use href="#i-plus"/></svg></button>';
+  wireDisclosure(projHead.querySelector('.sg-disclosure'),state._openProjectsRoot,'projects',()=>{
+    state._openProjectsRoot=!state._openProjectsRoot; renderSessions();
+  });
   projHead.querySelector('.sg-add').onclick=e=>{ e.stopPropagation(); showNewProjectModal(); };
-  projHead.onclick=e=>{
-    if(e.target.closest('.sg-add')) return;
-    state._openProjectsRoot=!state._openProjectsRoot;
-    renderSessions();
-  };
   projGrp.appendChild(projHead);
-  const projBody=document.createElement('div'); projBody.className='sess-group-chats'+(state._openProjectsRoot?' open':'');
+  const projBody=document.createElement('div'); projBody.id='projectGroups';
+  projBody.className='sess-group-chats'+(state._openProjectsRoot?' open':'');
+  projHead.querySelector('.sg-disclosure').setAttribute('aria-controls',projBody.id);
   if(!state.projects.length){
      projBody.innerHTML='<div class="empty-hint">No projects yet</div>';
   } else {
-    state.projects.forEach(p=>{
+    state.projects.forEach((p,projectIndex)=>{
       const chats=projChats[p.id]||[];
       const isOpen=state._openProjects.has(p.id);
       const pGrp=document.createElement('div'); pGrp.className='sess-group';
       const pHead=document.createElement('div'); pHead.className='sess-group-head'+(isOpen?' open':'');
-      pHead.innerHTML='<svg class="ico sm sg-caret" aria-hidden="true"><use href="#i-chevron-right"/></svg><span class="sg-dot" style="background:'+esc(p.color)+'"></span><span class="sg-name">'+esc(p.name)+'</span><span class="sg-count">'+chats.length+'</span><button class="sg-menu" title="Menu"><svg class="ico sm" aria-hidden="true"><use href="#i-more"/></svg></button>';
-      pHead.querySelector('.sg-menu').onclick=e=>{ e.stopPropagation(); showProjectCtx(e,p.id); };
-      pHead.onclick=e=>{
-        if(e.target.closest('.sg-menu')) return;
+      pHead.innerHTML='<button class="sg-disclosure" type="button"><svg class="ico sm sg-caret" aria-hidden="true"><use href="#i-chevron-right"/></svg><span class="sg-dot" style="background:'+esc(p.color)+'"></span><span class="sg-name">'+esc(p.name)+'</span><span class="sg-count">'+chats.length+'</span></button><button class="sg-menu" type="button" title="Project menu" aria-label="Open menu for '+esc(p.name)+'" aria-haspopup="menu" aria-expanded="false"><svg class="ico sm" aria-hidden="true"><use href="#i-more"/></svg></button>';
+      wireDisclosure(pHead.querySelector('.sg-disclosure'),isOpen,p.name,()=>{
         if(state._openProjects.has(p.id)) state._openProjects.delete(p.id); else state._openProjects.add(p.id);
         renderSessions();
-      };
+      });
+      pHead.querySelector('.sg-menu').onclick=e=>{ e.stopPropagation(); showProjectCtx(e,p.id); };
       pGrp.appendChild(pHead);
-      const pBody=document.createElement('div'); pBody.className='sess-group-chats'+(isOpen?' open':'');
+      const pBody=document.createElement('div'); pBody.id='projectChats'+projectIndex;
+      pBody.className='sess-group-chats'+(isOpen?' open':'');
+      pHead.querySelector('.sg-disclosure').setAttribute('aria-controls',pBody.id);
       chats.forEach(c=>{ pBody.appendChild(makeChatItem(c)); });
       if(!chats.length) pBody.innerHTML='<div class="empty-hint">No chats</div>';
       pGrp.appendChild(pBody);
@@ -2141,13 +2282,15 @@ function renderSessions(){
   // --- Chats expandable group ---
   const chatGrp=document.createElement('div'); chatGrp.className='sess-group';
   const chatHead=document.createElement('div'); chatHead.className='sess-group-head'+(state._openUnaffiliated!==false?' open':'');
-  chatHead.innerHTML='<svg class="ico sm sg-caret" aria-hidden="true"><use href="#i-chevron-right"/></svg><span class="sg-dot" style="background:var(--text-dim)"></span><span class="sg-name">Chats</span><span class="sg-count">'+unaffiliated.length+'</span>';
-  chatHead.onclick=()=>{
+  chatHead.innerHTML='<button class="sg-disclosure" type="button"><svg class="ico sm sg-caret" aria-hidden="true"><use href="#i-chevron-right"/></svg><span class="sg-dot" style="background:var(--text-dim)"></span><span class="sg-name">Chats</span><span class="sg-count">'+unaffiliated.length+'</span></button>';
+  wireDisclosure(chatHead.querySelector('.sg-disclosure'),state._openUnaffiliated!==false,'chats',()=>{
     state._openUnaffiliated=state._openUnaffiliated===false?true:false;
     renderSessions();
-  };
+  });
   chatGrp.appendChild(chatHead);
-  const chatBody=document.createElement('div'); chatBody.className='sess-group-chats'+(state._openUnaffiliated!==false?' open':'');
+  const chatBody=document.createElement('div'); chatBody.id='unfiledChats';
+  chatBody.className='sess-group-chats'+(state._openUnaffiliated!==false?' open':'');
+  chatHead.querySelector('.sg-disclosure').setAttribute('aria-controls',chatBody.id);
   if(!unaffiliated.length){
     chatBody.innerHTML='<div class="empty-hint">No chats yet</div>';
   } else {
@@ -2158,7 +2301,7 @@ function renderSessions(){
 }
 function makeChatItem(c){
   const item=document.createElement('div'); item.className='chat-item-j'+(c.id===state.currentId?' active':'');
-  item.innerHTML='<span class="ci-title">'+esc(c.title)+'</span><button class="ci-menu-btn" title="Menu"><svg class="ico sm" aria-hidden="true"><use href="#i-more"/></svg></button>';
+  item.innerHTML='<button class="ci-title" type="button"'+(c.id===state.currentId?' aria-current="page"':'')+'>'+esc(c.title)+'</button><button class="ci-menu-btn" type="button" title="Chat menu" aria-label="Open menu for '+esc(c.title)+'" aria-haspopup="menu" aria-expanded="false"><svg class="ico sm" aria-hidden="true"><use href="#i-more"/></svg></button>';
   item.querySelector('.ci-title').onclick=()=>loadChat(c.id);
   item.querySelector('.ci-menu-btn').onclick=e=>{ e.stopPropagation(); showCtx(e,c.id); };
   return item;
@@ -2166,6 +2309,7 @@ function makeChatItem(c){
 function setCurrent(cur){
   state.currentId=cur.id;
   _userMsgIdx=0;
+  setConversationTitle(cur.title);
   const s=$('#jSession'); if(s) s.textContent=(cur.id||'--------').slice(0,8).toUpperCase();
   setOrbLabel(cur.title||'New Chat');
   clearLog();
@@ -2182,7 +2326,7 @@ function setCurrent(cur){
       if(hasContent){ row=addAssistant(html,m.tools); renderPanels(m.content); idx++; }
       else { (m.tools||[]).forEach(t=>{ const tr=addToolRow({name:t},true); if(tr) tr.style.setProperty('--i',idx++); }); }
     }
-    if(row) row.style.setProperty('--i',idx-1);
+    if(row) row.style.setProperty('--i',Math.min(idx-1,5));
   });
   scrollDown(true);
 }
@@ -2200,45 +2344,114 @@ async function boot(){
   setModelBadge(b.model);
   const vs=$('#versionSpan'); if(vs) vs.textContent=b.version||'--';
   renderModelMenu();
-  renderSessions(); setCurrent(b.current);
+  setCurrent(b.current); renderSessions();
 }
 async function newChat(){
-  const r=await api('/api/chats/new',{}); state.chats=r.chats; renderSessions(); setCurrent(r.current);
+  const r=await api('/api/chats/new',{}); state.chats=r.chats; setCurrent(r.current); renderSessions();
   if(r.current&&r.current.model){state.settings.model=r.current.model;setModelBadge(r.current.model);renderModelMenu();}
   clearViewport(); closeSessions(); input.focus();
 }
 async function loadChat(id){
-  const r=await api('/api/chats/load',{id}); state.chats=r.chats; clearViewport(); renderSessions(); setCurrent(r.current); if(r.current&&r.current.model){state.settings.model=r.current.model;setModelBadge(r.current.model);renderModelMenu();} closeSessions();
+  const r=await api('/api/chats/load',{id}); state.chats=r.chats; clearViewport(); setCurrent(r.current); renderSessions(); if(r.current&&r.current.model){state.settings.model=r.current.model;setModelBadge(r.current.model);renderModelMenu();} closeSessions();
 }
 async function deleteChat(id){
-  const r=await api('/api/chats/delete',{id}); state.chats=r.chats; state.projects=r.projects||state.projects; renderSessions(); setCurrent(r.current); closeSessions();
+  const r=await api('/api/chats/delete',{id}); state.chats=r.chats; state.projects=r.projects||state.projects; setCurrent(r.current); renderSessions(); closeSessions();
 }
 async function refreshChats(){
-  const b=await api('/api/bootstrap'); state.chats=b.chats; state.projects=b.projects||[]; renderSessions(); setOrbLabel(b.current.title||'New Chat');
+  const b=await api('/api/bootstrap'); state.chats=b.chats; state.projects=b.projects||[];
+  renderSessions(); setConversationTitle(b.current.title); setOrbLabel(b.current.title||'New Chat');
 }
 
 // ---- MODEL SWITCHER ---------------------------------------------------------
 function renderModelMenu(){
   const menu=$('#modelMenu'); const models=state.settings.models||[];
-  if(!models.length){ menu.innerHTML='<div class="mm-item">'+esc(state.settings.model||'no models')+'</div>'; return; }
-  menu.innerHTML=models.map(m=>'<div class="mm-item'+(m===state.settings.model?' active':'')+'" data-m="'+esc(m)+'">'+
-    '<span class="mm-tick">'+(m===state.settings.model?'✓':'')+'</span>'+esc(m)+'</div>').join('');
+  if(!models.length){ menu.innerHTML='<div class="mm-item">'+esc(state.settings.model||'No models available')+'</div>'; return; }
+  menu.innerHTML=models.map(m=>'<button class="mm-item'+(m===state.settings.model?' active':'')+'" type="button" role="menuitemradio" aria-checked="'+(m===state.settings.model?'true':'false')+'" data-m="'+esc(m)+'">'+
+    '<span class="mm-tick" aria-hidden="true">'+(m===state.settings.model?'<svg class="ico sm"><use href="#i-check"/></svg>':'')+'</span>'+esc(m)+'</button>').join('');
   menu.querySelectorAll('.mm-item').forEach(it=>{ if(it.dataset.m) it.onclick=()=>switchModel(it.dataset.m); });
 }
 async function switchModel(m){
-  $('#modelMenu').classList.add('hidden');
+  closeModelMenu();
   const r=await api('/api/model',{model:m});
   state.settings.model=r.model; setModelBadge(r.model); renderModelMenu();
   addNote('Model switched to '+r.model);
 }
-$('#modelSwitch').onclick=e=>{ e.stopPropagation(); $('#modelMenu').classList.toggle('hidden'); };
-document.addEventListener('click',()=>$('#modelMenu').classList.add('hidden'));
+function closeModelMenu(){
+  $('#modelMenu').classList.add('hidden');
+  $('#modelSwitch').setAttribute('aria-expanded','false');
+}
+function toggleModelMenu(){
+  const menu=$('#modelMenu'), opening=menu.classList.contains('hidden');
+  menu.classList.toggle('hidden',!opening);
+  $('#modelSwitch').setAttribute('aria-expanded',opening?'true':'false');
+  if(opening) requestAnimationFrame(()=>menu.querySelector('.mm-item.active, .mm-item')?.focus());
+}
+$('#modelSwitch').onclick=e=>{ e.stopPropagation(); toggleModelMenu(); };
+$('#modelSwitch').addEventListener('keydown',e=>{
+  if(e.target!==e.currentTarget) return;
+  if(e.key==='Enter'||e.key===' '||e.key==='ArrowDown'){
+    e.preventDefault(); if($('#modelMenu').classList.contains('hidden')) toggleModelMenu();
+  }
+});
+document.addEventListener('click',closeModelMenu);
 $('#modelMenu').onclick=e=>e.stopPropagation();
+$('#modelMenu').addEventListener('keydown',e=>{
+  const items=[...e.currentTarget.querySelectorAll('.mm-item[data-m]')]; if(!items.length) return;
+  const at=Math.max(0,items.indexOf(document.activeElement));
+  if(e.key==='ArrowDown'||e.key==='ArrowUp'){
+    e.preventDefault(); items[(at+(e.key==='ArrowDown'?1:-1)+items.length)%items.length].focus();
+  } else if(e.key==='Home'){ e.preventDefault(); items[0].focus(); }
+  else if(e.key==='End'){ e.preventDefault(); items[items.length-1].focus(); }
+  else if(e.key==='Escape'){ e.preventDefault(); closeModelMenu(); $('#modelSwitch').focus(); }
+});
 
 // ---- DRAWER / MODAL ---------------------------------------------------------
-function openSessions(){ $('#sessionsPanel').classList.add('open'); $('#backdrop').classList.remove('hidden'); }
-function closeSessions(){ $('#sessionsPanel').classList.remove('open'); $('#backdrop').classList.add('hidden'); }
+const SIDEBAR_MEDIA=window.matchMedia('(min-width: 901px)');
+let _sidebarCollapsed=false;
+try{ _sidebarCollapsed=localStorage.getItem('cagentic_sidebar_collapsed')==='1'; }catch(e){}
+function _saveSidebarState(){
+  try{ localStorage.setItem('cagentic_sidebar_collapsed',_sidebarCollapsed?'1':'0'); }catch(e){}
+}
+function syncSidebarUI(){
+  const panel=$('#sessionsPanel'), backdrop=$('#backdrop'), app=$('#app');
+  if(!panel||!backdrop||!app) return;
+  const desktop=SIDEBAR_MEDIA.matches;
+  document.body.classList.toggle('sidebar-collapsed',desktop&&_sidebarCollapsed);
+  if(desktop){ panel.classList.remove('open'); backdrop.classList.add('hidden'); }
+  const open=desktop?!_sidebarCollapsed:panel.classList.contains('open');
+  $('#logsBtn').setAttribute('aria-expanded',open?'true':'false');
+  const dialogOpen=!!_visibleDialog();
+  const drawerOpen=!desktop&&open;
+  panel.inert=dialogOpen||!open;
+  app.inert=dialogOpen||drawerOpen;
+  $('#windowLayer').inert=dialogOpen||drawerOpen;
+  $('#restorePill').inert=dialogOpen||drawerOpen;
+  $('#ctxMenu').inert=dialogOpen;
+  if(!desktop) backdrop.classList.toggle('hidden',!open);
+  requestAnimationFrame(clampHudWindows);
+}
+function openSessions(){
+  if(SIDEBAR_MEDIA.matches){ _sidebarCollapsed=false; _saveSidebarState(); }
+  else $('#sessionsPanel').classList.add('open');
+  syncSidebarUI();
+}
+function closeSessions(collapseDesktop=false){
+  if(SIDEBAR_MEDIA.matches){
+    if(collapseDesktop){ _sidebarCollapsed=true; _saveSidebarState(); }
+  } else $('#sessionsPanel').classList.remove('open');
+  syncSidebarUI();
+}
+function toggleSessions(){
+  if(SIDEBAR_MEDIA.matches){
+    if(_sidebarCollapsed) openSessions(); else closeSessions(true);
+  } else if($('#sessionsPanel').classList.contains('open')) closeSessions(); else openSessions();
+}
+if(SIDEBAR_MEDIA.addEventListener) SIDEBAR_MEDIA.addEventListener('change',syncSidebarUI);
+else SIDEBAR_MEDIA.addListener(syncSidebarUI);
+window.addEventListener('resize',()=>requestAnimationFrame(clampHudWindows));
 function openSettings(){
+  let returnFocus=document.activeElement;
+  if(!SIDEBAR_MEDIA.matches&&$('#sessionsPanel').contains(returnFocus)) returnFocus=$('#configBtn');
   closeSessions();
   const s=state.settings, sel=$('#setModel'); sel.innerHTML='';
   (s.models&&s.models.length?s.models:[s.model]).forEach(m=>{
@@ -2253,9 +2466,9 @@ function openSettings(){
   $('#setDesktopNotifications').checked=!!(s.desktop_notifications!==false);
   $('#setSysPrompt').value=s.system_prompt||'';
   populateVoiceSelect();
-  $('#settingsModal').classList.remove('hidden');
+  openDialog('#settingsModal','#setModel',returnFocus);
 }
-function closeSettings(){ $('#settingsModal').classList.add('hidden'); }
+function closeSettings(){ closeDialog('#settingsModal'); }
 async function saveSettings(){
   state.voiceName=$('#setVoice').value||'';
   try{ localStorage.setItem('cagentic_voice',state.voiceName); }catch(e){}
@@ -2282,7 +2495,17 @@ function toggleVoiceOut(){
 }
 
 // ---- SEND -------------------------------------------------------------------
-function setBusy(on){ state.busy=on; sendBtn.disabled=on; input.disabled=on; const bl=$('#busyLabel'); if(bl){bl.textContent='\u25CF '+_curVerb+'\u2026';bl.classList.toggle('hidden',!on);} $('#stopBtn').classList.toggle('hidden',!on); }
+function syncComposerState(){
+  const ready=_attachments.some(a=>a.path&&!a.error&&!a.pending);
+  const uploading=_attachments.some(a=>a.pending);
+  sendBtn.disabled=state.busy||uploading||(!input.value.trim()&&!ready);
+}
+function setBusy(on){
+  state.busy=on; input.disabled=on; log.setAttribute('aria-busy',on?'true':'false');
+  const bl=$('#busyLabel');
+  if(bl){ bl.textContent=_curVerb+'\u2026'; bl.classList.toggle('hidden',!on); }
+  $('#stopBtn').classList.toggle('hidden',!on); syncComposerState();
+}
 function finishTurn(){ setBusy(false); const ts=$('#tokenStats'); if(ts) ts.classList.add('hidden'); input.focus(); refreshChats(); }
 let _abortCtrl=null;
 async function abortGeneration(){
@@ -2326,8 +2549,8 @@ async function send(text){
   _abortCtrl=new AbortController();
   let res;
   try{ res=await fetch('/api/chat',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({message:text}),signal:_abortCtrl.signal}); }
-  catch(e){ if(e.name==='AbortError'){finishTurn();return;} clearThinking(); addNote('CONNECTION FAILURE',true); finishTurn(); return; }
-  if(!res||!res.ok||!res.body){ clearThinking(); addNote('REQUEST FAILED: '+(res?res.status:'no response'),true); finishTurn(); return; }
+  catch(e){ if(e.name==='AbortError'){finishTurn();return;} clearThinking(); addNote('Connection lost. Try again.',true); finishTurn(); return; }
+  if(!res||!res.ok||!res.body){ clearThinking(); addNote('Request failed ('+(res?res.status:'no response')+').',true); finishTurn(); return; }
   try{
     await readSSE(res, handle);
   }catch(e){ console.error('Stream read error:',e); }
@@ -2364,6 +2587,7 @@ function renderAttachments(){
     chip.querySelector('.ac-x').onclick=()=>{ _attachments=_attachments.filter(x=>x!==a); renderAttachments(); };
     bar.appendChild(chip);
   });
+  syncComposerState();
 }
 function _readAsBase64(file){
   return new Promise((resolve,reject)=>{
@@ -2452,8 +2676,15 @@ $('#chatSearchClear').onclick=clearChatSearch;
 // ---- THEME ------------------------------------------------------------------
 // Three states so "follow the OS" stays reachable after an explicit choice.
 const THEMES=['auto','dark','light'];
+const THEME_MEDIA=window.matchMedia('(prefers-color-scheme: dark)');
+function syncThemeChrome(t){
+  const meta=document.querySelector('meta[name="theme-color"]'); if(!meta) return;
+  const dark=t==='dark'||(t==='auto'&&THEME_MEDIA.matches);
+  meta.content=dark?'#151118':'#f7f4f9';
+}
 function applyTheme(t){
   document.documentElement.setAttribute('data-theme',t);
+  syncThemeChrome(t);
   const btn=$('#themeBtn');
   if(btn){
     const label=t==='auto'?'Theme: follow system':t==='dark'?'Theme: dark':'Theme: light';
@@ -2471,6 +2702,11 @@ function cycleTheme(){
   try{ saved=localStorage.getItem('cagentic_theme')||'auto'; }catch(e){}
   applyTheme(THEMES.includes(saved)?saved:'auto');
 })();
+if(THEME_MEDIA.addEventListener){
+  THEME_MEDIA.addEventListener('change',()=>{
+    if((document.documentElement.dataset.theme||'auto')==='auto') syncThemeChrome('auto');
+  });
+}
 
 // ---- COMPOSER + WIRING ------------------------------------------------------
 function autoGrow(){ input.style.height='auto'; input.style.height=Math.min(input.scrollHeight,130)+'px'; }
@@ -2478,21 +2714,23 @@ function submit(){
   const typed=input.value.trim();
   const t=consumeAttachments(typed);
   if(!t||state.busy)return;
-  input.value=''; autoGrow(); send(t);
+  input.value=''; autoGrow(); syncComposerState(); send(t);
 }
-input.addEventListener('input', autoGrow);
+input.addEventListener('input',()=>{ autoGrow(); syncComposerState(); });
 input.addEventListener('keydown', e=>{ if(e.key==='Enter'&&!e.shiftKey){e.preventDefault();submit();} });
 sendBtn.onclick=submit;
 $('#stopBtn').onclick=abortGeneration;
 $('#micBtn').onclick=toggleMic;
-$('#logsBtn').onclick=openSessions;
+$('#logsBtn').onclick=toggleSessions;
 $('#newMissionBtn').onclick=newChat;
 $('#configBtn').onclick=openSettings;
 $('#themeBtn').onclick=cycleTheme;
 $('#jumpBtn').onclick=()=>{ scrollDown(true); $('#jumpBtn').classList.add('hidden'); };
 $('#voiceOutBtn').onclick=toggleVoiceOut;
 
-$('#closeSessionsBtn').onclick=closeSessions;
+$('#closeSessionsBtn').onclick=()=>closeSessions(true);
+$('#sidebarNewChatBtn').onclick=newChat;
+$('#sidebarSettingsBtn').onclick=openSettings;
 $('#newProjectModalClose').onclick=closeNewProjectModal;
 $('#newProjectCancel').onclick=closeNewProjectModal;
 $('#newProjectOk').onclick=async()=>{
@@ -2509,6 +2747,9 @@ $('#saveSettings').onclick=saveSettings;
 $('#setTemp').addEventListener('input',e=>{$('#tempVal').textContent=(+e.target.value).toFixed(2);});
 $('#settingsModal').addEventListener('click',e=>{if(e.target.id==='settingsModal')closeSettings();});
 document.addEventListener('keydown',e=>{
+  // Dialogs own the keyboard while open; global chat shortcuts must not
+  // create a conversation or open another surface behind the modal.
+  if(_visibleDialog()&&e.key!=='Escape') return;
   if((e.ctrlKey||e.metaKey)&&e.key==='k'){ e.preventDefault(); newChat(); return; }
   if((e.ctrlKey||e.metaKey)&&e.key==='m'){ e.preventDefault(); toggleMic(); return; }
   if((e.ctrlKey||e.metaKey)&&e.key==='s'){ e.preventDefault(); openSettings(); return; }
@@ -2517,14 +2758,15 @@ document.addEventListener('keydown',e=>{
     // Stop takes priority: mid-generation, Escape should mean "stop", which is
     // what it means in both competitors.
     if(state.busy){ abortGeneration(); return; }
-    if(!$('#confirmModal').classList.contains('hidden')){ $('#confirmModal').classList.add('hidden'); _confirmCb=null; }
+    if(!$('#confirmModal').classList.contains('hidden')){ closeDialog('#confirmModal'); _confirmCb=null; }
     else if(!$('#newProjectModal').classList.contains('hidden')) closeNewProjectModal();
     else if(!$('#renameModal').classList.contains('hidden')) closeRename();
     else if(!$('#projectModal').classList.contains('hidden')) closeProjectPicker();
     else if(!$('#projConfigModal').classList.contains('hidden')) closeProjectConfig();
     else if(!$('#settingsModal').classList.contains('hidden')) closeSettings();
+    else if(!$('#ctxMenu').classList.contains('hidden')) hideCtx(true);
     else if($('#sessionsPanel').classList.contains('open')) closeSessions();
-    else $('#modelMenu').classList.add('hidden');
+    else closeModelMenu();
   }
 });
 
@@ -2534,4 +2776,6 @@ try{
   if(localStorage.getItem('cagentic_voiceout')==='1') toggleVoiceOut();
 }catch(e){}
 
+syncSidebarUI();
+syncComposerState();
 boot();

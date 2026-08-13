@@ -4,10 +4,13 @@
 <meta charset="utf-8" />
 <meta name="viewport" content="width=device-width, initial-scale=1" />
 <meta name="cagentic-token" content="{{CAGENTIC_TOKEN}}" />
+<meta name="color-scheme" content="dark light" />
+<meta name="theme-color" content="#151118" />
 <title>Cagentic</title>
 <link rel="stylesheet" href="/app.css" />
 </head>
 <body>
+<a class="skip-link" href="#mainContent">Skip to conversation</a>
 <!-- Icon sprite. One consistent 24x24 / 1.5px-stroke set replacing the mix of
      HTML entities and emoji (►, ⋮, 🗑, ⚡, ⚙, ☽) that were doing icon duty —
      inconsistent weight and colour is the clearest hobby-project signal, and
@@ -36,6 +39,7 @@
   <symbol id="i-more" viewBox="0 0 24 24"><circle cx="12" cy="5" r="1.2"/><circle cx="12" cy="12" r="1.2"/><circle cx="12" cy="19" r="1.2"/></symbol>
   <symbol id="i-arrow-down" viewBox="0 0 24 24"><path d="M12 5v14m0 0-6-6m6 6 6-6"/></symbol>
   <symbol id="i-warning" viewBox="0 0 24 24"><path d="M12 4 2.5 20h19zM12 10v4M12 17.5v.01"/></symbol>
+  <symbol id="i-spark" viewBox="0 0 24 24"><path d="M12 3c.7 5.1 3.9 8.3 9 9-5.1.7-8.3 3.9-9 9-.7-5.1-3.9-8.3-9-9 5.1-.7 8.3-3.9 9-9z"/></symbol>
 </defs></svg>
 
 <div id="app">
@@ -45,41 +49,47 @@
   <!-- One header row, not two. A chat app's chrome should get out of the way
        of the conversation; the clock, the date, the session id and the
        [bracket] framing were all HUD decoration rather than information. -->
-  <header class="hud-header">
+  <header class="hud-header" aria-label="Conversation controls">
     <div class="hdr-left">
-      <button class="icon-btn hdr-icon" id="logsBtn" title="Chats (Ctrl+F)" aria-label="Chats">
+      <button class="icon-btn hdr-icon" id="logsBtn" type="button" title="Toggle chats (Ctrl+F)" aria-label="Toggle chats" aria-controls="sessionsPanel" aria-expanded="false">
         <svg class="ico" aria-hidden="true"><use href="#i-sidebar"/></svg>
       </button>
-      <span class="wordmark">Cagentic</span>
-      <div class="model-switch" id="modelSwitch" title="Switch model">
-        <span class="ms-dot" id="msDot" aria-hidden="true"></span>
-        <span class="ms-name" id="msName">&#8230;</span>
-        <svg class="ico ms-caret" aria-hidden="true"><use href="#i-chevron-down"/></svg>
-        <div class="model-menu hidden" id="modelMenu"></div>
+      <span class="wordmark"><span class="brand-mark mini" aria-hidden="true"><svg class="ico"><use href="#i-spark"/></svg></span>Cagentic</span>
+      <div class="model-control">
+        <button class="model-switch" id="modelSwitch" type="button" title="Switch model" aria-haspopup="menu" aria-controls="modelMenu" aria-expanded="false">
+          <span class="ms-dot" id="msDot" aria-hidden="true"></span>
+          <span class="ms-name" id="msName">&#8230;</span>
+          <svg class="ico ms-caret" aria-hidden="true"><use href="#i-chevron-down"/></svg>
+        </button>
+        <div class="model-menu hidden" id="modelMenu" role="menu" aria-label="Available models"></div>
       </div>
     </div>
+    <div class="conversation-heading">
+      <h1 id="conversationTitle">New chat</h1>
+      <span>Local AI assistant</span>
+    </div>
     <div class="hdr-right">
-      <button class="icon-btn hdr-icon" id="newMissionBtn" title="New chat (Ctrl+K)" aria-label="New chat">
+      <button class="icon-btn hdr-icon" id="newMissionBtn" type="button" title="New chat (Ctrl+K)" aria-label="New chat">
         <svg class="ico" aria-hidden="true"><use href="#i-plus"/></svg>
       </button>
-      <button class="icon-btn hdr-icon toggle-btn" id="voiceOutBtn" title="Read replies aloud" aria-label="Read replies aloud" aria-pressed="false">
+      <button class="icon-btn hdr-icon toggle-btn" id="voiceOutBtn" type="button" title="Read replies aloud" aria-label="Read replies aloud" aria-pressed="false">
         <svg class="ico" aria-hidden="true"><use href="#i-volume"/></svg>
       </button>
-      <button class="icon-btn hdr-icon" id="themeBtn" title="Switch theme" aria-label="Switch theme">
+      <button class="icon-btn hdr-icon" id="themeBtn" type="button" title="Switch theme" aria-label="Switch theme">
         <svg class="ico" aria-hidden="true"><use href="#i-theme"/></svg>
       </button>
-      <button class="icon-btn hdr-icon" id="configBtn" title="Settings" aria-label="Settings">
+      <button class="icon-btn hdr-icon" id="configBtn" type="button" title="Settings (Ctrl+S)" aria-label="Settings">
         <svg class="ico" aria-hidden="true"><use href="#i-settings"/></svg>
       </button>
     </div>
   </header>
   <span id="jSession" hidden></span>
 
-  <main class="main-area">
+  <main class="main-area" id="mainContent" tabindex="-1">
     <div class="chat-stage">
       <div class="center-stack" id="centerStack">
-        <div id="log" class="chat-log"></div>
-        <button id="jumpBtn" class="jump-btn hidden" title="Jump to latest">
+        <div id="log" class="chat-log" role="region" aria-label="Conversation"></div>
+        <button id="jumpBtn" class="jump-btn hidden" type="button" title="Jump to latest" aria-label="Jump to latest message">
           <svg class="ico sm" aria-hidden="true"><use href="#i-arrow-down"/></svg>
           <span>Latest</span>
         </button>
@@ -89,37 +99,40 @@
 
   <div id="windowLayer"></div>
   <div id="restorePill" class="restore-pill" style="display:none">
-    <svg class="ico sm restore-pill-icon" aria-hidden="true"><use href="#i-chevron-right"/></svg><span class="restore-pill-count">0</span> panels
-    <div class="restore-dropdown" id="restoreDropdown"></div>
+    <button id="restorePillBtn" class="restore-pill-trigger" type="button" aria-haspopup="menu" aria-controls="restoreDropdown" aria-expanded="false">
+      <svg class="ico sm restore-pill-icon" aria-hidden="true"><use href="#i-chevron-right"/></svg><span class="restore-pill-count">0</span> panels
+    </button>
+    <div class="restore-dropdown" id="restoreDropdown" role="menu" aria-label="Closed panels"></div>
   </div>
 
-  <div class="cmd-area">
+  <section class="cmd-area" aria-label="Message composer">
     <div id="attachBar" class="attach-bar hidden"></div>
     <div class="cmd-box" id="cmdBox">
-      <button id="attachBtn" class="icon-action" title="Attach files (or drag & drop / paste)" aria-label="Attach files">
+      <button id="attachBtn" class="icon-action" type="button" title="Attach files (or drag & drop / paste)" aria-label="Attach files">
         <svg class="ico" aria-hidden="true"><use href="#i-attach"/></svg>
       </button>
       <input id="fileInput" type="file" multiple hidden />
-      <textarea id="input" rows="1" placeholder="Type a message&#8230;"></textarea>
-      <button id="micBtn" class="icon-action" title="Voice input" aria-label="Voice input">
+      <label class="sr-only" for="input">Message Cagentic</label>
+      <textarea id="input" rows="1" placeholder="Message Cagentic&#8230;" aria-describedby="composerHint"></textarea>
+      <button id="micBtn" class="icon-action" type="button" title="Voice input (Ctrl+M)" aria-label="Voice input">
         <svg class="ico" aria-hidden="true"><use href="#i-mic"/></svg>
       </button>
-      <button id="send" class="exec-btn" title="Send (Enter)">
+      <button id="send" class="exec-btn" type="button" title="Send (Enter)" aria-label="Send message">
         <svg class="ico" aria-hidden="true"><use href="#i-send"/></svg>
         <span class="exec-label">Send</span>
       </button>
-      <button id="stopBtn" class="exec-btn stop-btn hidden" title="Stop generating (Esc)">
+      <button id="stopBtn" class="exec-btn stop-btn hidden" type="button" title="Stop generating (Esc)" aria-label="Stop generating">
         <svg class="ico" aria-hidden="true"><use href="#i-stop"/></svg>
         <span class="exec-label">Stop</span>
       </button>
     </div>
     <div class="cmd-footer">
-      <span>Cagentic <span id="versionSpan">--</span></span>
-      <span id="hintText">Enter to send &bull; Shift+Enter newline &bull; Ctrl+K new chat &bull; Ctrl+F search</span>
-      <span id="busyLabel" class="busy-label hidden">Thinking&#8230;</span>
+      <span id="composerHint" class="composer-note">Cagentic can make mistakes. Check important information.</span>
+      <span id="hintText" class="keyboard-hint">Enter to send &bull; Shift+Enter for a new line</span>
+      <span id="busyLabel" class="busy-label hidden" role="status" aria-live="polite">Thinking&#8230;</span>
       <span id="tokenStats" class="token-stats hidden"></span>
     </div>
-  </div>
+  </section>
 
   <div id="dropOverlay" class="drop-overlay hidden">
     <div class="drop-card">
@@ -131,184 +144,207 @@
 </div>
 
 <!-- Sessions drawer -->
-<div id="sessionsPanel" class="sessions-panel">
+<aside id="sessionsPanel" class="sessions-panel" aria-label="Chats">
   <div class="sessions-head">
-    <span class="panel-hdr">Chats</span>
-    <button id="closeSessionsBtn" class="icon-btn"><svg class="ico" aria-hidden="true"><use href="#i-close"/></svg></button>
+    <div class="brand-lockup">
+      <span class="brand-mark" aria-hidden="true"><svg class="ico"><use href="#i-spark"/></svg></span>
+      <span><strong>Cagentic</strong><small>Personal AI workspace</small></span>
+    </div>
+    <button id="closeSessionsBtn" class="icon-btn" type="button" title="Collapse sidebar" aria-label="Collapse chats"><svg class="ico" aria-hidden="true"><use href="#i-sidebar"/></svg></button>
   </div>
+  <button id="sidebarNewChatBtn" class="sidebar-new-chat" type="button">
+    <svg class="ico" aria-hidden="true"><use href="#i-plus"/></svg>
+    <span>New chat</span>
+    <kbd>&#8984; K</kbd>
+  </button>
   <div class="sessions-search">
     <svg class="ico sm" aria-hidden="true"><use href="#i-search"/></svg>
-    <input id="chatSearch" type="search" placeholder="Search chats&#8230;" autocomplete="off" spellcheck="false" />
-    <button id="chatSearchClear" class="icon-btn sm hidden" title="Clear search"><svg class="ico" aria-hidden="true"><use href="#i-close"/></svg></button>
+    <label class="sr-only" for="chatSearch">Search chats</label>
+    <input id="chatSearch" type="search" placeholder="Search chats" autocomplete="off" spellcheck="false" />
+    <button id="chatSearchClear" class="icon-btn sm hidden" type="button" title="Clear search" aria-label="Clear chat search"><svg class="ico" aria-hidden="true"><use href="#i-close"/></svg></button>
   </div>
+  <div class="sidebar-section-head"><span>Conversations</span><span>Recent</span></div>
   <div id="sessionList" class="session-list"></div>
-</div>
+  <div class="sidebar-foot">
+    <button id="sidebarSettingsBtn" class="sidebar-utility" type="button">
+      <svg class="ico" aria-hidden="true"><use href="#i-settings"/></svg>
+      <span>Settings</span>
+    </button>
+    <div class="gateway-status" title="This gateway runs locally">
+      <span class="gateway-status-dot" aria-hidden="true"></span>
+      <span>Local gateway</span>
+      <span class="gateway-version">v<span id="versionSpan">--</span></span>
+    </div>
+  </div>
+</aside>
 
 <div id="backdrop" class="backdrop hidden"></div>
 
 <!-- Settings modal -->
-<div id="settingsModal" class="modal hidden">
+<div id="settingsModal" class="modal hidden" role="dialog" aria-modal="true" aria-labelledby="settingsTitle">
   <div class="modal-card">
     <div class="modal-head">
-      <span class="panel-hdr">Settings</span>
-      <button id="closeSettings" class="icon-btn"><svg class="ico" aria-hidden="true"><use href="#i-close"/></svg></button>
+      <span class="panel-hdr" id="settingsTitle">Settings</span>
+      <button id="closeSettings" class="icon-btn" type="button" aria-label="Close settings"><svg class="ico" aria-hidden="true"><use href="#i-close"/></svg></button>
     </div>
     <div class="modal-body">
       <div class="field">
-        <span class="field-label">Model</span>
+        <label class="field-label" for="setModel">Model</label>
         <select id="setModel"></select>
       </div>
       <div class="field">
-        <span class="field-label">Your name</span>
+        <label class="field-label" for="setName">Your name</label>
         <input id="setName" type="text" placeholder="Your name" />
       </div>
       <div class="field">
-        <span class="field-label">Temperature &nbsp;<em id="tempVal">0.40</em></span>
+        <label class="field-label" for="setTemp">Temperature &nbsp;<em id="tempVal">0.40</em></label>
         <input id="setTemp" type="range" min="0" max="1.5" step="0.05" />
       </div>
       <div class="field">
-        <span class="field-label">Voice (TTS)</span>
+        <label class="field-label" for="setVoice">Voice (TTS)</label>
         <select id="setVoice"></select>
       </div>
       <div class="field row">
-        <span class="field-label">Stream responses</span>
+        <label class="field-label" for="setStream">Stream responses</label>
         <label class="toggle"><input id="setStream" type="checkbox" /><span></span></label>
       </div>
       <div class="field row">
-        <span class="field-label">Auto-approve tools</span>
+        <label class="field-label" for="setYolo">Auto-approve tools</label>
         <label class="toggle"><input id="setYolo" type="checkbox" /><span></span></label>
       </div>
       <hr class="settings-divider" />
       <div class="section-label">Gateway</div>
       <div class="field">
-        <span class="field-label">Port</span>
+        <label class="field-label" for="setGwPort">Port</label>
         <input id="setGwPort" type="number" min="1" max="65535" placeholder="8700" />
       </div>
       <div class="field row">
-        <span class="field-label">Auto-start on launch</span>
+        <label class="field-label" for="setGwAuto">Auto-start on launch</label>
         <label class="toggle"><input id="setGwAuto" type="checkbox" /><span></span></label>
       </div>
       <div class="field-hint">Port takes effect next launch. Auto-start can be toggled anytime.</div>
       <hr class="settings-divider" />
       <div class="section-label">Proactive assistant</div>
       <div class="field row">
-        <span class="field-label">Monitor schedule and deadlines</span>
+        <label class="field-label" for="setProactive">Monitor schedule and deadlines</label>
         <label class="toggle"><input id="setProactive" type="checkbox" /><span></span></label>
       </div>
       <div class="field row">
-        <span class="field-label">Desktop notifications</span>
+        <label class="field-label" for="setDesktopNotifications">Desktop notifications</label>
         <label class="toggle"><input id="setDesktopNotifications" type="checkbox" /><span></span></label>
       </div>
       <hr class="settings-divider" />
       <div class="section-label">System prompt</div>
       <div class="field">
-        <span class="field-label">Custom instructions</span>
+        <label class="field-label" for="setSysPrompt">Custom instructions</label>
         <textarea id="setSysPrompt" rows="4" placeholder="Additional instructions appended to the system prompt&#8230;"></textarea>
       </div>
     </div>
     <div class="modal-foot">
-      <button id="cancelSettings" class="btn-ghost">Cancel</button>
-      <button id="saveSettings"   class="btn-primary">Save</button>
+      <button id="cancelSettings" class="btn-ghost" type="button">Cancel</button>
+      <button id="saveSettings" class="btn-primary" type="button">Save changes</button>
     </div>
   </div>
 </div>
 <!-- Confirm modal -->
-<div id="confirmModal" class="modal hidden">
+<div id="confirmModal" class="modal hidden" role="alertdialog" aria-modal="true" aria-labelledby="confirmTitle" aria-describedby="confirmMsg">
   <div class="modal-card sm">
     <div class="modal-head">
       <span id="confirmTitle" class="modal-title">Confirm</span>
-      <button id="confirmClose" class="icon-btn"><svg class="ico" aria-hidden="true"><use href="#i-close"/></svg></button>
+      <button id="confirmClose" class="icon-btn" type="button" aria-label="Close confirmation"><svg class="ico" aria-hidden="true"><use href="#i-close"/></svg></button>
     </div>
     <div class="modal-body">
       <p id="confirmMsg" class="modal-msg"></p>
     </div>
     <div class="modal-foot">
-      <button id="confirmCancel" class="btn-ghost">Cancel</button>
-      <button id="confirmOk" class="btn-primary">Delete</button>
+      <button id="confirmCancel" class="btn-ghost" type="button">Cancel</button>
+      <button id="confirmOk" class="btn-primary" type="button">Delete</button>
     </div>
   </div>
 </div>
 
 <!-- Rename modal -->
-<div id="renameModal" class="modal hidden">
+<div id="renameModal" class="modal hidden" role="dialog" aria-modal="true" aria-labelledby="renameTitle">
   <div class="modal-card md">
     <div class="modal-head">
-      <span class="modal-title">Rename</span>
-      <button id="renameClose" class="icon-btn"><svg class="ico" aria-hidden="true"><use href="#i-close"/></svg></button>
+      <span class="modal-title" id="renameTitle">Rename</span>
+      <button id="renameClose" class="icon-btn" type="button" aria-label="Close rename dialog"><svg class="ico" aria-hidden="true"><use href="#i-close"/></svg></button>
     </div>
     <div class="modal-body">
-      <input id="renameInput" type="text" class="modal-input" />
+      <label class="sr-only" for="renameInput">New name</label>
+      <input id="renameInput" type="text" class="modal-input" autocomplete="off" />
     </div>
     <div class="modal-foot">
-      <button id="renameCancel" class="btn-ghost">Cancel</button>
-      <button id="renameOk" class="btn-primary">Rename</button>
+      <button id="renameCancel" class="btn-ghost" type="button">Cancel</button>
+      <button id="renameOk" class="btn-primary" type="button">Rename</button>
     </div>
   </div>
 </div>
 
 <!-- New project modal -->
-<div id="newProjectModal" class="modal hidden">
+<div id="newProjectModal" class="modal hidden" role="dialog" aria-modal="true" aria-labelledby="newProjectTitle">
   <div class="modal-card md">
     <div class="modal-head">
-      <span class="modal-title">New Project</span>
-      <button id="newProjectModalClose" class="icon-btn"><svg class="ico" aria-hidden="true"><use href="#i-close"/></svg></button>
+      <span class="modal-title" id="newProjectTitle">New project</span>
+      <button id="newProjectModalClose" class="icon-btn" type="button" aria-label="Close new project dialog"><svg class="ico" aria-hidden="true"><use href="#i-close"/></svg></button>
     </div>
     <div class="modal-body">
-      <input id="newProjectInput" type="text" placeholder="Project name" class="modal-input" />
+      <label class="sr-only" for="newProjectInput">Project name</label>
+      <input id="newProjectInput" type="text" placeholder="Project name" class="modal-input" autocomplete="off" />
     </div>
     <div class="modal-foot">
-      <button id="newProjectCancel" class="btn-ghost">Cancel</button>
-      <button id="newProjectOk" class="btn-primary">Create</button>
+      <button id="newProjectCancel" class="btn-ghost" type="button">Cancel</button>
+      <button id="newProjectOk" class="btn-primary" type="button">Create project</button>
     </div>
   </div>
 </div>
 
 <!-- Add to project modal -->
-<div id="projectModal" class="modal hidden">
+<div id="projectModal" class="modal hidden" role="dialog" aria-modal="true" aria-labelledby="projectModalTitle">
   <div class="modal-card md">
     <div class="modal-head">
-      <span class="modal-title">Add to Project</span>
-      <button id="projectModalClose" class="icon-btn"><svg class="ico" aria-hidden="true"><use href="#i-close"/></svg></button>
+      <span class="modal-title" id="projectModalTitle">Add to project</span>
+      <button id="projectModalClose" class="icon-btn" type="button" aria-label="Close project picker"><svg class="ico" aria-hidden="true"><use href="#i-close"/></svg></button>
     </div>
     <div class="modal-body" id="projectModalBody">
     </div>
     <div class="modal-foot">
-      <button id="projectModalNewBtn" class="btn-ghost">+ New Project</button>
-      <button id="projectModalCancel" class="btn-ghost">Cancel</button>
+      <button id="projectModalNewBtn" class="btn-ghost" type="button">New project</button>
+      <button id="projectModalCancel" class="btn-ghost" type="button">Cancel</button>
     </div>
   </div>
 </div>
 
 <!-- Project config modal -->
-<div id="projConfigModal" class="modal hidden">
+<div id="projConfigModal" class="modal hidden" role="dialog" aria-modal="true" aria-labelledby="projConfigTitle">
   <div class="modal-card lg">
     <div class="modal-head">
-      <span class="modal-title">Project Config</span>
-      <button id="projConfigClose" class="icon-btn"><svg class="ico" aria-hidden="true"><use href="#i-close"/></svg></button>
+      <span class="modal-title" id="projConfigTitle">Project settings</span>
+      <button id="projConfigClose" class="icon-btn" type="button" aria-label="Close project settings"><svg class="ico" aria-hidden="true"><use href="#i-close"/></svg></button>
     </div>
     <div class="modal-body">
       <div class="field">
-        <span class="field-label">System prompt</span>
+        <label class="field-label" for="projConfigPrompt">System prompt</label>
         <textarea id="projConfigPrompt" rows="5" class="modal-textarea" placeholder="Custom instructions for this project's chats&#10;(appended after the base system prompt)"></textarea>
       </div>
       <div class="field">
-        <span class="field-label">Context and notes</span>
+        <label class="field-label" for="projConfigContext">Context and notes</label>
         <textarea id="projConfigContext" rows="5" class="modal-textarea" placeholder="Reference material always included in this project's chats&#10;(e.g. coding standards, project background, key contacts)"></textarea>
       </div>
     </div>
     <div class="modal-foot">
-      <button id="projConfigCancel" class="btn-ghost">Cancel</button>
-      <button id="projConfigSave" class="btn-primary">Save</button>
+      <button id="projConfigCancel" class="btn-ghost" type="button">Cancel</button>
+      <button id="projConfigSave" class="btn-primary" type="button">Save changes</button>
     </div>
   </div>
 </div>
 
 <!-- Context menu (floating) -->
-<div id="ctxMenu" class="ctx-menu hidden">
-  <div class="ctx-item" data-action="rename"><svg class="ico sm" aria-hidden="true"><use href="#i-edit"/></svg> Rename</div>
-  <div class="ctx-item" data-action="project"><svg class="ico sm" aria-hidden="true"><use href="#i-folder"/></svg> Add to Project</div>
+<div id="ctxMenu" class="ctx-menu hidden" role="menu" aria-label="Chat actions">
+  <button class="ctx-item" type="button" role="menuitem" data-action="rename"><svg class="ico sm" aria-hidden="true"><use href="#i-edit"/></svg> Rename</button>
+  <button class="ctx-item" type="button" role="menuitem" data-action="project"><svg class="ico sm" aria-hidden="true"><use href="#i-folder"/></svg> Add to project</button>
   <div class="ctx-sep"></div>
-  <div class="ctx-item ctx-danger" data-action="delete"><svg class="ico sm" aria-hidden="true"><use href="#i-trash"/></svg> Delete</div>
+  <button class="ctx-item ctx-danger" type="button" role="menuitem" data-action="delete"><svg class="ico sm" aria-hidden="true"><use href="#i-trash"/></svg> Delete</button>
 </div>
 
 <script src="/app.js"></script>
