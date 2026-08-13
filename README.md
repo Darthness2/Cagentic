@@ -280,6 +280,54 @@ Type `/help` in the web composer for its focused command list. Chat saving is au
 
 If the configured port is already occupied, Cagentic automatically tries the next 20 ports and prints the URL it selected. Set `gateway.auto_port` to `false` if you prefer startup to fail instead.
 
+### Automation
+
+Every flag below works with `-p/--prompt` for one-shot use, so Cagentic can be
+driven from a script or CI where there's nobody to answer an approval prompt.
+
+```bash
+cagentic -p "summarise the diff" --format stream-json
+```
+
+- `-c` / `--continue` resumes the most recent conversation; `--resume <id>`
+  picks a specific one (ids come from `cagentic --sessions`).
+- `--permission-mode ask|accept-edits|plan|yolo` sets approvals without a human.
+- `--allowed-tools` / `--disallowed-tools` take comma-separated rules in the
+  same syntax as `/rules`, e.g. `--allowed-tools 'run_bash(git status*),read_file'`.
+  Deny always wins.
+- `--append-system-prompt TEXT` adds instructions for this run only.
+- `--format stream-json` emits one JSON object per event, newline-delimited, as
+  the turn happens. **stdout carries only events** — start-up warnings and
+  anything else human-facing go to stderr, so you can pipe it straight into
+  `jq` without filtering.
+
+### Working in a project
+
+Drop a `.cagentic/` directory in a repo and check it in:
+
+```
+.cagentic/
+    settings.json         permission rules the whole team shares
+    settings.local.json   your own overrides (gitignore this)
+    commands/*.md         custom slash commands
+    skills/*.md           project skills, which beat your global ones
+```
+
+A command file becomes a slash command named after the file, with `$ARGUMENTS`
+substituted (and appended if the template doesn't mention it). It shows up in
+`/help` under "this project". Built-in commands always win, so a repo can't
+redefine `/quit`.
+
+`/init` writes an `AGENTS.md` describing the project — it's read back into
+every future session.
+
+### Undoing work
+
+`/undo` reverts the last file edit. `/rewind` lists this session's turns with
+their edit counts, and `/rewind <n>` undoes turn n **and everything after it** —
+files *and* conversation, so the model's history matches what's on disk again.
+It refuses if you've edited a file yourself since Cagentic wrote it.
+
 ### Running it as a background service
 
 ```bash

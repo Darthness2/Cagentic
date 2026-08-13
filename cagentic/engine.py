@@ -633,6 +633,25 @@ def process_user_input(raw: str, workspace: Path | None = None, home: Path | Non
     return msg
 
 
+def event_payload(event: "Message") -> dict:
+    """One engine event as a plain JSON-safe dict.
+
+    Shared by the gateway's SSE stream and the CLI's --output-format
+    stream-json so a consumer sees the same field names either way; two
+    hand-written mappings would drift the first time an event kind changed.
+    """
+    payload: dict = {"kind": event.kind}
+    if event.task_id:
+        payload["task_id"] = event.task_id
+    for key, value in (event.data or {}).items():
+        # Inline base64 images would swamp a line-oriented stream.
+        if key == "images":
+            payload["images"] = len(value or [])
+            continue
+        payload[key] = value
+    return payload
+
+
 def normalize_messages_for_api(messages: list[dict]) -> list[dict]:
     # 'images' carries inline screenshots through to vision-capable models.
     keep_keys = {"role", "content", "tool_calls", "name", "tool_call_id", "images"}
@@ -847,7 +866,17 @@ class QueryEngine:
         self._abort_turn = False
         self._plan_shown_this_turn = False
         self._usage = {"input": 0, "output": 0, "ms": 0, "cache_read": 0, "cache_write": 0}
+        self._usage_at_turn_start: dict = dict(self._usage)
         self._read_cache: dict = {}
+
+    def turn_usage(self) -> dict:
+        """Tokens spent by the CURRENT turn alone.
+
+        `_usage` is a session running total, so every per-turn readout is a
+        delta against the snapshot taken in `submit_message`.
+        """
+        base = self._usage_at_turn_start
+        return {k: int(v) - int(base.get(k, 0)) for k, v in self._usage.items()}
 
     def context_window(self) -> int:
         """The active model's input window, in tokens."""
@@ -855,6 +884,24 @@ class QueryEngine:
 
         spec = self.state.active_model_spec or self.model
         return context_window_for(spec, self.config or {})
+
+    def cost_report(self, usage: dict | None = None) -> dict:
+        """Dollar figures for a usage record — computed here rather than in a
+        renderer so the terminal, the gateway and `/cost` all agree.
+
+        `spent` is None (not 0.0) when the model has no known rate, so a
+        renderer can say "unknown" instead of implying the turn was free.
+        `saved` is what prompt caching took off the bill.
+        """
+        from .providers import cost_without_cache, estimate_cost
+
+        u = self._usage if usage is None else usage
+        spec = self.state.active_model_spec or self.model
+        cfg = self.config or {}
+        spent = estimate_cost(u, spec, cfg)
+        full = cost_without_cache(u, spec, cfg)
+        saved = None if (spent is None or full is None) else max(0.0, full - spent)
+        return {"spent": spent, "saved": saved, "model": spec}
 
     def compact_threshold(self) -> int:
         """Token count above which older history gets compacted.
@@ -905,6 +952,10 @@ class QueryEngine:
             self.messages.insert(0, {"role": "system", "content": prompt})
 
     def submit_message(self, prompt: str) -> Iterator[Message]:
+        # `_usage` accumulates for the whole session, so a per-turn figure has
+        # to be a delta against this snapshot. Without it the "tokens ... in"
+        # line reported the running total while reading like a per-turn cost.
+        self._usage_at_turn_start = dict(self._usage)
         self._plan_shown_this_turn = False
         self._recent_calls = []
         self._recent_results = []
@@ -1130,6 +1181,8 @@ class QueryEngine:
                     {
                         "text": narration,
                         "usage": dict(self._usage),
+                        "turn_usage": self.turn_usage(),
+                        "cost": self.cost_report(self.turn_usage()),
                         "session_id": self.session_id,
                     },
                 )
@@ -1155,6 +1208,8 @@ class QueryEngine:
                     {
                         "text": "Stopped: stuck in a loop. Try /retry or /new for a fresh context.",
                         "usage": dict(self._usage),
+                        "turn_usage": self.turn_usage(),
+                        "cost": self.cost_report(self.turn_usage()),
                         "session_id": self.session_id,
                     },
                 )

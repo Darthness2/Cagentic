@@ -77,7 +77,11 @@ def derive_title(messages: list[dict]) -> str:
 
 
 def save(session: dict) -> Path:
-    session["updated_at"] = int(time.time())
+    # Sub-second precision: `list_all` orders by this, and whole seconds made
+    # two saves in the same second tie — which left `--continue` picking an
+    # arbitrary one of them rather than the newest. Older int values still
+    # compare correctly against floats.
+    session["updated_at"] = time.time()
     if session.get("title") in (None, "", "untitled"):
         session["title"] = derive_title(session.get("messages", []))
     p = _path(session["id"])

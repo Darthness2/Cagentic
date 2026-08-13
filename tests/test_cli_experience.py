@@ -79,6 +79,9 @@ class _ScriptedPrompt:
         self._lines = iter(lines)
         self.workspace_provider = None
         self.context_provider = None
+        # Every pre-fill the REPL offered, in order — this is how a half-typed
+        # type-ahead line is handed back to the user.
+        self.defaults: list[str] = []
 
     def set_workspace_provider(self, provider) -> None:
         self.workspace_provider = provider
@@ -86,7 +89,8 @@ class _ScriptedPrompt:
     def set_context_provider(self, provider) -> None:
         self.context_provider = provider
 
-    def ask(self, _prefix: str) -> str:
+    def ask(self, _prefix: str, default: str = "") -> str:
+        self.defaults.append(default)
         return next(self._lines)
 
 
@@ -842,6 +846,10 @@ def test_agent_marks_error_only_turn_as_failed(capsys):
     agent.engine = SimpleNamespace(
         messages=[],
         submit_message=lambda _prompt: iter([Message("error", {"text": "provider failed"})]),
+        # The status bar asks the engine for the live context budget so it can
+        # show pressure rather than a bare token count.
+        context_window=lambda: 200_000,
+        compact_threshold=lambda: 120_000,
     )
     agent.on_turn_complete = None
     agent.last_turn_failed = False
@@ -1289,6 +1297,7 @@ def test_every_terminal_catalog_command_has_a_safe_smoke_path(tmp_path, monkeypa
         "/clear": "/clear",
         "/retry": "/retry",
         "/context": "/context",
+        "/cost": "/cost",
         "/compact": "/compact",
         "/effort": "/effort",
         "/notes": "/notes",

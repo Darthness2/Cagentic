@@ -34,9 +34,17 @@ from cagentic import ui
 
 _REGION_RX = re.compile(r"\x1b\[[0-9;]*r")  # DECSTBM set/reset
 _RESERVE_RX = re.compile(r"\x1b\[1;(\d+)r")  # DECSTBM reserving the bottom row
+
+
 # IND, CUU, DECSC — the make-room guard that must immediately precede every
 # bottom-row reservation.
-_MAKE_ROOM = "\x1bD\x1b[A\x1b7"
+def _make_room(reserve: int = 1) -> str:
+    """The guard that must precede every reservation: free exactly as many rows
+    as are about to be reserved, then save the cursor."""
+    return "\x1bD" * reserve + f"\x1b[{reserve}A" + "\x1b7"
+
+
+_MAKE_ROOM = _make_room(1)
 
 
 class _FakeTTY(io.StringIO):
@@ -239,6 +247,26 @@ class StatusBarCursorSafetyTests(unittest.TestCase):
         # start() has no region yet; resetting there would be pointless noise.
         self.assertTrue(ui._reserve_bottom_row_seq(24, region_active=False).startswith(_MAKE_ROOM))
 
+    def test_the_guard_frees_exactly_as_many_rows_as_it_reserves(self) -> None:
+        """The IND count was hard-coded to one. When type-ahead asked for a
+        second reserved row (its echo line) the cursor was left one row BELOW
+        the new scroll region, so every streamed line overwrote that row and
+        the next paint frame erased it — on Windows the reply never appeared.
+        """
+        for reserve in (1, 2, 3):
+            seq = ui._reserve_bottom_row_seq(24, region_active=False, reserve=reserve)
+            self.assertTrue(seq.startswith(_make_room(reserve)), (reserve, seq))
+            freed = seq.count("\x1bD")
+            bottom = int(_RESERVE_RX.search(seq).group(1))
+            # After the guard the cursor sits `freed` rows above the last row;
+            # it must land inside the region that DECSTBM just declared.
+            self.assertLessEqual(
+                24 - freed,
+                bottom,
+                f"reserve={reserve}: cursor lands on row {24 - freed} but the "
+                f"scroll region ends at {bottom} — output below it is wiped",
+            )
+
     def test_cursor_saves_are_never_nested(self) -> None:
         """DECSC/DECRC is one slot per screen buffer. The resize
         re-reservation carries its own save/restore pairs now, so it has to be
@@ -274,3 +302,157 @@ class StatusBarCursorSafetyTests(unittest.TestCase):
 
 if __name__ == "__main__":
     unittest.main()
+
+
+class TypeAheadReservationTests(unittest.TestCase):
+    """The regression that made replies invisible on Windows.
+
+    prompt_toolkit parks the cursor on the bottom row under ConPTY. If the bar
+    reserves N rows but the guard only frees one, the cursor ends up below the
+    scroll region — where LF no longer scrolls, so every streamed line
+    overwrites one row and the next paint frame erases it. The user sees the
+    turn run and produce nothing.
+    """
+
+    def test_extra_reserved_rows_reaches_the_escape_sequence(self) -> None:
+        self.assertEqual(ui.StatusBar()._reserve, 1)
+        self.assertEqual(ui.StatusBar(extra_reserved_rows=1)._reserve, 2)
+
+    def test_a_two_row_reservation_leaves_the_cursor_inside_the_region(self) -> None:
+        rows = 24
+        seq = ui._reserve_bottom_row_seq(rows, region_active=False, reserve=2)
+        bottom = int(_RESERVE_RX.search(seq).group(1))
+        self.assertEqual(bottom, rows - 2)
+        # Two INDs guarantee two rows of room below wherever the cursor was.
+        self.assertEqual(seq.count("\x1bD"), 2)
+        self.assertLessEqual(rows - seq.count("\x1bD"), bottom)
+
+    def test_the_turn_reserves_two_rows_when_type_ahead_is_live(self) -> None:
+        """Agent.turn is what wires the echo row to the reservation; if that
+        link breaks the echo line gets scrolled over instead."""
+        import inspect
+
+        from cagentic.agent import Agent
+
+        source = inspect.getsource(Agent.turn)
+        self.assertIn("extra_reserved_rows=1 if active_ta else 0", source)
+
+    def test_a_short_terminal_refuses_the_bar_rather_than_reserving_the_screen(self) -> None:
+        """With two reserved rows a 4-row terminal would leave a 2-row region;
+        starting the bar there is worse than not having one."""
+        current = [os.terminal_size((80, 4))]
+        with mock.patch.object(
+            ui.shutil, "get_terminal_size", lambda fallback=(80, 24): current[0]
+        ):
+            bar = ui.StatusBar(extra_reserved_rows=1)
+            bar.start()
+            try:
+                self.assertFalse(bar._active)
+            finally:
+                bar.stop()
+
+
+class _MiniVT:
+    """Just enough VT100 to answer one question: does the reply stay on screen?
+
+    Models the scroll region, DECSC/DECRC, IND and cursor moves — the handful
+    of behaviours the status bar depends on. Starting the cursor on the bottom
+    row reproduces what prompt_toolkit does under ConPTY, which is the
+    condition that made replies invisible on Windows.
+    """
+
+    def __init__(self, rows: int = 10, cols: int = 60) -> None:
+        self.rows, self.cols = rows, cols
+        self.screen = [""] * (rows + 1)  # 1-indexed
+        self.row, self.col = rows, 1  # cursor parked on the last row
+        self.top, self.bot = 1, rows
+        self.saved = (rows, 1)
+
+    def feed(self, data: str) -> None:
+        i = 0
+        while i < len(data):
+            ch = data[i]
+            if ch == "\x1b":
+                m = re.match(r"\x1b\[(\d*);?(\d*)([A-Za-z])", data[i:]) or re.match(
+                    r"\x1b([78D])", data[i:]
+                )
+                if not m:
+                    i += 1
+                    continue
+                if m.re.groups == 1:
+                    kind = m.group(1)
+                    if kind == "7":
+                        self.saved = (self.row, self.col)
+                    elif kind == "8":
+                        self.row, self.col = self.saved
+                    elif kind == "D":
+                        self._index()
+                else:
+                    a, b, final = m.group(1), m.group(2), m.group(3)
+                    if final == "r":
+                        self.top, self.bot = int(a or 1), int(b or self.rows)
+                    elif final == "A":
+                        self.row = max(1, self.row - int(a or 1))
+                    elif final == "H":
+                        self.row, self.col = int(a or 1), int(b or 1)
+                    elif final == "K":
+                        self.screen[self.row] = ""
+                i += m.end()
+                continue
+            if ch == "\n":
+                self._index()
+                self.col = 1
+            elif ch == "\r":
+                self.col = 1
+            else:
+                line = self.screen[self.row].ljust(self.col - 1)
+                self.screen[self.row] = line[: self.col - 1] + ch + line[self.col :]
+                self.col += 1
+            i += 1
+
+    def _index(self) -> None:
+        if self.row == self.bot:
+            for r in range(self.top, self.bot):
+                self.screen[r] = self.screen[r + 1]
+            self.screen[self.bot] = ""
+        else:
+            self.row = min(self.rows, self.row + 1)
+
+    def visible(self) -> list[str]:
+        return [line for line in self.screen[1:] if line.strip()]
+
+
+class ReplyStaysOnScreenTests(unittest.TestCase):
+    """End-to-end: stream a reply and check the user can actually read it."""
+
+    REPLY = ["Here is the answer you asked for.", "Second line of the reply.", "Third line."]
+
+    def _render(self, extra_rows: int) -> int:
+        rows, cols = 10, 60
+        vt = _MiniVT(rows, cols)
+        buf = io.StringIO()
+        size = os.terminal_size((cols, rows))
+        with (
+            mock.patch.object(ui.shutil, "get_terminal_size", lambda fallback=(80, 24): size),
+            mock.patch.object(ui.sys, "stdout", buf),
+            mock.patch.object(ui, "motion_enabled", lambda *a, **k: True),
+        ):
+            bar = ui.StatusBar(ctx_tokens=100, extra_reserved_rows=extra_rows)
+            bar.start()
+            vt.feed(buf.getvalue())
+            buf.truncate(0)
+            buf.seek(0)
+            for line in self.REPLY:
+                vt.feed(line + "\n")
+            bar._paint()
+            vt.feed(buf.getvalue())
+            bar.stop()
+        return sum(1 for line in vt.visible() if any(part[:18] in line for part in self.REPLY))
+
+    def test_the_reply_survives_without_type_ahead(self) -> None:
+        self.assertEqual(self._render(0), len(self.REPLY))
+
+    def test_the_reply_survives_with_type_ahead(self) -> None:
+        """With the guard freeing only one row this rendered 1 of 3 lines —
+        the turn ran and the user saw essentially nothing."""
+        self.assertEqual(self._render(1), len(self.REPLY))

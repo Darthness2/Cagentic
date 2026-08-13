@@ -21,109 +21,31 @@ let state = {
   _openProjects: new Set(), _openUnaffiliated: true, _openProjectsRoot: true,
 };
 
-// ---- CLOCK ------------------------------------------------------------------
-function updateClock() {
-  const n = new Date(), pad = v => String(v).padStart(2,'0');
-  $('#jClock').textContent = pad(n.getHours())+':'+pad(n.getMinutes())+':'+pad(n.getSeconds());
-  const days=['SUN','MON','TUE','WED','THU','FRI','SAT'];
-  const months=['JAN','FEB','MAR','APR','MAY','JUN','JUL','AUG','SEP','OCT','NOV','DEC'];
-  $('#jDate').textContent = days[n.getDay()]+' '+n.getDate()+' '+months[n.getMonth()]+' '+n.getFullYear();
-}
-setInterval(updateClock, 1000); updateClock();
+// ---- CLOCK / ORB (retired) --------------------------------------------------
+// A wall clock and a 220-particle canvas orb were the two loudest pieces of
+// HUD decoration: neither told the user anything about their conversation, and
+// together they took roughly 40% of the viewport before a single message. The
+// orb's animation loop also ran continuously, which is a real cost on a
+// laptop. The greeting that replaced them lives in renderEmptyState().
+function setOrbLabel(){ /* no-op: the orb label is gone */ }
 
-// ---- ORB --------------------------------------------------------------------
-(function initOrb() {
-  const canvas = $('#orbCanvas'); if (!canvas) return;
-  const ctx = canvas.getContext('2d');
-  let W, H, cx, cy, particles = [], t = 0;
-  function resize() {
-    const p = canvas.parentElement;
-    W = canvas.width = p.clientWidth || 600;
-    H = canvas.height = p.clientHeight || 300;
-    cx = W/2; cy = H/2;
-  }
-  function mkPart() {
-    const th = Math.random()*Math.PI*2, ph = Math.random()*Math.PI, r = 45+Math.random()*40;
-    return { x:cx+r*Math.sin(ph)*Math.cos(th), y:cy+r*Math.sin(ph)*Math.sin(th)*0.4, z:Math.cos(ph),
-      vx:(Math.random()-.5)*0.3, vy:(Math.random()-.5)*0.3, life:Math.random(),
-      decay:0.007+Math.random()*0.016, size:0.7+Math.random()*2.2, alpha:0.4+Math.random()*0.6 };
-  }
-  function resetPart(p) {
-    const th=Math.random()*Math.PI*2, ph=Math.random()*Math.PI, r=43+Math.random()*42;
-    p.x=cx+r*Math.sin(ph)*Math.cos(th); p.y=cy+r*Math.sin(ph)*Math.sin(th)*0.4; p.z=Math.cos(ph); p.life=1;
-  }
-  function initParts(){ particles=[]; for(let i=0;i<220;i++) particles.push(mkPart()); }
-  const ORBS=[{r:105,s:0.65,sz:3.5,ph:0},{r:105,s:0.65,sz:3.5,ph:Math.PI},
-    {r:82,s:-1.05,sz:2.5,ph:Math.PI/2},{r:125,s:0.45,sz:2,ph:Math.PI/3},{r:82,s:-1.05,sz:2.5,ph:Math.PI*1.5}];
-  // The orb is additive glow, which reads as a muddy grey smear on a light
-  // page. On light it becomes a denser, darker-cored version of the same
-  // shape so it still looks deliberate instead of washed out.
-  function isLight(){
-    const t=document.documentElement.getAttribute('data-theme');
-    if(t==='light') return true;
-    if(t==='dark') return false;
-    return window.matchMedia('(prefers-color-scheme: light)').matches;
-  }
-  function draw() {
-    ctx.clearRect(0,0,W,H);
-    const light=isLight();
-    // speed reacts to state: faster when busy/listening/speaking
-    const sp = state.busy ? 0.03 : (window.__jSpeak ? 0.022 : 0.011);
-    t += sp;
-    // The stacked wide halos are what give the dark orb its depth; on light
-    // they stack into a grey smudge, so light gets one tight halo instead.
-    if(light){
-      const g=ctx.createRadialGradient(cx,cy,20,cx,cy,78);
-      g.addColorStop(0,'rgba(123,79,146,0.10)'); g.addColorStop(1,'rgba(123,79,146,0)');
-      ctx.beginPath(); ctx.arc(cx,cy,78,0,Math.PI*2); ctx.fillStyle=g; ctx.fill();
-    } else {
-      for(let r=120;r>=12;r-=18) {
-        const g=ctx.createRadialGradient(cx,cy,r*0.4,cx,cy,r);
-        g.addColorStop(0,`rgba(199,155,216,${0.022+(120-r)*0.0006})`);
-        g.addColorStop(1,'rgba(0,0,0,0)');
-        ctx.beginPath(); ctx.arc(cx,cy,r,0,Math.PI*2); ctx.fillStyle=g; ctx.fill();
-      }
-    }
-    const mg=ctx.createRadialGradient(cx,cy,0,cx,cy,light?46:65);
-    if(light){
-      mg.addColorStop(0,'rgba(102,62,124,0.9)'); mg.addColorStop(0.35,'rgba(140,96,166,0.42)');
-      mg.addColorStop(0.7,'rgba(168,130,190,0.14)'); mg.addColorStop(1,'rgba(0,0,0,0)');
-    } else {
-      mg.addColorStop(0,'rgba(244,236,248,0.88)'); mg.addColorStop(0.22,'rgba(199,155,216,0.58)');
-      mg.addColorStop(0.6,'rgba(154,111,176,0.22)'); mg.addColorStop(1,'rgba(0,0,0,0)');
-    }
-    ctx.beginPath(); ctx.arc(cx,cy,light?46:65,0,Math.PI*2); ctx.fillStyle=mg; ctx.fill();
-    const ic=ctx.createRadialGradient(cx,cy,0,cx,cy,20);
-    if(light){
-      ic.addColorStop(0,'rgba(86,48,108,1)'); ic.addColorStop(0.5,'rgba(123,79,146,0.7)'); ic.addColorStop(1,'rgba(123,79,146,0)');
-    } else {
-      ic.addColorStop(0,'rgba(255,255,255,1)'); ic.addColorStop(0.5,'rgba(230,215,238,0.75)'); ic.addColorStop(1,'rgba(199,155,216,0)');
-    }
-    ctx.beginPath(); ctx.arc(cx,cy,20,0,Math.PI*2); ctx.fillStyle=ic; ctx.fill();
-    particles.forEach(p=>{
-      p.x+=p.vx; p.y+=p.vy; p.life-=p.decay; if(p.life<=0) resetPart(p);
-      const a=Math.max(0,p.life)*p.alpha, br=0.5+p.z*0.5;
-      ctx.beginPath(); ctx.arc(p.x,p.y,p.size,0,Math.PI*2);
-      ctx.fillStyle=light
-        ? `rgba(${Math.round(150-br*60)},${Math.round(100-br*40)},${Math.round(175-br*55)},${a})`
-        : `rgba(${Math.round(120+br*79)},${Math.round(85+br*70)},${Math.round(140+br*76)},${a})`;
-      ctx.fill();
-    });
-    ORBS.forEach(o=>{
-      const a=t*o.s+o.ph, ox=cx+o.r*Math.cos(a), oy=cy+o.r*0.38*Math.sin(a);
-      ctx.beginPath(); ctx.arc(ox,oy,o.sz,0,Math.PI*2);
-      ctx.fillStyle=light?'rgba(110,68,133,0.95)':'rgba(199,155,216,0.9)';
-      ctx.shadowColor=light?'#7b4f92':'#c79bd8'; ctx.shadowBlur=light?6:12;
-      ctx.fill(); ctx.shadowBlur=0;
-    });
-    requestAnimationFrame(draw);
-  }
-  window.addEventListener('resize',()=>{resize();initParts();});
-  resize(); initParts(); draw();
-})();
 
 // ---- HELPERS ----------------------------------------------------------------
 function esc(s){ return (s||'').replace(/[&<>"']/g,c=>({'&':'&amp;','<':'&lt;','>':'&gt;','"':'&quot;',"'":'&#39;'}[c])); }
+/* Mirrors fmt.fmt_tokens / fmt.fmt_cost so the two front ends read the same. */
+function fmtTokens(n){
+  n=Number(n)||0;
+  if(Math.abs(n)<1000) return String(n);
+  if(Math.abs(n)<1e6) return (n/1000).toFixed(1).replace(/\.0$/,'')+'k';
+  return (n/1e6).toFixed(1).replace(/\.0$/,'')+'M';
+}
+function fmtCost(v){
+  v=Number(v)||0;
+  if(v===0) return '$0.00';
+  /* Cached traffic makes sub-cent turns the common case; '$0.00' would hide them. */
+  if(v<0.01) return '$'+v.toFixed(4);
+  return '$'+v.toFixed(2);
+}
 // Allow only http(s) (and data:image for <img>) URLs into href/src attributes;
 // anything else (javascript:, data:text/html, etc.) is dropped to '#'.
 function safeUrl(u){ u=(u||'').trim(); return /^https?:\/\//i.test(u)?u:'#'; }
@@ -149,18 +71,18 @@ const HL_KEYWORDS={
 function _hlRules(lang){
   const r=[];
   if(lang==='diff') return [[/^[+][^+\n].*$/gm,'ha'],[/^[-][^-\n].*$/gm,'hr'],[/^@@.*$/gm,'hm'],[/^[+-]{3}.*$/gm,'hc']];
-  if(lang==='xml'){ return [[/&lt;!--[\s\S]*?--&gt;/g,'hc'],[/&lt;\/?[\w:-]+/g,'hk'],[/[\w:-]+=/g,'hf'],[/&quot;[^&]*?&quot;/g,'hs']]; }
+  if(lang==='xml'){ return [[/&lt;!--[\s\S]*?--&gt;/g,'hc'],[/&lt;\/?[\w:-]+/g,'hk'],[/[\w:-]+=/g,'hf'],[/"[^"\n]*"/g,'hs']]; }
   if(lang==='css'){ return [[/\/\*[\s\S]*?\*\//g,'hc'],[/[.#]?[\w-]+(?=\s*\{)/g,'hk'],[/[\w-]+(?=\s*:)/g,'hf'],[/:[^;{}]+/g,'hs']]; }
   if(lang==='json'||lang==='yaml'){
-    r.push([/&quot;(?:[^&\\]|\\.)*?&quot;|'(?:[^'\\]|\\.)*?'/g,'hs']);
+    r.push([/"(?:[^"\\]|\\.)*?"|'(?:[^'\\]|\\.)*?'/g,'hs']);
     if(lang==='yaml') r.push([/#.*$/gm,'hc'],[/^\s*[\w.-]+(?=\s*:)/gm,'hf']);
-    else r.push([/&quot;[\w .-]+&quot;(?=\s*:)/g,'hf']);
+    else r.push([/"[\w .-]+"(?=\s*:)/g,'hf']);
     r.push([/\b-?\d+(?:\.\d+)?\b/g,'hn'],[/\b(true|false|null|yes|no)\b/gi,'hk']);
     return r;
   }
   // Comments and strings first — they swallow anything inside them.
   r.push([/\/\*[\s\S]*?\*\/|(?:^|\s)(?:\/\/|#).*$/gm,'hc']);
-  r.push([/&quot;(?:[^&\\]|\\.)*?&quot;|'(?:[^'\\\n]|\\.)*?'|`(?:[^`\\]|\\.)*?`/g,'hs']);
+  r.push([/"(?:[^"\\\n]|\\.)*?"|'(?:[^'\\\n]|\\.)*?'|`(?:[^`\\]|\\.)*?`/g,'hs']);
   if(HL_KEYWORDS[lang]) r.push([HL_KEYWORDS[lang],'hk']);
   r.push([/\b-?\d+(?:\.\d+)?\b/g,'hn']);
   r.push([/\b([A-Za-z_$][\w$]*)(?=\s*\()/g,'hf']);
@@ -168,6 +90,9 @@ function _hlRules(lang){
 }
 // Operates on ALREADY-ESCAPED text and only ever inserts <span class="h*">,
 // so it cannot introduce markup the escaper removed.
+function escText(s){
+  return (s||'').replace(/&/g,'&amp;').replace(/</g,'&lt;').replace(/>/g,'&gt;');
+}
 function highlight(escaped, lang){
   const kind=HL_ALIASES[(lang||'').toLowerCase()];
   if(kind===undefined||kind==='') return escaped;
@@ -205,7 +130,7 @@ function _codeBlockHTML(lang, code){
   return '<div class="codeblock" data-raw="'+esc(clean)+'">'+
     '<div class="cb-head"><span class="cb-lang">'+label+'</span>'+
     '<button class="cb-copy" title="Copy code">Copy</button></div>'+
-    '<pre><code>'+highlight(esc(clean),lang)+'</code></pre></div>';
+    '<pre><code>'+highlight(escText(clean),lang)+'</code></pre></div>';
 }
 function _tableHTML(rows, aligns){
   const cell=(text,i,tag)=>{
@@ -384,8 +309,10 @@ function trimThread(){
 function getThread(){ let t=log.querySelector('.j-thread'); if(!t){t=document.createElement('div');t.className='j-thread';log.appendChild(t);} return t; }
 function clearLog(){ log.innerHTML=''; }
 function avatarHTML(){ return '<div class="j-avatar">C</div>'; }
-function setOrbLabel(text){ const l=$('#orbLabel'); if(l) l.textContent=(text||'New Chat'); }
-function compactOrb(on){ const z=$('#orbZone'); if(z) z.classList.toggle('compact', on); }
+/* setOrbLabel is a no-op defined near the top of the file; compactOrb went
+   with the orb it collapsed. Both are kept callable so the call sites that
+   only ever drove decoration don't need touching. */
+function compactOrb(){ /* no-op: the orb is gone */ }
 
 // ---- HUD --------------------------------------------------------------------
 const HUD_RX = /```hud\s*\n?([\s\S]*?)```/g;
@@ -397,6 +324,34 @@ function extractHud(text){
   }
   return out;
 }
+const THINK_RX=/<think(?:ing)?>([\s\S]*?)<\/think(?:ing)?>/gi;
+/* Local reasoning models (DeepSeek-R1, QwQ, ...) wrap their reasoning in
+   <think> tags inside the ordinary content stream. Nothing here handled them,
+   so the tags were escaped and rendered as literal text in the answer body.
+   The terminal has shown this as dim italic since day one; the web UI showed
+   the raw markup. */
+function stripThink(text){ return (text||'').replace(THINK_RX,'').trim(); }
+function extractThink(text){
+  const out=[]; let m; THINK_RX.lastIndex=0;
+  while((m=THINK_RX.exec(text||''))!==null){ const t=(m[1]||'').trim(); if(t) out.push(t); }
+  return out;
+}
+function addThinkingBlock(text){
+  text=(text||'').trim(); if(!text) return null;
+  const box=document.createElement('details'); box.className='think-box';
+  box.innerHTML='<summary>reasoning</summary><div class="think-body">'+esc(text)+'</div>';
+  getThread().appendChild(box); scrollDown(); return box;
+}
+/* Reasoning arrives incrementally on the delta stream, so the live block is
+   rewritten in place rather than appended once per token. */
+function syncThinking(raw){
+  const blocks=extractThink(raw);
+  if(!blocks.length) return;
+  const text=blocks.join('\n\n');
+  if(!live.thinkBox||!live.thinkBox.isConnected) live.thinkBox=addThinkingBlock(text);
+  else { const body=live.thinkBox.querySelector('.think-body'); if(body) body.textContent=text; }
+}
+
 function stripHud(text){ return (text||'').replace(HUD_RX,'').trim(); }
 
 // Panel types that render inline in the chat and the user can act on.
@@ -467,7 +422,7 @@ function buildInteractive(p){
     const opts=(p.options||p.items||[]); const pre=p.prompt||'';
     wrap.innerHTML=title+'<div class="ix-choices-list">'+opts.map((o,i)=>{
       const label=typeof o==='string'?o:(o.label||'');
-      return '<button class="ix-choice" data-i="'+i+'"><span class="ix-choice-mark">&#9656;</span>'+esc(label)+'</button>';
+      return '<button class="ix-choice" data-i="'+i+'"><span class="ix-choice-mark"><svg class="ico sm" aria-hidden="true"><use href="#i-chevron-right"/></svg></span>'+esc(label)+'</button>';
     }).join('')+'</div>';
     wrap.querySelectorAll('.ix-choice').forEach(btn=>{ btn.onclick=()=>{
       const o=opts[+btn.dataset.i];
@@ -1492,22 +1447,31 @@ $('#windowLayer').addEventListener('pointerdown',e=>{
 });
 
 // ---- EMPTY STATE ------------------------------------------------------------
+/* Suggestions. The emoji were the loudest hobby-project signal on the first
+   screen a user ever sees — they render differently on every platform and sit
+   at a different weight and colour from everything around them. These use the
+   same sprite as the rest of the UI, and the list is shorter: eight cards is a
+   menu, four is a suggestion. */
 const QUICK = [
-  {icon:'🔍', title:'Search the web',  sub:'Find and summarise anything online', prompt:'Search the web for '},
-  {icon:'🖥️', title:'Read my screen',  sub:'Summarise what\'s in my browser tab', prompt:'Read my screen and summarise what you see'},
-  {icon:'📊', title:'Show me stats',   sub:'Render live data as floating panels',  prompt:'Show me a status panel of my system'},
-  {icon:'📈', title:'Draw a chart',    sub:'Bar, line, or pie - visualise data',   prompt:'Show me a bar chart comparing '},
-  {icon:'📝', title:'Take a note',     sub:'Remember something for later',        prompt:'Take a note: '},
-  {icon:'⏰', title:'Set a reminder',  sub:'Add something to my reminder list',   prompt:'Add a reminder: '},
-  {icon:'📂', title:'Browse files',    sub:'List or read files on your machine',  prompt:'List files in my current directory'},
-  {icon:'🎛️', title:'Interactive panel', sub:'Buttons & forms I can click',       prompt:'Show me an interactive panel with a few action buttons I can click'},
+  {icon:'i-search', title:'Search the web',  sub:'Find and summarise anything online', prompt:'Search the web for '},
+  {icon:'i-folder', title:'Browse files',    sub:'List or read files on this machine', prompt:'List the files in my current directory'},
+  {icon:'i-edit',   title:'Take a note',     sub:'Remember something for later',       prompt:'Take a note: '},
+  {icon:'i-more',   title:'Interactive panel', sub:'Buttons and forms you can click',  prompt:'Show me an interactive panel with a few action buttons I can click'},
 ];
 function showEmpty() {
   clearLog();
   const wrap=document.createElement('div'); wrap.className='j-empty';
-   wrap.innerHTML='<div class="j-empty-title">Select a chat or type a message</div><div class="quick-cards">'+
-    QUICK.map((q,i)=>`<div class="qcard" style="--i:${i}" data-prompt="${esc(q.prompt)}"><span class="qcard-icon">${q.icon}</span>`+
-      `<span class="qcard-title">${esc(q.title)}</span><span class="qcard-sub">${esc(q.sub)}</span></div>`).join('')+'</div>';
+  const hour=new Date().getHours();
+  const greet=hour<5?'Still up?':hour<12?'Good morning':hour<18?'Good afternoon':'Good evening';
+  const who=(state.userName||'').trim();
+  wrap.innerHTML=
+    '<h1 class="j-empty-title">'+esc(greet)+(who?', '+esc(who):'')+'</h1>'+
+    '<p class="j-empty-sub">What would you like to do?</p>'+
+    '<div class="quick-cards">'+
+    QUICK.map((q,i)=>`<button class="qcard" style="--i:${i}" data-prompt="${esc(q.prompt)}">`+
+      `<svg class="ico qcard-icon" aria-hidden="true"><use href="#${q.icon}"/></svg>`+
+      `<span class="qcard-text"><span class="qcard-title">${esc(q.title)}</span>`+
+      `<span class="qcard-sub">${esc(q.sub)}</span></span></button>`).join('')+'</div>';
   log.appendChild(wrap);
   wrap.querySelectorAll('.qcard').forEach(c=>{ c.onclick=()=>{ input.value=c.dataset.prompt; autoGrow(); input.focus(); }; });
 }
@@ -1515,12 +1479,11 @@ function showEmpty() {
 // ---- RENDERING --------------------------------------------------------------
 let _userMsgIdx=0;
 const _ICO={
-  copy:'<svg viewBox="0 0 24 24" width="13" height="13"><path fill="none" stroke="currentColor" stroke-width="1.7" stroke-linejoin="round" d="M9 9h10v12H9zM5 15V3h10v2"/></svg>',
-  redo:'<svg viewBox="0 0 24 24" width="13" height="13"><path fill="none" stroke="currentColor" stroke-width="1.7" stroke-linecap="round" stroke-linejoin="round" d="M20 11a8 8 0 1 0-2.3 5.7M20 5v6h-6"/></svg>',
-  edit:'<svg viewBox="0 0 24 24" width="13" height="13"><path fill="none" stroke="currentColor" stroke-width="1.7" stroke-linejoin="round" d="M4 20h4L20 8l-4-4L4 16z"/></svg>',
-  trash:'<svg viewBox="0 0 24 24" width="13" height="13"><path fill="none" stroke="currentColor" stroke-width="1.7" stroke-linecap="round" d="M4 7h16M9 7V4h6v3M6 7l1 13h10l1-13"/></svg>',
-};
-const MSG_ACTIONS_HTML=
+  copy:'<svg class="ico sm" aria-hidden="true"><use href="#i-copy"/></svg>',
+  redo:'<svg class="ico sm" aria-hidden="true"><use href="#i-retry"/></svg>',
+  edit:'<svg class="ico sm" aria-hidden="true"><use href="#i-edit"/></svg>',
+  trash:'<svg class="ico sm" aria-hidden="true"><use href="#i-trash"/></svg>',
+};const MSG_ACTIONS_HTML=
   '<button class="msg-act-btn" data-act="copy" title="Copy message">'+_ICO.copy+'<span>Copy</span></button>'+
   '<button class="msg-act-btn" data-act="resend" title="Send again">'+_ICO.redo+'<span>Retry</span></button>'+
   '<button class="msg-act-btn" data-act="edit" title="Edit and resend">'+_ICO.edit+'<span>Edit</span></button>'+
@@ -1593,7 +1556,7 @@ function resendMsg(idx,row){
   streamEdit(idx,text);
 }
 function streamEdit(idx,text){
-  live={body:null,raw:'',toolRow:null,thinking:null,turnStart:null,tokensIn:0,tokensOut:0};
+  live={body:null,raw:'',toolRow:null,thinking:null,thinkBox:null,turnStart:null,tokensIn:0,tokensOut:0};
   showThinking(); setOrbLabel(_curVerb+'\u2026'); setBusy(true); compactOrb(true);
   fetch('/api/chat/edit',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({index:idx,message:text})})
   .then(r=>{ if(!r.ok||!r.body) throw new Error(r.status); return readSSE(r,handle); })
@@ -1623,7 +1586,7 @@ function editMsg(idx,row,origText){
   bubble.innerHTML=''; bubble.appendChild(ta);
   ta.style.height=Math.min(ta.scrollHeight,130)+'px';
   ta.focus();
-  actions.innerHTML='<button class="msg-act-btn edit-save" title="Save &amp; send">&#10003; save</button><button class="msg-act-btn edit-cancel" title="Cancel">&#10005; cancel</button>';
+  actions.innerHTML='<button class="msg-act-btn edit-save" title="Save &amp; send"><svg class="ico sm" aria-hidden="true"><use href="#i-check"/></svg><span>Save</span></button>'+'<button class="msg-act-btn edit-cancel" title="Cancel"><svg class="ico sm" aria-hidden="true"><use href="#i-close"/></svg><span>Cancel</span></button>';
   const save=()=>{
     const newText=ta.value.trim(); if(!newText){cancel();return;}
     row.classList.remove('editing');
@@ -1695,7 +1658,7 @@ function addToolRow(t, done){
   const row=document.createElement('div'); row.className='tool-row'+(done?'':' pending');
   row.dataset.name=t.name||'';
   const isCmd=(t.name||'').startsWith('run_')||(t.name||'').startsWith('bash');
-  const icon=isCmd?'&#9654;':'&#9889;';
+  const icon='<svg class="ico sm" aria-hidden="true"><use href="#'+(isCmd?'i-chevron-right':'i-check')+'"/></svg>';
   const iconColor=isCmd?'var(--warn)':'var(--accent)';
   row.innerHTML='<span class="tool-icon" style="color:'+iconColor+'">'+icon+'</span>'+
     '<span class="tname">'+esc(t.name||'')+'</span>'+
@@ -1740,7 +1703,7 @@ function showPermission(d){
   }
   const btns=document.createElement('div'); btns.className='perm-btns';
   const answer=(a,past,rule)=>{
-    box.innerHTML='<div class="pq"><code>'+esc(d.tool)+'</code></div><div class="perm-decided">&#8594; '+past.toUpperCase()+'</div>';
+    box.innerHTML='<div class="pq"><code>'+esc(d.tool)+'</code></div><div class="perm-decided">'+esc(past)+'</div>';
     fetch('/api/permission',{method:'POST',headers:{'Content-Type':'application/json'},
       body:JSON.stringify(rule?{answer:a,id:d.id,rule}:{answer:a,id:d.id})});
   };
@@ -1772,7 +1735,7 @@ async function readSSE(response, onEvent){
 }
 
 // ---- LIVE TURN --------------------------------------------------------------
-let live={body:null,raw:'',toolRow:null,thinking:null,turnStart:null,tokensIn:0,tokensOut:0};
+let live={body:null,raw:'',toolRow:null,thinking:null,thinkBox:null,turnStart:null,tokensIn:0,tokensOut:0};
 let _thinkTimer=null;
 const _VERBS=['hatching','orbiting','pondering','brewing','simmering','marinating','percolating','crystallizing','weaving','conjuring','manifesting','distilling','synthesizing','calculating','reverberating','catalyzing','assembling','composting','fermenting','spinning','dreaming','musing','ruminating','cooking','germinating','blossoming','incubating','metabolizing','transmuting','alchemizing'];
 let _curVerb='thinking';
@@ -1794,18 +1757,25 @@ function handle(ev){
     if(!live.body){const _r=addAssistant('');live.body=_r.querySelector('.msg-body');live.raw='';}
     live.raw+=d.text||'';
     live.tokensOut+=Math.round((d.text||'').length/4);
-    live.body.innerHTML=md(stripHud(live.raw));
+    syncThinking(live.raw); live.body.innerHTML=md(stripThink(stripHud(live.raw)));
     live.body.classList.add('cursor'); scrollDown();
   } else if(k==='assistant'){
     const txt=(d.text||'');
-    if(!live.body&&stripHud(txt).trim()){const _r=addAssistant(md(stripHud(txt)));live.body=_r.querySelector('.msg-body');live.raw=txt;}
-    else if(live.body){ live.raw=txt; live.body.innerHTML=md(stripHud(txt)); }
+    syncThinking(txt);
+    if(!live.body&&stripThink(stripHud(txt)).trim()){const _r=addAssistant(md(stripThink(stripHud(txt))));live.body=_r.querySelector('.msg-body');live.raw=txt;}
+    else if(live.body){ live.raw=txt; live.body.innerHTML=md(stripThink(stripHud(txt))); }
     if(live.body) live.body.classList.remove('cursor');
     renderPanels(txt);
     if(state.voiceOut){ const p=plain(txt); if(p) speak(p); }
+  } else if(k==='thinking'){
+    /* The engine emits this for models that wrap reasoning in <think> tags.
+       Nothing rendered it before, so on the web the reasoning was either lost
+       (non-streaming) or dumped raw into the answer body (streaming). */
+    addThinkingBlock(d.text||'');
+    live.body=null;
   } else if(k==='plan'){
     const p=document.createElement('div'); p.className='plan-box';
-    p.innerHTML='<div class="ph">&#9658; Plan</div><ol>'+(d.steps||[]).map(s=>'<li>'+esc(s)+'</li>').join('')+'</ol>';
+    p.innerHTML='<div class="ph">Plan</div><ol>'+(d.steps||[]).map(s=>'<li>'+esc(s)+'</li>').join('')+'</ol>';
     getThread().appendChild(p); live.body=null; scrollDown();
   } else if(k==='tool_call'){
     live.body=null; live.toolRow=addToolRow({name:d.name,summary:d.summary},false);
@@ -1831,18 +1801,27 @@ function handle(ev){
   } else if(k==='done'){
     if(live.body) live.body.classList.remove('cursor'); live.body=null;
     if(_thinkTimer){clearInterval(_thinkTimer);_thinkTimer=null;}
-    const usage=d.usage||{};
+    /* turn_usage is this turn alone; usage is the session running total, which
+       read like a per-turn cost while silently growing every turn. */
+    const usage=d.turn_usage||d.usage||{};
     const hasStats=usage.input||usage.output||usage.ms;
     if(hasStats||live.turnStart){
       const row=document.createElement('div'); row.className='done-stats';
       let parts=[];
-      if(usage.input||usage.output) parts.push('tokens in/out '+usage.input+'/'+usage.output);
-      if(usage.ms) parts.push(Math.round(usage.ms)+'ms');
+      if(usage.input||usage.output) parts.push('\u2191'+fmtTokens(usage.input)+' \u2193'+fmtTokens(usage.output));
+      if(usage.cache_read) parts.push(fmtTokens(usage.cache_read)+' cached');
+      /* spent is null when the model has no known rate \u2014 show nothing rather
+         than implying the turn was free. */
+      if(d.cost&&d.cost.spent!=null){
+        let money=fmtCost(d.cost.spent);
+        if(d.cost.saved>=0.005) money+=' (saved '+fmtCost(d.cost.saved)+')';
+        parts.push(money);
+      }
       if(live.turnStart){
         const elapsed=((Date.now()-live.turnStart)/1000).toFixed(1);
         parts.push(elapsed+'s');
       }
-      row.innerHTML=parts.join('<span class="ds-sep">\u00b7</span>');
+      row.innerHTML=parts.map(esc).join('<span class="ds-sep">\u00b7</span>');
       getThread().appendChild(row); scrollDown();
     }
     /* Show token stats in footer */
@@ -1903,8 +1882,8 @@ function speak(text){
   const u=new SpeechSynthesisUtterance(text.slice(0,600));
   const v=pickVoice(); if(v) u.voice=v;
   u.rate=1.0; u.pitch=0.9;
-  window.__jSpeak=true; const z=$('#orbZone'); if(z) z.classList.add('speaking'); setOrbLabel('SPEAKING');
-  u.onend=()=>{ window.__jSpeak=false; if(z) z.classList.remove('speaking'); setOrbLabel(currentTitle()); };
+  window.__jSpeak=true;
+  u.onend=()=>{ window.__jSpeak=false; };
   speechSynthesis.speak(u);
 }
 function populateVoiceSelect(){
@@ -1920,9 +1899,9 @@ let recog=null, recognizing=false;
 if(SR){
   recog=new SR(); recog.lang='en-US'; recog.interimResults=true; recog.continuous=false;
   recog.onstart=()=>{ recognizing=true; $('#micBtn').classList.add('listening'); $('#cmdBox').classList.add('listening');
-    $('#orbZone').classList.add('listening'); setOrbLabel('LISTENING'); };
+    document.body.classList.add('listening'); };
   recog.onend=()=>{ recognizing=false; $('#micBtn').classList.remove('listening'); $('#cmdBox').classList.remove('listening');
-    $('#orbZone').classList.remove('listening'); setOrbLabel(currentTitle()); };
+    document.body.classList.remove('listening'); };
   recog.onerror=()=>{ recognizing=false; $('#micBtn').classList.remove('listening'); $('#cmdBox').classList.remove('listening'); };
   recog.onresult=e=>{
     let txt=''; for(let i=0;i<e.results.length;i++) txt+=e.results[i][0].transcript;
@@ -1952,10 +1931,10 @@ let _ctxChatId=null, _projCtxId=null, _ctxMode='chat';
 function showCtx(e,chatId){
   _ctxChatId=chatId; _ctxMode='chat';
   const m=$('#ctxMenu');
-  m.innerHTML='<div class="ctx-item" data-action="rename">&#9998; Rename</div>'+
-    '<div class="ctx-item" data-action="project">&#128193; Add to Project</div>'+
+  m.innerHTML='<div class="ctx-item" data-action="rename"><svg class="ico sm" aria-hidden="true"><use href="#i-edit"/></svg> Rename</div>'+
+    '<div class="ctx-item" data-action="project"><svg class="ico sm" aria-hidden="true"><use href="#i-folder"/></svg> Add to Project</div>'+
     '<div class="ctx-sep"></div>'+
-    '<div class="ctx-item ctx-danger" data-action="delete">&#128465; Delete</div>';
+    '<div class="ctx-item ctx-danger" data-action="delete"><svg class="ico sm" aria-hidden="true"><use href="#i-trash"/></svg> Delete</div>';
   m.classList.remove('hidden');
   m.style.left=Math.min(e.clientX,window.innerWidth-170)+'px';
   m.style.top=Math.min(e.clientY,window.innerHeight-120)+'px';
@@ -1970,9 +1949,9 @@ function closeNewProjectModal(){ $('#newProjectModal').classList.add('hidden'); 
 function showProjectCtx(e,projectId){
   _projCtxId=projectId; _ctxMode='project';
   const m=$('#ctxMenu');
-  m.innerHTML='<div class="ctx-item" data-action="proj-config">&#9881; Config</div>'+
-    '<div class="ctx-item" data-action="proj-rename">&#9998; Rename</div>'+
-    '<div class="ctx-item ctx-danger" data-action="proj-delete">&#128465; Delete</div>';
+  m.innerHTML='<div class="ctx-item" data-action="proj-config"><svg class="ico sm" aria-hidden="true"><use href="#i-settings"/></svg> Config</div>'+
+    '<div class="ctx-item" data-action="proj-rename"><svg class="ico sm" aria-hidden="true"><use href="#i-edit"/></svg> Rename</div>'+
+    '<div class="ctx-item ctx-danger" data-action="proj-delete"><svg class="ico sm" aria-hidden="true"><use href="#i-trash"/></svg> Delete</div>';
   m.classList.remove('hidden');
   m.style.left=Math.min(e.clientX,window.innerWidth-170)+'px';
   m.style.top=Math.min(e.clientY,window.innerHeight-120)+'px';
@@ -2125,7 +2104,7 @@ function renderSessions(){
   // --- Projects expandable group ---
   const projGrp=document.createElement('div'); projGrp.className='sess-group';
   const projHead=document.createElement('div'); projHead.className='sess-group-head'+(state._openProjectsRoot?' open':'');
-  projHead.innerHTML='<span class="sg-caret">&#9654;</span><span class="sg-dot" style="background:var(--accent)"></span><span class="sg-name">Projects</span><span class="sg-count">'+state.projects.length+'</span><button class="sg-add" title="New Project">+</button>';
+  projHead.innerHTML='<svg class="ico sm sg-caret" aria-hidden="true"><use href="#i-chevron-right"/></svg><span class="sg-dot" style="background:var(--accent)"></span><span class="sg-name">Projects</span><span class="sg-count">'+state.projects.length+'</span><button class="sg-add" title="New Project">+</button>';
   projHead.querySelector('.sg-add').onclick=e=>{ e.stopPropagation(); showNewProjectModal(); };
   projHead.onclick=e=>{
     if(e.target.closest('.sg-add')) return;
@@ -2142,7 +2121,7 @@ function renderSessions(){
       const isOpen=state._openProjects.has(p.id);
       const pGrp=document.createElement('div'); pGrp.className='sess-group';
       const pHead=document.createElement('div'); pHead.className='sess-group-head'+(isOpen?' open':'');
-      pHead.innerHTML='<span class="sg-caret">&#9654;</span><span class="sg-dot" style="background:'+esc(p.color)+'"></span><span class="sg-name">'+esc(p.name)+'</span><span class="sg-count">'+chats.length+'</span><button class="sg-menu" title="Menu">&#8942;</button>';
+      pHead.innerHTML='<svg class="ico sm sg-caret" aria-hidden="true"><use href="#i-chevron-right"/></svg><span class="sg-dot" style="background:'+esc(p.color)+'"></span><span class="sg-name">'+esc(p.name)+'</span><span class="sg-count">'+chats.length+'</span><button class="sg-menu" title="Menu"><svg class="ico sm" aria-hidden="true"><use href="#i-more"/></svg></button>';
       pHead.querySelector('.sg-menu').onclick=e=>{ e.stopPropagation(); showProjectCtx(e,p.id); };
       pHead.onclick=e=>{
         if(e.target.closest('.sg-menu')) return;
@@ -2162,7 +2141,7 @@ function renderSessions(){
   // --- Chats expandable group ---
   const chatGrp=document.createElement('div'); chatGrp.className='sess-group';
   const chatHead=document.createElement('div'); chatHead.className='sess-group-head'+(state._openUnaffiliated!==false?' open':'');
-  chatHead.innerHTML='<span class="sg-caret">&#9654;</span><span class="sg-dot" style="background:var(--text-dim)"></span><span class="sg-name">Chats</span><span class="sg-count">'+unaffiliated.length+'</span>';
+  chatHead.innerHTML='<svg class="ico sm sg-caret" aria-hidden="true"><use href="#i-chevron-right"/></svg><span class="sg-dot" style="background:var(--text-dim)"></span><span class="sg-name">Chats</span><span class="sg-count">'+unaffiliated.length+'</span>';
   chatHead.onclick=()=>{
     state._openUnaffiliated=state._openUnaffiliated===false?true:false;
     renderSessions();
@@ -2179,7 +2158,7 @@ function renderSessions(){
 }
 function makeChatItem(c){
   const item=document.createElement('div'); item.className='chat-item-j'+(c.id===state.currentId?' active':'');
-  item.innerHTML='<span class="ci-arrow">&#9658;</span><span class="ci-title">'+esc(c.title)+'</span><button class="ci-menu-btn" title="Menu">&#8942;</button>';
+  item.innerHTML='<span class="ci-title">'+esc(c.title)+'</span><button class="ci-menu-btn" title="Menu"><svg class="ico sm" aria-hidden="true"><use href="#i-more"/></svg></button>';
   item.querySelector('.ci-title').onclick=()=>loadChat(c.id);
   item.querySelector('.ci-menu-btn').onclick=e=>{ e.stopPropagation(); showCtx(e,c.id); };
   return item;
@@ -2198,7 +2177,7 @@ function setCurrent(cur){
     let row;
     if(m.role==='user'){ row=addUser(m.content); idx++; }
     else {
-      const html=md(stripHud(m.content));
+      const html=md(stripThink(stripHud(m.content)));
       const hasContent=html&&html.trim();
       if(hasContent){ row=addAssistant(html,m.tools); renderPanels(m.content); idx++; }
       else { (m.tools||[]).forEach(t=>{ const tr=addToolRow({name:t},true); if(tr) tr.style.setProperty('--i',idx++); }); }
@@ -2213,7 +2192,7 @@ async function api(path,body){
   const r=await fetch(path,{method:body?'POST':'GET',headers:{'Content-Type':'application/json'},body:body?JSON.stringify(body):undefined});
   return r.json();
 }
-function setModelBadge(m){ const n=$('#msName'); if(n) n.textContent=(m||'').toUpperCase(); }
+function setModelBadge(m){ const n=$('#msName'); if(n) n.textContent=(m||'').replace(/^(anthropic|openai|ollama):/,''); }
 async function boot(){
   const b=await api('/api/bootstrap');
   state.chats=b.chats; state.settings=b.settings; state.projects=b.projects||[];
@@ -2294,8 +2273,10 @@ async function saveSettings(){
 // ---- VOICE OUT TOGGLE -------------------------------------------------------
 function toggleVoiceOut(){
   state.voiceOut=!state.voiceOut;
-  $('#voiceOutBtn').classList.toggle('active', state.voiceOut);
-  $('#voiceOutBtn').innerHTML='[ &#128264; Voice: '+(state.voiceOut?'ON':'OFF')+' ]';
+  const vb=$('#voiceOutBtn');
+  vb.classList.toggle('active', state.voiceOut);
+  vb.setAttribute('aria-pressed', state.voiceOut?'true':'false');
+  vb.title='Read replies aloud: '+(state.voiceOut?'on':'off');
   if(!state.voiceOut && window.speechSynthesis) speechSynthesis.cancel();
   try{ localStorage.setItem('cagentic_voiceout', state.voiceOut?'1':'0'); }catch(e){}
 }
@@ -2340,7 +2321,7 @@ async function send(text){
   }
   if(log.querySelector('.j-empty')) clearLog();
   addUser(text);
-  live={body:null,raw:'',toolRow:null,thinking:null,turnStart:null,tokensIn:0,tokensOut:0};
+  live={body:null,raw:'',toolRow:null,thinking:null,thinkBox:null,turnStart:null,tokensIn:0,tokensOut:0};
   showThinking(); setOrbLabel(_curVerb+'\u2026'); setBusy(true); compactOrb(true);
   _abortCtrl=new AbortController();
   let res;
@@ -2379,7 +2360,7 @@ function renderAttachments(){
     const thumb=a.thumb?'<img class="ac-thumb" src="'+esc(a.thumb)+'" alt="">':_attachIcon(a.kind);
     chip.innerHTML=thumb+'<span class="ac-name">'+esc(a.name)+'</span>'+
       '<span class="ac-meta">'+(a.error?esc(a.error):(a.pending?'uploading…':fmtBytes(a.size)))+'</span>'+
-      '<button class="ac-x" title="Remove">&#10005;</button>';
+      '<button class="ac-x" title="Remove" aria-label="Remove attachment"><svg class="ico sm" aria-hidden="true"><use href="#i-close"/></svg></button>';
     chip.querySelector('.ac-x').onclick=()=>{ _attachments=_attachments.filter(x=>x!==a); renderAttachments(); };
     bar.appendChild(chip);
   });
@@ -2474,7 +2455,11 @@ const THEMES=['auto','dark','light'];
 function applyTheme(t){
   document.documentElement.setAttribute('data-theme',t);
   const btn=$('#themeBtn');
-  if(btn) btn.innerHTML='[ '+(t==='light'?'&#9788;':t==='dark'?'&#9789;':'&#9681;')+' '+t[0].toUpperCase()+t.slice(1)+' ]';
+  if(btn){
+    const label=t==='auto'?'Theme: follow system':t==='dark'?'Theme: dark':'Theme: light';
+    btn.title=label+' \u2014 click to change'; btn.setAttribute('aria-label',label);
+    btn.classList.toggle('active', t!=='auto');
+  }
   try{ localStorage.setItem('cagentic_theme',t); }catch(e){}
 }
 function cycleTheme(){

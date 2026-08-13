@@ -1372,12 +1372,18 @@ def _reserve_bottom_row_seq(rows: int, *, region_active: bool, reserve: int = 1)
     live under ConPTY: every paint frame restored to `ESC [ 24;22 H` on a
     24-row screen.)
 
-    So free a row first: IND (`ESC D`) moves down one, scrolling only if we are
-    already at the bottom, and CUU (`ESC [ A`) steps back up without ever
+    So free the rows first: IND (`ESC D`) moves down one, scrolling only if we
+    are already at the bottom, and CUU (`ESC [ nA`) steps back up without ever
     scrolling. Both preserve the column, so a half-written streamed line is
     never split — when the screen does scroll, the partial line rides up with
     it and the cursor stays right after it. Mid-screen the pair is a no-op; on
-    the last row it scrolls once and leaves the cursor on row N-1.
+    the last row it scrolls and leaves the cursor above the reserved rows.
+
+    The IND count must equal `reserve`. It was hard-coded to one back when the
+    bar reserved exactly one row, and when type-ahead started asking for a
+    second (its echo line) that left the cursor one row BELOW the new region —
+    reintroducing the exact wipe described above, on Windows, where
+    prompt_toolkit reliably parks the cursor on the bottom row.
 
     `region_active` says whether a scroll region is already in effect (the
     resize path, re-reserving mid-turn). It matters because IND scrolls
@@ -1386,6 +1392,7 @@ def _reserve_bottom_row_seq(rows: int, *, region_active: bool, reserve: int = 1)
     being streamed. Resetting to the full screen first — bracketed, since that
     escape homes too — makes IND behave exactly as it does at start().
     """
+    reserve = max(1, int(reserve))
     prelude = ""
     if region_active:
         prelude = (
@@ -1395,8 +1402,10 @@ def _reserve_bottom_row_seq(rows: int, *, region_active: bool, reserve: int = 1)
         )
     return (
         prelude
-        + "\033D"  # IND: down one row, scrolling if we're at the bottom
-        + "\033[A"  # CUU: back up one row (never scrolls)
+        # One IND per reserved row: each scrolls only if we're at the bottom,
+        # so together they guarantee `reserve` rows of room below the cursor.
+        + "\033D" * reserve
+        + f"\033[{reserve}A"  # CUU: back up the same number of rows (never scrolls)
         + "\0337"  # ESC 7: save cursor (DECSC)
         + f"\033[1;{rows - reserve}r"  # DECSTBM — reserve the bottom row(s) (homes)
         + "\0338"  # ESC 8: restore cursor (DECRC)
@@ -1428,7 +1437,19 @@ class StatusBar:
         bar.stop()   # always in a finally block
     """
 
-    def __init__(self, ctx_tokens: int = 0, extra_reserved_rows: int = 0) -> None:
+    def __init__(
+        self,
+        ctx_tokens: int = 0,
+        extra_reserved_rows: int = 0,
+        ctx_limit: int = 0,
+        compact_at: int = 0,
+    ) -> None:
+        # The model's input window and the token count at which older history
+        # gets compacted. A bare "context ~12,345" has no denominator, so it
+        # said nothing about how close auto-compact was — which made compaction
+        # arrive as a surprise mid-task.
+        self._ctx_limit = max(0, int(ctx_limit))
+        self._compact_at = max(0, int(compact_at))
         # Rows kept below the scroll region IN ADDITION to the bar's own. The
         # type-ahead echo lives on one of them; without the extra reservation
         # streamed output would scroll straight over it.
@@ -1522,6 +1543,34 @@ class StatusBar:
     # Internal
     # ------------------------------------------------------------------
 
+    def _context_segment(self, ctx: int) -> str:
+        """Context usage as pressure, not a bare number.
+
+        Without a window the old absolute count is all we can honestly show.
+        With one, the percentage is what tells the user whether they're about
+        to lose history — and the "compact at N%" marker only appears once
+        it's near enough to matter, so a fresh session stays quiet.
+        """
+        if self._ctx_limit <= 0:
+            return f"context ~{ctx:,}"
+        pct = ctx / self._ctx_limit
+        shown = round(pct * 100)
+        if self._compact_at <= 0:
+            return f"context {shown}%"
+        trigger = self._compact_at / self._ctx_limit
+        trigger_shown = round(trigger * 100)
+        if pct >= trigger:
+            # Past the line: compaction fires on the next turn.
+            return color(f"context {shown}% · compacting", GOLD)
+        if shown >= trigger_shown:
+            # Rounds to the trigger without having crossed it — printing
+            # "60% · compact at 60%" looks like a stuck bar rather than a
+            # near miss.
+            return color(f"context {shown}% · compact soon", GOLD)
+        if pct >= trigger * 0.6:
+            return f"context {shown}% · compact at {trigger_shown}%"
+        return f"context {shown}%"
+
     def _compose(self) -> str:
         with self._lock:
             elapsed = time.monotonic() - self._t0
@@ -1543,7 +1592,7 @@ class StatusBar:
         if tok > 0:
             parts.append(f"output ~{tok:,}")
         if ctx > 0:
-            parts.append(f"context ~{ctx:,}")
+            parts.append(self._context_segment(ctx))
 
         row = "  " + " · ".join(parts)
         cols = shutil.get_terminal_size((80, 24)).columns

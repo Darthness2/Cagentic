@@ -145,6 +145,10 @@ class TestRealSeatbelt(unittest.TestCase):
             pass
 
     def _run(self, command: str, **extra) -> str:
+        # session=False pins these to the one-shot path they were written for.
+        # The persistent-session path is confined by the same profile and is
+        # covered separately in TestSessionIsSandboxedToo.
+        extra.setdefault("session", False)
         return t_run_bash({"command": command, "timeout": 30, **extra}, self.ctx)
 
     def test_a_normal_command_still_works(self) -> None:
@@ -184,6 +188,68 @@ class TestRealSeatbelt(unittest.TestCase):
         finally:
             if probe.exists():
                 probe.unlink()
+
+
+@unittest.skipUnless(
+    sys.platform == "darwin" and shutil.which("sandbox-exec"),
+    "needs macOS sandbox-exec",
+)
+class TestSessionIsSandboxedToo(unittest.TestCase):
+    """The persistent shell is launched *inside* the sandbox, so it must be as
+    confined as a one-shot run — a session that escaped would be a silent hole
+    in the guarantee run_bash advertises."""
+
+    def setUp(self) -> None:
+        self._tmp = tempfile.TemporaryDirectory()
+        self.root = Path(self._tmp.name)
+        self.ctx = ToolContext(root=self.root, engine=_Engine({}))
+
+    def tearDown(self) -> None:
+        from cagentic.shell_session import POOL
+
+        POOL.close_all()
+        try:
+            self._tmp.cleanup()
+        except (OSError, PermissionError):
+            pass
+
+    def _run(self, command: str) -> str:
+        return t_run_bash({"command": command, "timeout": 30}, self.ctx)
+
+    def test_state_persists_between_calls(self) -> None:
+        (self.root / "sub").mkdir()
+        self._run("cd sub")
+        self.assertIn("/sub", self._run("pwd"))
+        self._run("export CAG_TEST=marker")
+        self.assertIn("marker", self._run('echo "$CAG_TEST"'))
+
+    def test_writes_outside_the_workspace_are_still_blocked(self) -> None:
+        target = Path.home() / ".cagentic-session-escape-probe"
+        try:
+            out = self._run(f"echo escaped > {target}")
+            self.assertIn("FAIL", out, "the session escaped the sandbox")
+            self.assertFalse(target.exists())
+        finally:
+            if target.exists():  # pragma: no cover - only on a real escape
+                target.unlink()
+
+    def test_a_failing_command_still_reports_its_exit_code(self) -> None:
+        out = self._run("false")
+        self.assertIn("exit code 1", out)
+        self.assertIn("FAIL", out)
+
+    def test_a_command_that_kills_the_shell_falls_back_instead_of_erroring(self) -> None:
+        """`exit` ends the session by definition. The user should still get
+        their result, and the next command should work on a fresh shell."""
+        out = self._run("exit 3")
+        self.assertIn("exit code 3", out)
+        self.assertIn("hello", self._run("echo hello"))
+
+    def test_session_false_bypasses_the_session(self) -> None:
+        (self.root / "sub").mkdir()
+        t_run_bash({"command": "cd sub", "timeout": 30}, self.ctx)
+        out = t_run_bash({"command": "pwd", "timeout": 30, "session": False}, self.ctx)
+        self.assertNotIn("/sub", out, "session=False must start from the workspace root")
 
 
 @unittest.skipUnless(

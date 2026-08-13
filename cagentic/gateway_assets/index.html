@@ -8,55 +8,79 @@
 <link rel="stylesheet" href="/app.css" />
 </head>
 <body>
+<!-- Icon sprite. One consistent 24x24 / 1.5px-stroke set replacing the mix of
+     HTML entities and emoji (►, ⋮, 🗑, ⚡, ⚙, ☽) that were doing icon duty —
+     inconsistent weight and colour is the clearest hobby-project signal, and
+     emoji render differently on every platform. Inlined because the gateway
+     ships its own assets and makes no external requests. -->
+<svg width="0" height="0" style="position:absolute" aria-hidden="true" focusable="false"><defs>
+  <symbol id="i-sidebar" viewBox="0 0 24 24"><path d="M4 5h16v14H4zM10 5v14"/></symbol>
+  <symbol id="i-plus" viewBox="0 0 24 24"><path d="M12 5v14M5 12h14"/></symbol>
+  <symbol id="i-volume" viewBox="0 0 24 24"><path d="M4 9v6h4l5 4V5L8 9zM17 9a4 4 0 0 1 0 6"/></symbol>
+  <symbol id="i-theme" viewBox="0 0 24 24"><path d="M12 3a9 9 0 1 0 9 9 7 7 0 0 1-9-9z"/></symbol>
+  <symbol id="i-settings" viewBox="0 0 24 24"><circle cx="12" cy="12" r="3"/><path d="M19.4 15a1.6 1.6 0 0 0 .3 1.8l.1.1a2 2 0 1 1-2.8 2.8l-.1-.1a1.6 1.6 0 0 0-1.8-.3 1.6 1.6 0 0 0-1 1.5V21a2 2 0 1 1-4 0v-.1A1.6 1.6 0 0 0 9 19.4a1.6 1.6 0 0 0-1.8.3l-.1.1a2 2 0 1 1-2.8-2.8l.1-.1a1.6 1.6 0 0 0 .3-1.8 1.6 1.6 0 0 0-1.5-1H3a2 2 0 1 1 0-4h.1A1.6 1.6 0 0 0 4.6 9a1.6 1.6 0 0 0-.3-1.8l-.1-.1a2 2 0 1 1 2.8-2.8l.1.1a1.6 1.6 0 0 0 1.8.3H9a1.6 1.6 0 0 0 1-1.5V3a2 2 0 1 1 4 0v.1a1.6 1.6 0 0 0 1 1.5 1.6 1.6 0 0 0 1.8-.3l.1-.1a2 2 0 1 1 2.8 2.8l-.1.1a1.6 1.6 0 0 0-.3 1.8V9a1.6 1.6 0 0 0 1.5 1H21a2 2 0 1 1 0 4h-.1a1.6 1.6 0 0 0-1.5 1z"/></symbol>
+  <symbol id="i-chevron-down" viewBox="0 0 24 24"><path d="m6 9 6 6 6-6"/></symbol>
+  <symbol id="i-chevron-right" viewBox="0 0 24 24"><path d="m9 6 6 6-6 6"/></symbol>
+  <symbol id="i-send" viewBox="0 0 24 24"><path d="M4 12h15M13 6l6 6-6 6"/></symbol>
+  <symbol id="i-stop" viewBox="0 0 24 24"><rect x="6" y="6" width="12" height="12" rx="2"/></symbol>
+  <symbol id="i-attach" viewBox="0 0 24 24"><path d="M21 11.5 12.4 20a5 5 0 0 1-7.1-7.1l8.7-8.6a3.4 3.4 0 1 1 4.8 4.8l-8.7 8.6a1.7 1.7 0 1 1-2.4-2.4l8-7.9"/></symbol>
+  <symbol id="i-mic" viewBox="0 0 24 24"><path d="M12 3a3 3 0 0 1 3 3v6a3 3 0 0 1-6 0V6a3 3 0 0 1 3-3zM5 11a7 7 0 0 0 14 0M12 18v3"/></symbol>
+  <symbol id="i-search" viewBox="0 0 24 24"><circle cx="11" cy="11" r="7"/><path d="m20 20-4-4"/></symbol>
+  <symbol id="i-copy" viewBox="0 0 24 24"><rect x="9" y="9" width="11" height="11" rx="2"/><path d="M5 15V5h10"/></symbol>
+  <symbol id="i-edit" viewBox="0 0 24 24"><path d="M4 20h4l10-10-4-4L4 16zM14 6l4 4"/></symbol>
+  <symbol id="i-trash" viewBox="0 0 24 24"><path d="M4 7h16M9 7V5h6v2M6 7l1 13h10l1-13"/></symbol>
+  <symbol id="i-retry" viewBox="0 0 24 24"><path d="M20 12a8 8 0 1 1-2.3-5.6M20 4v5h-5"/></symbol>
+  <symbol id="i-close" viewBox="0 0 24 24"><path d="M6 6l12 12M18 6 6 18"/></symbol>
+  <symbol id="i-check" viewBox="0 0 24 24"><path d="m5 13 4 4L19 7"/></symbol>
+  <symbol id="i-folder" viewBox="0 0 24 24"><path d="M4 6h5l2 2h9v10H4z"/></symbol>
+  <symbol id="i-more" viewBox="0 0 24 24"><circle cx="12" cy="5" r="1.2"/><circle cx="12" cy="12" r="1.2"/><circle cx="12" cy="19" r="1.2"/></symbol>
+  <symbol id="i-arrow-down" viewBox="0 0 24 24"><path d="M12 5v14m0 0-6-6m6 6 6-6"/></symbol>
+  <symbol id="i-warning" viewBox="0 0 24 24"><path d="M12 4 2.5 20h19zM12 10v4M12 17.5v.01"/></symbol>
+</defs></svg>
+
 <div id="app">
   <div class="scanlines"></div>
   <div class="vignette"></div>
 
+  <!-- One header row, not two. A chat app's chrome should get out of the way
+       of the conversation; the clock, the date, the session id and the
+       [bracket] framing were all HUD decoration rather than information. -->
   <header class="hud-header">
     <div class="hdr-left">
-        <span class="jl">C</span><span class="jd">&middot;</span><span class="jl">A</span><span class="jd">&middot;</span><span class="jl">G</span><span class="jd">&middot;</span><span class="jl">E</span><span class="jd">&middot;</span><span class="jl">N</span><span class="jd">&middot;</span><span class="jl">T</span><span class="jd">&middot;</span><span class="jl">I</span><span class="jd">&middot;</span><span class="jl">C</span>
-      <span class="j-sub">LOCAL AI ASSISTANT</span>
-    </div>
-    <div class="hdr-right">
-      <span class="badge b-on">&#9679; Online</span>
+      <button class="icon-btn hdr-icon" id="logsBtn" title="Chats (Ctrl+F)" aria-label="Chats">
+        <svg class="ico" aria-hidden="true"><use href="#i-sidebar"/></svg>
+      </button>
+      <span class="wordmark">Cagentic</span>
       <div class="model-switch" id="modelSwitch" title="Switch model">
-        <span class="ms-dot">&#9679;</span>
-        <span class="ms-name" id="msName">---</span>
-        <span class="ms-caret">&#9662;</span>
+        <span class="ms-dot" id="msDot" aria-hidden="true"></span>
+        <span class="ms-name" id="msName">&#8230;</span>
+        <svg class="ico ms-caret" aria-hidden="true"><use href="#i-chevron-down"/></svg>
         <div class="model-menu hidden" id="modelMenu"></div>
       </div>
-      <div class="j-clock" id="jClock">00:00:00</div>
-      <div class="j-date"  id="jDate">---</div>
+    </div>
+    <div class="hdr-right">
+      <button class="icon-btn hdr-icon" id="newMissionBtn" title="New chat (Ctrl+K)" aria-label="New chat">
+        <svg class="ico" aria-hidden="true"><use href="#i-plus"/></svg>
+      </button>
+      <button class="icon-btn hdr-icon toggle-btn" id="voiceOutBtn" title="Read replies aloud" aria-label="Read replies aloud" aria-pressed="false">
+        <svg class="ico" aria-hidden="true"><use href="#i-volume"/></svg>
+      </button>
+      <button class="icon-btn hdr-icon" id="themeBtn" title="Switch theme" aria-label="Switch theme">
+        <svg class="ico" aria-hidden="true"><use href="#i-theme"/></svg>
+      </button>
+      <button class="icon-btn hdr-icon" id="configBtn" title="Settings" aria-label="Settings">
+        <svg class="ico" aria-hidden="true"><use href="#i-settings"/></svg>
+      </button>
     </div>
   </header>
-
-  <div class="nav-bar">
-    <button class="nav-btn" id="logsBtn">[ Chats ]</button>
-    <button class="nav-btn" id="newMissionBtn">[ + New Chat ]</button>
-    <div class="nav-divider"></div>
-    <span class="nav-meta">SESSION <span id="jSession">--------</span></span>
-    <div class="nav-spacer"></div>
-    <button class="nav-btn toggle-btn" id="voiceOutBtn" title="Read replies aloud">[ &#128264; Voice: OFF ]</button>
-  
-    <div class="nav-divider"></div>
-    <button class="nav-btn" id="themeBtn" title="Switch theme">[ &#9681; Theme ]</button>
-    <button class="nav-btn" id="configBtn">[ CONFIG ]</button>
-  </div>
+  <span id="jSession" hidden></span>
 
   <main class="main-area">
     <div class="chat-stage">
       <div class="center-stack" id="centerStack">
-        <div class="orb-zone compact" id="orbZone">
-          <canvas id="orbCanvas"></canvas>
-          <div class="orb-rings">
-            <div class="ring r1"></div><div class="ring r2"></div>
-            <div class="ring r3"></div><div class="ring r4"></div>
-          </div>
-          <div class="orb-label" id="orbLabel">New Chat</div>
-        </div>
         <div id="log" class="chat-log"></div>
         <button id="jumpBtn" class="jump-btn hidden" title="Jump to latest">
-          <svg viewBox="0 0 24 24" width="14" height="14" aria-hidden="true"><path fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" d="M12 5v14m0 0-6-6m6 6 6-6"/></svg>
+          <svg class="ico sm" aria-hidden="true"><use href="#i-arrow-down"/></svg>
           <span>Latest</span>
         </button>
       </div>
@@ -65,42 +89,41 @@
 
   <div id="windowLayer"></div>
   <div id="restorePill" class="restore-pill" style="display:none">
-    <span class="restore-pill-icon">↩</span><span class="restore-pill-count">0</span> panels
+    <svg class="ico sm restore-pill-icon" aria-hidden="true"><use href="#i-chevron-right"/></svg><span class="restore-pill-count">0</span> panels
     <div class="restore-dropdown" id="restoreDropdown"></div>
   </div>
 
   <div class="cmd-area">
     <div id="attachBar" class="attach-bar hidden"></div>
     <div class="cmd-box" id="cmdBox">
-      <span class="cmd-prompt">&gt;_</span>
       <button id="attachBtn" class="icon-action" title="Attach files (or drag & drop / paste)" aria-label="Attach files">
-        <svg viewBox="0 0 24 24" width="17" height="17" aria-hidden="true"><path fill="none" stroke="currentColor" stroke-width="1.7" stroke-linecap="round" stroke-linejoin="round" d="M21 11.5l-8.6 8.6a5 5 0 1 1-7.1-7.1l8.7-8.6a3.4 3.4 0 1 1 4.8 4.8l-8.7 8.6a1.7 1.7 0 1 1-2.4-2.4l8-7.9"/></svg>
+        <svg class="ico" aria-hidden="true"><use href="#i-attach"/></svg>
       </button>
       <input id="fileInput" type="file" multiple hidden />
       <textarea id="input" rows="1" placeholder="Type a message&#8230;"></textarea>
       <button id="micBtn" class="icon-action" title="Voice input" aria-label="Voice input">
-        <svg viewBox="0 0 24 24" width="17" height="17" aria-hidden="true"><path fill="none" stroke="currentColor" stroke-width="1.7" stroke-linecap="round" stroke-linejoin="round" d="M12 3a3 3 0 0 1 3 3v6a3 3 0 0 1-6 0V6a3 3 0 0 1 3-3zM5 11a7 7 0 0 0 14 0M12 18v3"/></svg>
+        <svg class="ico" aria-hidden="true"><use href="#i-mic"/></svg>
       </button>
       <button id="send" class="exec-btn" title="Send (Enter)">
-        <svg viewBox="0 0 24 24" width="16" height="16" aria-hidden="true"><path fill="currentColor" d="M3.4 20.4 21 12 3.4 3.6 3.4 10l12.6 2-12.6 2z"/></svg>
+        <svg class="ico" aria-hidden="true"><use href="#i-send"/></svg>
         <span class="exec-label">Send</span>
       </button>
       <button id="stopBtn" class="exec-btn stop-btn hidden" title="Stop generating (Esc)">
-        <svg viewBox="0 0 24 24" width="14" height="14" aria-hidden="true"><rect x="6" y="6" width="12" height="12" rx="2" fill="currentColor"/></svg>
+        <svg class="ico" aria-hidden="true"><use href="#i-stop"/></svg>
         <span class="exec-label">Stop</span>
       </button>
     </div>
     <div class="cmd-footer">
-      <span>CAGENTIC v<span id="versionSpan">--</span></span>
+      <span>Cagentic <span id="versionSpan">--</span></span>
       <span id="hintText">Enter to send &bull; Shift+Enter newline &bull; Ctrl+K new chat &bull; Ctrl+F search</span>
-      <span id="busyLabel" class="busy-label hidden">&#9679; Thinking&#8230;</span>
+      <span id="busyLabel" class="busy-label hidden">Thinking&#8230;</span>
       <span id="tokenStats" class="token-stats hidden"></span>
     </div>
   </div>
 
   <div id="dropOverlay" class="drop-overlay hidden">
     <div class="drop-card">
-      <svg viewBox="0 0 24 24" width="34" height="34" aria-hidden="true"><path fill="none" stroke="currentColor" stroke-width="1.5" stroke-linecap="round" stroke-linejoin="round" d="M12 16V4m0 0L8 8m4-4 4 4M4 17v2a2 2 0 0 0 2 2h12a2 2 0 0 0 2-2v-2"/></svg>
+      <svg class="ico" style="width:32px;height:32px" aria-hidden="true"><use href="#i-arrow-down"/></svg>
       <div class="drop-title">Drop files to attach</div>
       <div class="drop-sub">Images, PDFs, Word docs and source files</div>
     </div>
@@ -110,13 +133,13 @@
 <!-- Sessions drawer -->
 <div id="sessionsPanel" class="sessions-panel">
   <div class="sessions-head">
-    <span class="panel-hdr">&#123; Sessions &#125;</span>
-    <button id="closeSessionsBtn" class="icon-btn">&#10005;</button>
+    <span class="panel-hdr">Chats</span>
+    <button id="closeSessionsBtn" class="icon-btn"><svg class="ico" aria-hidden="true"><use href="#i-close"/></svg></button>
   </div>
   <div class="sessions-search">
-    <svg viewBox="0 0 24 24" width="13" height="13" aria-hidden="true"><path fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" d="M11 4a7 7 0 1 1 0 14 7 7 0 0 1 0-14zM20 20l-4-4"/></svg>
+    <svg class="ico sm" aria-hidden="true"><use href="#i-search"/></svg>
     <input id="chatSearch" type="search" placeholder="Search chats&#8230;" autocomplete="off" spellcheck="false" />
-    <button id="chatSearchClear" class="icon-btn sm hidden" title="Clear search">&#10005;</button>
+    <button id="chatSearchClear" class="icon-btn sm hidden" title="Clear search"><svg class="ico" aria-hidden="true"><use href="#i-close"/></svg></button>
   </div>
   <div id="sessionList" class="session-list"></div>
 </div>
@@ -127,20 +150,20 @@
 <div id="settingsModal" class="modal hidden">
   <div class="modal-card">
     <div class="modal-head">
-      <span class="panel-hdr">&#123; Settings &#125;</span>
-      <button id="closeSettings" class="icon-btn">&#10005;</button>
+      <span class="panel-hdr">Settings</span>
+      <button id="closeSettings" class="icon-btn"><svg class="ico" aria-hidden="true"><use href="#i-close"/></svg></button>
     </div>
     <div class="modal-body">
       <div class="field">
-        <span class="field-label">MODEL</span>
+        <span class="field-label">Model</span>
         <select id="setModel"></select>
       </div>
       <div class="field">
-        <span class="field-label">OPERATOR NAME</span>
+        <span class="field-label">Your name</span>
         <input id="setName" type="text" placeholder="Your name" />
       </div>
       <div class="field">
-        <span class="field-label">TEMPERATURE &nbsp;<em id="tempVal">0.40</em></span>
+        <span class="field-label">Temperature &nbsp;<em id="tempVal">0.40</em></span>
         <input id="setTemp" type="range" min="0" max="1.5" step="0.05" />
       </div>
       <div class="field">
@@ -156,9 +179,9 @@
         <label class="toggle"><input id="setYolo" type="checkbox" /><span></span></label>
       </div>
       <hr class="settings-divider" />
-      <div class="section-label">GATEWAY</div>
+      <div class="section-label">Gateway</div>
       <div class="field">
-        <span class="field-label">PORT</span>
+        <span class="field-label">Port</span>
         <input id="setGwPort" type="number" min="1" max="65535" placeholder="8700" />
       </div>
       <div class="field row">
@@ -167,7 +190,7 @@
       </div>
       <div class="field-hint">Port takes effect next launch. Auto-start can be toggled anytime.</div>
       <hr class="settings-divider" />
-      <div class="section-label">PROACTIVE ASSISTANT</div>
+      <div class="section-label">Proactive assistant</div>
       <div class="field row">
         <span class="field-label">Monitor schedule and deadlines</span>
         <label class="toggle"><input id="setProactive" type="checkbox" /><span></span></label>
@@ -177,7 +200,7 @@
         <label class="toggle"><input id="setDesktopNotifications" type="checkbox" /><span></span></label>
       </div>
       <hr class="settings-divider" />
-      <div class="section-label">SYSTEM PROMPT</div>
+      <div class="section-label">System prompt</div>
       <div class="field">
         <span class="field-label">Custom instructions</span>
         <textarea id="setSysPrompt" rows="4" placeholder="Additional instructions appended to the system prompt&#8230;"></textarea>
@@ -194,7 +217,7 @@
   <div class="modal-card sm">
     <div class="modal-head">
       <span id="confirmTitle" class="modal-title">Confirm</span>
-      <button id="confirmClose" class="icon-btn">&#10005;</button>
+      <button id="confirmClose" class="icon-btn"><svg class="ico" aria-hidden="true"><use href="#i-close"/></svg></button>
     </div>
     <div class="modal-body">
       <p id="confirmMsg" class="modal-msg"></p>
@@ -211,7 +234,7 @@
   <div class="modal-card md">
     <div class="modal-head">
       <span class="modal-title">Rename</span>
-      <button id="renameClose" class="icon-btn">&#10005;</button>
+      <button id="renameClose" class="icon-btn"><svg class="ico" aria-hidden="true"><use href="#i-close"/></svg></button>
     </div>
     <div class="modal-body">
       <input id="renameInput" type="text" class="modal-input" />
@@ -228,7 +251,7 @@
   <div class="modal-card md">
     <div class="modal-head">
       <span class="modal-title">New Project</span>
-      <button id="newProjectModalClose" class="icon-btn">&#10005;</button>
+      <button id="newProjectModalClose" class="icon-btn"><svg class="ico" aria-hidden="true"><use href="#i-close"/></svg></button>
     </div>
     <div class="modal-body">
       <input id="newProjectInput" type="text" placeholder="Project name" class="modal-input" />
@@ -245,7 +268,7 @@
   <div class="modal-card md">
     <div class="modal-head">
       <span class="modal-title">Add to Project</span>
-      <button id="projectModalClose" class="icon-btn">&#10005;</button>
+      <button id="projectModalClose" class="icon-btn"><svg class="ico" aria-hidden="true"><use href="#i-close"/></svg></button>
     </div>
     <div class="modal-body" id="projectModalBody">
     </div>
@@ -261,15 +284,15 @@
   <div class="modal-card lg">
     <div class="modal-head">
       <span class="modal-title">Project Config</span>
-      <button id="projConfigClose" class="icon-btn">&#10005;</button>
+      <button id="projConfigClose" class="icon-btn"><svg class="ico" aria-hidden="true"><use href="#i-close"/></svg></button>
     </div>
     <div class="modal-body">
       <div class="field">
-        <span class="field-label">SYSTEM PROMPT</span>
+        <span class="field-label">System prompt</span>
         <textarea id="projConfigPrompt" rows="5" class="modal-textarea" placeholder="Custom instructions for this project's chats&#10;(appended after the base system prompt)"></textarea>
       </div>
       <div class="field">
-        <span class="field-label">CONTEXT / NOTES</span>
+        <span class="field-label">Context and notes</span>
         <textarea id="projConfigContext" rows="5" class="modal-textarea" placeholder="Reference material always included in this project's chats&#10;(e.g. coding standards, project background, key contacts)"></textarea>
       </div>
     </div>
@@ -282,10 +305,10 @@
 
 <!-- Context menu (floating) -->
 <div id="ctxMenu" class="ctx-menu hidden">
-  <div class="ctx-item" data-action="rename">&#9998; Rename</div>
-  <div class="ctx-item" data-action="project">&#128193; Add to Project</div>
+  <div class="ctx-item" data-action="rename"><svg class="ico sm" aria-hidden="true"><use href="#i-edit"/></svg> Rename</div>
+  <div class="ctx-item" data-action="project"><svg class="ico sm" aria-hidden="true"><use href="#i-folder"/></svg> Add to Project</div>
   <div class="ctx-sep"></div>
-  <div class="ctx-item ctx-danger" data-action="delete">&#128465; Delete</div>
+  <div class="ctx-item ctx-danger" data-action="delete"><svg class="ico sm" aria-hidden="true"><use href="#i-trash"/></svg> Delete</div>
 </div>
 
 <script src="/app.js"></script>

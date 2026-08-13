@@ -70,6 +70,10 @@ _DEFAULTS: dict[str, Any] = {
         # "deny" cuts network access unless the individual call passes
         # network=true (which the user sees at the approval prompt).
         "network": "deny",
+        # "auto" keeps one long-lived shell per workspace so `cd` and exported
+        # variables survive between run_bash calls. "off" runs every command in
+        # a fresh process (slower, but no shell lingers).
+        "session": "auto",
     },
     # Pattern permission rules — "tool" or "tool(glob)", e.g.
     #   "allow": ["run_bash(git status*)", "run_bash(git diff*)"]

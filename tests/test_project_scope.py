@@ -145,9 +145,7 @@ class TestSkillPrecedence(_Repo):
         self.user_skill("review", "GLOBAL")
         self.user_skill("only-global", "G")
         self.project_skill("review", "PROJECT")
-        self.assertEqual(
-            list_skills(self.root), [("only-global", "user"), ("review", "project")]
-        )
+        self.assertEqual(list_skills(self.root), [("only-global", "user"), ("review", "project")])
 
     def test_unknown_and_unsafe_names_return_nothing(self) -> None:
         self.assertIsNone(find_skill(self.root, "nope"))

@@ -22,8 +22,8 @@ from cagentic.cli import (
     _turn_summary,
     _user_message_indices,
 )
-from cagentic.tools import ToolContext, _read_text_robust, t_edit_file, t_write_file
 from cagentic.state import AppState
+from cagentic.tools import ToolContext, _read_text_robust, t_edit_file, t_write_file
 
 
 class _FakeAgent:

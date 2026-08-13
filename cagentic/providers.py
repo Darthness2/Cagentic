@@ -130,6 +130,106 @@ def context_window_for(model_spec: str, cfg: dict, default: int = 8192) -> int:
     return _PROVIDER_FALLBACK_WINDOW.get(provider, default)
 
 
+# Price per MILLION tokens as (input, output), longest matching prefix wins —
+# same resolution shape as _CONTEXT_WINDOWS above.
+#
+# Anthropic rates are transcribed from Anthropic's published model table
+# (checked 2026-08-13). Deliberately NOT filled in from memory for other cloud
+# providers: a confidently wrong price is worse than no price, so an unlisted
+# model reports its token counts with no dollar figure and points the user at
+# the config override. Add rates with:
+#     /set pricing.openai:gpt-4o 2.50,10.00
+_PRICES: tuple[tuple[str, float, float], ...] = (
+    ("claude-fable-5", 10.00, 50.00),
+    ("claude-mythos-5", 10.00, 50.00),
+    ("claude-opus-5", 5.00, 25.00),
+    ("claude-opus-4", 5.00, 25.00),
+    ("claude-sonnet-5", 3.00, 15.00),
+    ("claude-sonnet-4", 3.00, 15.00),
+    ("claude-haiku-4", 1.00, 5.00),
+)
+
+# Anthropic's cache economics: a read bills at ~10% of the base input rate, and
+# a write at 1.25x for the 5-minute TTL. Cagentic's cache_control blocks use the
+# default (5-minute) TTL — see anthropic_client._build_body — so 1.25 is the
+# right multiplier here; a 1h TTL would be 2.0.
+CACHE_READ_RATE = 0.10
+CACHE_WRITE_RATE = 1.25
+
+
+def price_for(model_spec: str, cfg: dict) -> tuple[float, float] | None:
+    """USD per million (input, output) tokens, or None when unknown.
+
+    Ollama is local and therefore free — an explicit (0, 0) rather than None,
+    so `/cost` can say "$0.00" instead of "unknown" for a local model.
+    """
+    if not isinstance(model_spec, str) or not model_spec.strip():
+        return None
+
+    override = _config.get_model_capability(cfg, model_spec, "pricing")
+    # `/set` writes a string, config.json may hold a list — accept both rather
+    # than silently ignoring a rate the user believes they configured.
+    if isinstance(override, str):
+        override = [p.strip() for p in override.replace(" ", ",").split(",") if p.strip()]
+    if isinstance(override, (list, tuple)) and len(override) == 2:
+        try:
+            rates = (float(override[0]), float(override[1]))
+        except (TypeError, ValueError):
+            _log.warning("ignoring invalid pricing override for %s: %r", model_spec, override)
+        else:
+            if rates[0] >= 0 and rates[1] >= 0:
+                return rates
+            _log.warning("ignoring negative pricing override for %s: %r", model_spec, override)
+    elif override is not None:
+        _log.warning("ignoring malformed pricing override for %s: %r", model_spec, override)
+
+    provider, name = parse_model(model_spec)
+    if provider == "ollama":
+        return (0.0, 0.0)
+
+    lowered = name.lower()
+    best: tuple[int, float, float] | None = None
+    for prefix, inp, out in _PRICES:
+        if lowered.startswith(prefix) and (best is None or len(prefix) > best[0]):
+            best = (len(prefix), inp, out)
+    return (best[1], best[2]) if best else None
+
+
+def estimate_cost(usage: dict, model_spec: str, cfg: dict) -> float | None:
+    """USD for one usage record, or None when the model has no known rate.
+
+    `input` from the providers is the *uncached* remainder, so cached tokens are
+    billed separately rather than double-counted — that separation is the whole
+    point of the Phase-1a caching work being measurable.
+    """
+    rate = price_for(model_spec, cfg)
+    if rate is None:
+        return None
+    inp, out = rate
+    per_token = 1_000_000.0
+    return (
+        int(usage.get("input", 0) or 0) * inp
+        + int(usage.get("output", 0) or 0) * out
+        + int(usage.get("cache_read", 0) or 0) * inp * CACHE_READ_RATE
+        + int(usage.get("cache_write", 0) or 0) * inp * CACHE_WRITE_RATE
+    ) / per_token
+
+
+def cost_without_cache(usage: dict, model_spec: str, cfg: dict) -> float | None:
+    """What the same turn would have cost with no prompt caching — the
+    counterfactual that makes the caching saving a number rather than a claim."""
+    rate = price_for(model_spec, cfg)
+    if rate is None:
+        return None
+    inp, out = rate
+    uncached = (
+        int(usage.get("input", 0) or 0)
+        + int(usage.get("cache_read", 0) or 0)
+        + int(usage.get("cache_write", 0) or 0)
+    )
+    return (uncached * inp + int(usage.get("output", 0) or 0) * out) / 1_000_000.0
+
+
 def build_client(cfg: dict, provider: str = "ollama") -> Any:
     """Return an instantiated client for *provider*.
 

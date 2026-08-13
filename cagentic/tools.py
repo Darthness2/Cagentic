@@ -34,10 +34,31 @@ logger = logging.getLogger(__name__)
 MAX_OUTPUT_CHARS = 16000
 
 
+# Ctrl-O reprints the most recent truncated tool result. Only the newest is
+# kept, and only up to this many characters: the point is to recover one result
+# you just watched get cut off, not to hold a whole session in memory.
+_EXPAND_CAP = 400_000
+_last_truncated: dict[str, object] = {}
+
+
+def _remember_truncated(full: str) -> None:
+    """Stash the untruncated text so the REPL can print it back on demand."""
+    _last_truncated.clear()
+    _last_truncated["text"] = full[:_EXPAND_CAP]
+    _last_truncated["total"] = len(full)
+    _last_truncated["clipped"] = len(full) > _EXPAND_CAP
+
+
+def last_truncated() -> dict | None:
+    """The most recent truncated tool output, or None if nothing was cut."""
+    return dict(_last_truncated) if _last_truncated else None
+
+
 def _truncate(s: str, limit: int = MAX_OUTPUT_CHARS) -> str:
     if len(s) <= limit:
         return s
-    return s[:limit] + f"\n…[truncated, {len(s) - limit} more chars]"
+    _remember_truncated(s)
+    return s[:limit] + f"\n…[truncated, {len(s) - limit} more chars — Ctrl-O to expand]"
 
 
 def _truncate_ends(s: str, limit: int = MAX_OUTPUT_CHARS) -> str:
@@ -51,12 +72,13 @@ def _truncate_ends(s: str, limit: int = MAX_OUTPUT_CHARS) -> str:
     """
     if len(s) <= limit:
         return s
+    _remember_truncated(s)
     head = (limit * 2) // 3
     tail = limit - head
     dropped = len(s) - head - tail
     return (
         s[:head]
-        + f"\n\n…[{dropped} chars of output omitted from the middle]\n\n"
+        + f"\n\n…[{dropped} chars omitted from the middle — Ctrl-O to expand]\n\n"
         + s[-tail:]
     )
 
@@ -698,7 +720,11 @@ def t_grep(args: dict, ctx: ToolContext) -> str:
 
     rg = _sh.which("rg")
     if rg and p.exists():
-        cmd = [rg, "-n", "--no-heading", "--color=never", "-m", "200"]
+        # --no-require-git: rg only applies .gitignore inside a repository,
+        # but the Python fallback below applies it everywhere. Without this
+        # the two paths disagree in a non-repo directory — the exact class
+        # of bug this filtering exists to remove.
+        cmd = [rg, "-n", "--no-heading", "--color=never", "--no-require-git", "-m", "200"]
         if case_insensitive:
             cmd.append("-i")
         cmd.extend(["--", pattern, str(p)])
@@ -715,7 +741,12 @@ def t_grep(args: dict, ctx: ToolContext) -> str:
         rx = re.compile(pattern, flags)
     except re.error as e:
         return f"ERROR: bad regex: {e}"
-    skip_dirs = {".git", "node_modules", "__pycache__", ".venv", "venv", "dist", "build"}
+    # ripgrep (the branch above) skips gitignored files for free. Without the
+    # same filter here the SAME search returns different results depending on
+    # whether `rg` happens to be installed.
+    from .gitignore import matcher_for
+
+    ignores = matcher_for(ctx.root)
     matches: list[str] = []
     targets = [p] if p.is_file() else list(p.rglob("*")) if p.is_dir() else []
     scanned = 0
@@ -723,7 +754,7 @@ def t_grep(args: dict, ctx: ToolContext) -> str:
     for f in targets:
         if not f.is_file():
             continue
-        if any(part in skip_dirs for part in f.parts):
+        if ignores.is_ignored(f):
             continue
         if any(s in f.parts for s in (".cache", "site-packages", ".tox", ".pytest_cache")):
             continue
@@ -755,17 +786,21 @@ def t_glob(args: dict, ctx: ToolContext) -> str:
         return f"ERROR: {exc}"
     if not base.exists() or not base.is_dir():
         return f"ERROR: not a directory: {base}"
-    skip_dirs = {".git", "node_modules", "__pycache__", ".venv", "venv", "dist", "build"}
+    from .gitignore import matcher_for
+
+    ignores = matcher_for(ctx.root)
     matches: list[str] = []
     if "**" in pattern or "/" in pattern:
         for p in base.rglob("*"):
-            if any(part in skip_dirs for part in p.parts):
+            if ignores.is_ignored(p):
                 continue
             rel = p.relative_to(base)
             if fnmatch.fnmatch(str(rel), pattern):
                 matches.append(str(rel))
     else:
         for p in base.iterdir():
+            if ignores.is_ignored(p):
+                continue
             if fnmatch.fnmatch(p.name, pattern):
                 matches.append(p.name)
     matches.sort()
@@ -2122,6 +2157,50 @@ def _strip_html(html: str) -> str:
     return text.strip()
 
 
+# DuckDuckGo answers a *GET* on duckduckgo.com/html/ with HTTP 202 and an
+# anti-bot "anomaly" interstitial carrying zero results, so every search failed
+# with a bare `ERROR: HTTP 202`. The form on that page POSTs to
+# html.duckduckgo.com, and that endpoint answers 200 with real results.
+_DDG_ENDPOINT = "https://html.duckduckgo.com/html/"
+
+_DDG_RESULT_RX = re.compile(
+    r'<a[^>]*class="[^"]*result__a[^"]*"[^>]*href="([^"]+)"[^>]*>(.*?)</a>', re.DOTALL
+)
+# DDG has shipped the snippet as both an <a> and a <div> over the years, and it
+# is only a bonus on top of title+url — so close on whichever tag arrives rather
+# than losing every snippet the next time they switch.
+_DDG_SNIPPET_RX = re.compile(
+    r'class="[^"]*result__snippet[^"]*"[^>]*>(.*?)</(?:a|div|span)>', re.DOTALL
+)
+# The interstitial names itself, which is what lets us say "blocked" instead of
+# reporting an empty-but-successful search.
+_DDG_CHALLENGE_RX = re.compile(r"anomaly|challenge-form|captcha", re.IGNORECASE)
+
+
+def _ddg_clean(fragment: str) -> str:
+    """Tags out, entities decoded, whitespace collapsed. Raw `&#x27;` in titles
+    reached the model, which then quoted them back verbatim; and the markup's
+    own newlines would break the one-line-per-field result layout."""
+    import html as html_mod
+
+    return " ".join(html_mod.unescape(_HTML_TAG_RX.sub("", fragment)).split())
+
+
+def _ddg_unwrap(href: str) -> str:
+    """DDG sometimes wraps hits as `//duckduckgo.com/l/?uddg=<encoded>`. The
+    model is handed these to fetch, so give it the destination, not the
+    redirector."""
+    if "duckduckgo.com/l/" not in href:
+        return href
+    from urllib.parse import parse_qs, urlsplit
+
+    try:
+        target = parse_qs(urlsplit(href).query).get("uddg", [""])[0]
+    except ValueError:
+        return href
+    return target or href
+
+
 def t_web_search(args: dict, ctx: ToolContext) -> str:
     """DuckDuckGo HTML-frontend scrape (no API key needed)."""
     import requests
@@ -2129,32 +2208,54 @@ def t_web_search(args: dict, ctx: ToolContext) -> str:
     q = args["query"]
     n = int(args.get("limit", 10))
     try:
-        r = requests.get(
-            "https://duckduckgo.com/html/",
-            params={"q": q},
-            headers={"User-Agent": "Mozilla/5.0 cagentic/0.1"},
+        r = requests.post(
+            _DDG_ENDPOINT,
+            data={"q": q},
+            headers={
+                "User-Agent": "Mozilla/5.0 cagentic/0.1",
+                # This endpoint is the search form's own target; a matching
+                # Referer makes it markedly less likely to serve the interstitial.
+                "Referer": "https://duckduckgo.com/",
+            },
             timeout=15,
             verify=not ctx.insecure_ssl,
         )
     except requests.RequestException as e:
         logger.warning("web_search: request failed", exc_info=True)
         return describe_request_error(e, "the search engine")
-    if r.status_code != 200:
-        return f"ERROR: HTTP {r.status_code}"
-    # Bound the HTML we run the (DOTALL, backtracking) result regex over so a
+
+    # Bound the HTML we run the (DOTALL, backtracking) result regexes over so a
     # huge/adversarial response can't trigger pathological backtracking.
-    html = r.text
-    if len(html) > _HTML_SCAN_CAP:
-        html = html[:_HTML_SCAN_CAP]
-    rx = re.compile(
-        r'<a[^>]*class="[^"]*result__a[^"]*"[^>]*href="([^"]+)"[^>]*>(.*?)</a>', re.DOTALL
-    )
-    items = rx.findall(html)
+    body = r.text
+    if len(body) > _HTML_SCAN_CAP:
+        body = body[:_HTML_SCAN_CAP]
+
+    hits = list(_DDG_RESULT_RX.finditer(body))
+    if not hits:
+        # Distinguish the three ways "nothing came back" can happen — a bot
+        # check, a genuine server error, and a query with no matches all used
+        # to collapse into one unhelpful line.
+        if _DDG_CHALLENGE_RX.search(body):
+            return (
+                f"ERROR: the search engine returned a bot check (HTTP {r.status_code}) instead "
+                "of results. Wait a moment and retry, or use web_fetch on a specific URL."
+            )
+        if r.status_code != 200:
+            return f"ERROR: the search engine returned HTTP {r.status_code}"
+        return "(no results)"
+
+    snippets = list(_DDG_SNIPPET_RX.finditer(body))
     out: list[str] = []
-    for href, title in items[:n]:
-        title_text = re.sub(r"<[^>]+>", "", title).strip()
-        out.append(f"- {title_text}\n  {href}")
-    return _truncate("\n".join(out) if out else "(no results)")
+    for i, m in enumerate(hits[:n]):
+        line = f"- {_ddg_clean(m.group(2))}\n  {_ddg_unwrap(m.group(1))}"
+        # Pair by position: a snippet belongs to the last title above it, so
+        # only accept one that falls before the next result begins.
+        stop = hits[i + 1].start() if i + 1 < len(hits) else len(body)
+        nxt = next((s for s in snippets if m.end() < s.start() < stop), None)
+        if nxt is not None and (text := _ddg_clean(nxt.group(1))):
+            line += "\n  " + (text if len(text) <= 240 else text[:239] + "…")
+        out.append(line)
+    return _truncate("\n".join(out))
 
 
 # ============================================================================
@@ -2300,6 +2401,67 @@ def _sandboxed_invocation(cmd: str, ctx: ToolContext, args: dict):
     ) + (network,)
 
 
+def _session_result(cmd: str, ctx: ToolContext, args: dict, timeout: int) -> str | None:
+    """Run `cmd` in the workspace's persistent shell, or None to fall back.
+
+    Returning None (rather than an error) on every unhappy path is deliberate:
+    a session is an optimisation, and a user whose shell died should still get
+    their command run.
+    """
+    from . import sandbox as _sandbox
+    from .shell_session import POOL
+
+    if not POOL.supported():
+        return None
+    engine = getattr(ctx, "engine", None)
+    cfg = getattr(engine, "config", None) or {}
+    shell_cfg = cfg.get("shell") if isinstance(cfg, dict) else None
+    shell_cfg = shell_cfg if isinstance(shell_cfg, dict) else {}
+    if str(shell_cfg.get("session", "auto")).lower() == "off":
+        return None
+    enabled, network = shell_sandbox_settings(ctx, args)
+    # The sandbox profile is baked into the shell at launch, so a call whose
+    # confinement differs from the session's cannot reuse it.
+    key = f"{Path(ctx.root).resolve()}|{enabled}|{network}"
+    argv, use_shell, note = _sandbox.wrap(
+        ["/bin/sh"], False, workspace=Path(ctx.root), network=network, enabled=enabled
+    )
+    if use_shell or not isinstance(argv, list):
+        return None
+    session = POOL.get(key, Path(ctx.root), argv)
+    if session is None:
+        return None
+
+    with session.lock:
+        with ui.Spinner(f"running: {cmd[:40] + ('…' if len(cmd) > 40 else '')}"):
+            code, output, error = session.run(cmd, timeout=timeout)
+    if error:
+        # Died or timed out: the caller retries one-shot, which also reports
+        # the timeout in the shape the model already understands.
+        logger.info("shell session unusable (%s); falling back to one-shot", error)
+        return None
+
+    status = "PASS" if code == 0 else "FAIL"
+    parts = [f"{status} (exit code {code})"]
+    if output:
+        # Session mode merges stderr into stdout — one stream is what makes the
+        # single-reader design deadlock-free. Label it honestly.
+        parts.append(f"--- output ---\n{output}")
+    if code != 0:
+        if not network and _sandbox.looks_like_network_denial(output):
+            parts.append(
+                "NOTE: the shell sandbox denies network access by default. If this "
+                "command genuinely needs the network, call run_bash again with "
+                "network=true — the user will be shown that it wants network access."
+            )
+        hint = _analyze_failure(output, "")
+        if hint:
+            parts.append(hint)
+    if note.startswith("NOT sandboxed"):
+        parts.append(f"NOTE: {note}")
+    return _truncate_ends("\n".join(parts))
+
+
 def t_run_bash(args: dict, ctx: ToolContext) -> str:
     from . import sandbox as _sandbox
 
@@ -2307,6 +2469,15 @@ def t_run_bash(args: dict, ctx: ToolContext) -> str:
     timeout = int(args.get("timeout", 60))
     if not ctx.confirm("shell command", cmd):
         return "ERROR: user denied command"
+
+    # A persistent shell keeps `cd` and exported vars alive between calls,
+    # which is what the model assumes when it "cd"s once and then runs a build.
+    # Opt out per call with session=false.
+    if args.get("session", True):
+        via_session = _session_result(cmd, ctx, args, timeout)
+        if via_session is not None:
+            return via_session
+
     run_cmd, use_shell, note, network = _sandboxed_invocation(cmd, ctx, args)
     try:
         with ui.Spinner(f"running: {cmd[:40] + ('…' if len(cmd) > 40 else '')}"):
@@ -2352,7 +2523,7 @@ def t_run_bash(args: dict, ctx: ToolContext) -> str:
         # Never let a missing sandbox be silent: the user's safety expectation
         # depends on knowing whether one is actually in place.
         parts.append(f"NOTE: {note}")
-    return _truncate("\n".join(parts))
+    return _truncate_ends("\n".join(parts))
 
 
 def t_bash_async(args: dict, ctx: ToolContext) -> str:
@@ -3873,7 +4044,7 @@ TOOL_SCHEMAS: list[dict[str, Any]] = [
         "type": "function",
         "function": {
             "name": "run_bash",
-            "description": "Run a shell command in the workspace. Requires user approval. Runs in a sandbox: it can read the system but can only write inside the workspace, and has NO network access unless you pass network=true.",
+            "description": "Run a shell command in the workspace. Requires user approval. Runs in a sandbox: it can read the system but can only write inside the workspace, and has NO network access unless you pass network=true. Commands share one persistent shell, so `cd` and exported variables persist between calls.",
             "parameters": {
                 "type": "object",
                 "properties": {
@@ -3882,6 +4053,10 @@ TOOL_SCHEMAS: list[dict[str, Any]] = [
                     "network": {
                         "type": "boolean",
                         "description": "Request network access for this command (installs, downloads, git fetch/push). The user sees that it was requested when approving. Leave unset for anything that doesn't need the internet.",
+                    },
+                    "session": {
+                        "type": "boolean",
+                        "description": "Default true: run in the workspace's persistent shell, so a `cd` or an exported variable carries over to your next call. Pass false to run in a clean one-shot shell instead.",
                     },
                 },
                 "required": ["command"],

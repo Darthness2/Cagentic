@@ -64,6 +64,9 @@ class Agent:
         # Text the user typed *during* the last turn (type-ahead). The REPL
         # submits it as the next turn instead of prompting.
         self.pending_input: str | None = None
+        # Text the user was mid-typing when a turn ended — pre-fills the next
+        # prompt so an unfinished line isn't silently thrown away.
+        self.pending_partial: str = ""
 
         if on_tools_disabled is not None:
 
@@ -131,11 +134,18 @@ class Agent:
         """
         self.last_turn_failed = False
         self.pending_input = None
+        self.pending_partial = ""
         active_ta = typeahead if (typeahead is not None and typeahead.can_run) else None
         pre_ctx = sum(len(str(m.get("content") or "")) // 4 for m in self.engine.messages)
         # The echo row must live outside the scroll region, or streamed output
         # scrolls straight over what the user is typing.
-        bar = ui.StatusBar(ctx_tokens=pre_ctx, extra_reserved_rows=1 if active_ta else 0)
+        bar = ui.StatusBar(
+            ctx_tokens=pre_ctx,
+            extra_reserved_rows=1 if active_ta else 0,
+            # Read per turn, not once: `/model` can move the window mid-session.
+            ctx_limit=self.engine.context_window(),
+            compact_at=self.engine.compact_threshold(),
+        )
         bar.start()
         if active_ta:
             active_ta.start_after_bar(bar)
@@ -179,6 +189,11 @@ class Agent:
                 # Ctrl-C text wins over an Enter-queued message: it's the more
                 # recent, more deliberate instruction.
                 self.pending_input = active_ta.consume_interrupt() or active_ta.take_pending()
+                # Whatever is left is a half-typed line: no Enter, no Ctrl-C,
+                # the turn just finished first. That used to die with the reader
+                # thread, so the user watched their sentence vanish.
+                self.pending_partial = active_ta.partial_buffer()
+                active_ta.reset_partial()
             bar.stop()
             self.last_turn_failed = rs.failed or not rs.completed
             if self.on_turn_complete:
@@ -401,9 +416,10 @@ def render_event(event: Message, rs: _RenderState) -> None:
         rs.run = None
     elif k == "done":
         rs.completed = True
-        usage = d.get("usage", {})
+        # Prefer the per-turn delta. `usage` is the session running total, so
+        # the old line grew every turn while reading like a per-turn cost.
+        usage = d.get("turn_usage") or d.get("usage", {})
         if any(usage.values()):
-            ui.meta(
-                f"tokens {usage.get('input', 0):,} in · {usage.get('output', 0):,} out"
-                f" · {usage.get('ms', 0):,} ms"
-            )
+            from .fmt import fmt_usage_line
+
+            ui.meta(fmt_usage_line(usage, d.get("cost")))

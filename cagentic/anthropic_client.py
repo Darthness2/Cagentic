@@ -54,6 +54,38 @@ _CACHE_CONTROL = {"type": "ephemeral"}
 _CACHEABLE_BLOCKS = {"text", "tool_use", "tool_result", "image", "document"}
 
 
+# Model families that still accept `temperature` / `top_p` / `top_k`.
+#
+# Anthropic REMOVED the sampling parameters on the newer families: sending
+# `temperature` to Opus 4.7/4.8/5, Sonnet 5, Fable 5 or Mythos 5 returns a 400.
+# Cagentic sets temperature on every request (QueryEngine defaults it to 0.4),
+# so without this filter those models cannot be used at all — every turn fails
+# before it starts.
+#
+# This is an ALLOW-list rather than a deny-list on purpose. The two mistakes are
+# not symmetric: omitting the parameter for a model that would have accepted it
+# just means the model uses its own default sampling, while sending it to one
+# that rejects it costs the entire request. An unrecognised (likely newer) model
+# therefore gets no sampling parameters.
+_SAMPLING_OK_PREFIXES = (
+    "claude-3",
+    "claude-opus-4-0",
+    "claude-opus-4-1",
+    "claude-opus-4-5",
+    "claude-opus-4-6",
+    "claude-sonnet-4-0",
+    "claude-sonnet-4-5",
+    "claude-sonnet-4-6",
+    "claude-haiku-4-5",
+)
+
+
+def _accepts_sampling_params(model: str) -> bool:
+    """True when this model still honours `temperature` and friends."""
+    name = (model or "").split(":", 1)[-1].strip().lower()
+    return name.startswith(_SAMPLING_OK_PREFIXES)
+
+
 def _make_tool_id() -> str:
     return f"toolu_{uuid.uuid4().hex[:12]}"
 
@@ -349,7 +381,7 @@ class AnthropicClient:
             body["system"] = system
         if tools:
             body["tools"] = self._convert_tools(tools)
-        if options and options.get("temperature") is not None:
+        if options and options.get("temperature") is not None and _accepts_sampling_params(model):
             body["temperature"] = options["temperature"]
         if stream:
             body["stream"] = True

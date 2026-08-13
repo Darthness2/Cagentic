@@ -55,6 +55,29 @@ import threading
 
 from . import ui
 
+# A reverse-video space, i.e. exactly what a block cursor looks like. The
+# hardware cursor can't be parked on the echo row (see `_paint`), so without a
+# drawn stand-in there is no visible insertion point while you type mid-turn.
+_CURSOR = "\033[7m \033[0m"
+
+
+def _visible_tail(text: str, width: int) -> str:
+    """Keep the END of a too-long line, marked with a leading ellipsis.
+
+    ``ui.truncate`` keeps the head, which is right for a label and wrong for an
+    input line — you type at the end, so the end is the part you need to see.
+    """
+    if width <= 0:
+        return ""
+    if ui._vlen(text) <= width:
+        return text
+    # Wide chars mean columns != characters, so trim by measurement. Slice to a
+    # generous bound first so a pasted paragraph doesn't make this quadratic.
+    cut = text[-(width + 8) :]
+    while cut and ui._vlen(cut) > width - 1:
+        cut = cut[1:]
+    return "…" + cut
+
 
 class TypeAhead:
     """Background type-ahead line reader + live echo, active only during a turn.
@@ -110,7 +133,13 @@ class TypeAhead:
             self._backend != "none"
             and sys.stdin.isatty()
             and sys.stdout.isatty()
-            and os.environ.get("COLLAMA_STATUS_BAR") != "off"
+            # Same precedence StatusBar.start() uses — checking only the
+            # legacy name meant CAGENTIC_STATUS_BAR=off disabled the bar
+            # while type-ahead still believed it could paint above it.
+            and os.environ.get("CAGENTIC_STATUS_BAR", os.environ.get("COLLAMA_STATUS_BAR", "on"))
+            .strip()
+            .lower()
+            not in {"off", "0", "false", "no"}
         )
 
     def make_interrupt_check(self):
@@ -375,19 +404,28 @@ class TypeAhead:
         with self._lock:
             buf = self._buf
             pending = self._pending
+        # The block cursor costs a column, so reserve it before laying out text.
+        avail -= 1
+        if avail < 1:
+            return
         if buf:
-            content = prefix + ui.truncate(buf, avail)
-            if pending:
-                content += ui.color(" ✉", ui.GOLD)
+            tag = ui.color(" ✉", ui.GOLD) if pending else ""
+            content = prefix + _visible_tail(buf, avail - ui._vlen(tag)) + _CURSOR + tag
         elif pending:
             mark = ui.color("✉ ", ui.GOLD)
-            content = prefix + mark + ui.truncate(pending, max(1, avail - ui._vlen(mark)))
+            body = _visible_tail(pending, max(1, avail - ui._vlen(mark)))
+            content = prefix + mark + body + _CURSOR
         else:
             hint = ui.color("type to queue · Ctrl-C to interrupt", ui.SOFT)
-            content = prefix + ui.truncate(hint, avail)
+            content = prefix + _CURSOR + ui.truncate(hint, avail)
         row = self._echo_row()
         # Move to the echo row, clear it, write the content, restore the cursor
         # — all under the shared paint lock so a StatusBar frame can't interleave.
+        #
+        # The real cursor is deliberately restored rather than parked here: it
+        # has to stay in the scroll region, because streamed output is written
+        # at wherever it happens to be. `_CURSOR` is a drawn stand-in, which is
+        # why it can sit on a row the hardware cursor must never rest on.
         ui.sync_write(f"\0337\033[{row};1H\033[2K{content}\0338")
 
     def _clear_row(self) -> None:

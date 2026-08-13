@@ -99,6 +99,8 @@ def validate_config_value(key: str, value: Any) -> str | None:
         return "shell.sandbox must be auto or off"
     if key == "shell.network" and value not in {"deny", "allow"}:
         return "shell.network must be deny or allow"
+    if key == "shell.session" and value not in {"auto", "off"}:
+        return "shell.session must be auto or off"
     if key == "tool_groups" and not (
         value is None
         or (

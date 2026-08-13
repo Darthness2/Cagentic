@@ -39,6 +39,7 @@ COMMAND_GROUPS: list[tuple[str, list[tuple[str, str, str]]]] = [
         "context",
         [
             ("/context", "", "show context token usage"),
+            ("/cost", "", "show token spend and cost for this session"),
             ("/compact", "", "summarize older turns, keep recent ones"),
             ("/effort", "[low|medium|high]", "show or set reasoning effort"),
         ],
@@ -145,20 +146,28 @@ def _toolbar_text(context: dict[str, object], columns: int) -> str:
     mode = _toolbar_clean(context.get("mode", "act")) or "act"
     approval = _toolbar_clean(context.get("approval", "ask")) or "ask"
     tools = _toolbar_clean(context.get("tools", "tools on")) or "tools on"
+    # Empty outside a git work tree, so a non-repo workspace shows nothing
+    # rather than a confusing placeholder.
+    branch = _toolbar_clean(context.get("branch", ""))
+    if len(branch) > 20:
+        branch = branch[:19] + "…"
 
     if len(model) > 24:
         model = model[:23] + "…"
     if len(workspace) > 28:
         workspace = "…" + workspace[-27:]
 
+    # Branch sits next to the workspace: together they answer "where am I?",
+    # which is what people get wrong when several sessions are open.
+    where = f"{workspace} ({branch})" if branch else workspace
     if columns >= 104:
-        parts = [mode, approval, tools, model, workspace]
+        parts = [mode, approval, tools, model, where]
         controls = "Enter send · Esc+Enter newline · / commands · @ files"
     elif columns >= 72:
-        parts = [mode, approval, model, workspace]
+        parts = [mode, approval, model, where]
         controls = "/ commands · @ files"
     elif columns >= 48:
-        parts = [mode, approval, workspace]
+        parts = [mode, approval, where]
         controls = "/ · @"
     else:
         parts = [mode, approval]
@@ -360,6 +369,34 @@ def _build_pt_session(
     def _insert_newline(event) -> None:
         event.current_buffer.insert_text("\n")
 
+    @bindings.add("c-o")
+    def _expand_last_output(event) -> None:
+        """Ctrl-O: reprint the last truncated tool result in full.
+
+        `_truncate` cut the output and the rest was simply gone — the model saw
+        the same clipped text, but the user had no way to look at what was
+        dropped. Printing goes through `run_in_terminal` so prompt_toolkit
+        tears down and redraws its own render rather than fighting it.
+        """
+        from prompt_toolkit.application import run_in_terminal
+
+        from . import ui
+        from .tools import last_truncated
+
+        def _show() -> None:
+            record = last_truncated()
+            if not record:
+                ui.meta("nothing truncated to expand")
+                return
+            total = int(record.get("total", 0))
+            print()
+            ui.meta(f"full output · {total:,} chars")
+            print(str(record.get("text", "")))
+            if record.get("clipped"):
+                ui.warn("output was too large to keep in full; showing the first part")
+
+        run_in_terminal(_show)
+
     history: Any
     if persist_history:
         history_path = config_dir() / "history"
@@ -456,7 +493,10 @@ class Prompt:
         """Supply live mode/model data for the responsive bottom toolbar."""
         self._context_provider = provider
 
-    def ask(self, prompt: str) -> str:
+    def ask(self, prompt: str, default: str = "") -> str:
+        """`default` pre-fills the input line, editable and with the cursor at
+        its end. Used to hand back text the user was mid-typing when a turn
+        finished under them (see `typeahead.partial_buffer`)."""
         if self._pt is not None:
             rendered_prompt: Any
             try:
@@ -465,8 +505,23 @@ class Prompt:
                 rendered_prompt = ANSI(prompt)
             except Exception:
                 rendered_prompt = prompt
-            return self._pt.prompt(rendered_prompt)
-        result = input(prompt)
+            return self._pt.prompt(rendered_prompt, default=default)
+        if default and self._readline:
+            # input() has no pre-fill; readline's startup hook is the only way,
+            # and it must be cleared afterwards or it re-inserts the same text
+            # on every later prompt.
+            try:
+                import readline
+
+                readline.set_startup_hook(lambda: readline.insert_text(default))
+                try:
+                    result = input(prompt)
+                finally:
+                    readline.set_startup_hook()
+            except (ImportError, OSError):
+                result = input(prompt)
+        else:
+            result = input(prompt)
         if self._readline and not _safe_for_history(result):
             try:
                 import readline

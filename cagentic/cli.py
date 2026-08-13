@@ -45,9 +45,10 @@ from .providers import (
 )
 from .services.compact import SUMMARY_MARKER
 
-OUTPUT_FORMAT = click.Choice(("text", "json"), case_sensitive=False)
+OUTPUT_FORMAT = click.Choice(("text", "json", "stream-json"), case_sensitive=False)
 SERVICE = click.Choice(("github", "openai", "anthropic"), case_sensitive=False)
 SHELL = click.Choice(("bash", "zsh", "fish"), case_sensitive=False)
+PERMISSION_MODE = click.Choice(("ask", "accept-edits", "plan", "yolo"), case_sensitive=False)
 
 
 def _nonempty(_ctx: click.Context, param: click.Parameter, value: str | None) -> str | None:
@@ -106,6 +107,18 @@ class RuntimeOptions:
     port: int | None = None
     dry_run: bool = False
     result: dict[str, Any] | None = None
+    # Automation surface — what lets Cagentic be driven from a script or CI
+    # rather than only from a person's terminal.
+    continue_last: bool = False
+    resume_id: str | None = None
+    allowed_tools: str | None = None
+    disallowed_tools: str | None = None
+    permission_mode: str | None = None
+    append_system_prompt: str | None = None
+    # Emit newline-delimited JSON events instead of rendering to a terminal.
+    stream_json: bool = False
+    # The real stdout, held while human-facing output is redirected to stderr.
+    stream_sink: Any = None
 
 
 def _search_sessions(query: str) -> list[dict]:
@@ -567,6 +580,47 @@ def _redact(cfg: dict) -> dict:
     return config.redact_secrets(cfg)
 
 
+def _report_cost(agent: Agent) -> None:
+    """`/cost` — session token spend and, where the rate is known, dollars.
+
+    Deliberately says "no published rate" rather than printing $0.00 for an
+    unpriced model: a fabricated zero is worse than an honest gap, and the
+    override hint turns the gap into something the user can close.
+    """
+    from .fmt import fmt_cost, fmt_tokens
+
+    usage = dict(agent.engine._usage)
+    if not any(usage.values()):
+        ui.info("no model calls yet this session")
+        return
+
+    report = agent.engine.cost_report(usage)
+    spec = report.get("model") or agent.model
+    ui.info(f"session usage · {spec}")
+    ui.list_item("input", detail=f"{int(usage.get('input', 0)):,} tokens")
+    ui.list_item("output", detail=f"{int(usage.get('output', 0)):,} tokens")
+    cache_read = int(usage.get("cache_read", 0) or 0)
+    cache_write = int(usage.get("cache_write", 0) or 0)
+    if cache_read or cache_write:
+        ui.list_item(
+            "cached",
+            detail=f"{cache_read:,} read · {cache_write:,} written",
+        )
+
+    spent = report.get("spent")
+    if spent is None:
+        ui.list_item("cost", detail="no published rate for this model")
+        ui.meta(f"add one with:  /set models.{spec}.pricing <in_per_1M>,<out_per_1M>")
+        return
+    ui.list_item("cost", detail=fmt_cost(spent))
+    saved = report.get("saved") or 0.0
+    if saved >= 0.005:
+        ui.list_item("saved by caching", detail=fmt_cost(saved))
+    total_tokens = sum(int(usage.get(k, 0) or 0) for k in ("input", "output", "cache_read"))
+    if total_tokens:
+        ui.meta(f"{fmt_tokens(total_tokens)} tokens billed across the session")
+
+
 def _retry_snapshot(agent: Agent) -> list[dict]:
     """Copy conversation state without freezing the live system prompt."""
     messages = agent.messages
@@ -738,7 +792,12 @@ def _settle_in(agent: Agent) -> None:
             ui.meta(f"{len(overdue) - 5} more · use /remind to see all")
 
 
-def repl(agent: Agent, cfg: dict, gateway_holder: dict | None = None) -> int:
+def repl(
+    agent: Agent,
+    cfg: dict,
+    gateway_holder: dict | None = None,
+    resumed: dict | None = None,
+) -> int:
     gateway_holder = gateway_holder if gateway_holder is not None else {"server": None}
 
     def _live_gateway():
@@ -802,7 +861,9 @@ def repl(agent: Agent, cfg: dict, gateway_holder: dict | None = None) -> int:
         dry_run=agent.state.dry_run,
     )
 
-    session = sessions.make(agent.state.active_model_spec or agent.model)
+    # A resumed conversation keeps its own record, so autosave appends to it
+    # rather than forking a second session with the same content.
+    session = resumed or sessions.make(agent.state.active_model_spec or agent.model)
 
     def _on_turn(a):
         if not a.state.dry_run:
@@ -835,6 +896,9 @@ def repl(agent: Agent, cfg: dict, gateway_holder: dict | None = None) -> int:
                     else "ask changes"
                 ),
                 "tools": "tools on" if agent.tools_enabled else "tools off",
+                # Cached for a few seconds inside branch_label — the toolbar
+                # repaints per keystroke and must not shell out to git that often.
+                "branch": _branch_label(agent.state.workspace),
             }
         )
     if prompt.status_note:
@@ -852,6 +916,10 @@ def repl(agent: Agent, cfg: dict, gateway_holder: dict | None = None) -> int:
 
     typeahead = TypeAhead()
     queued: str | None = None
+    # A line the user was mid-typing when a turn ended. Held across any
+    # type-ahead-queued turns that run first, and cleared once a prompt has
+    # actually pre-filled with it.
+    carried: str = ""
     while True:
         if queued is not None:
             # Submitted mid-turn via type-ahead — run it straight away rather
@@ -866,10 +934,14 @@ def repl(agent: Agent, cfg: dict, gateway_holder: dict | None = None) -> int:
             ui.prepare_for_input()
             print()
             try:
-                line = prompt.ask(ui.prompt_prefix()).strip()
+                line = prompt.ask(ui.prompt_prefix(), default=carried).strip()
             except (EOFError, KeyboardInterrupt):
                 print()
                 return 0
+            finally:
+                # Consumed either way: on Ctrl-C the user is discarding it, and
+                # re-offering it at the next prompt would be a resurrection.
+                carried = ""
             if not line:
                 continue
 
@@ -906,6 +978,7 @@ def repl(agent: Agent, cfg: dict, gateway_holder: dict | None = None) -> int:
                         ui.warn("interrupted")
                         continue
                     queued = agent.pending_input
+                    carried = agent.pending_partial or carried
                     continue
 
             no_argument_commands = {
@@ -914,6 +987,7 @@ def repl(agent: Agent, cfg: dict, gateway_holder: dict | None = None) -> int:
                 "compact",
                 "config",
                 "context",
+                "cost",
                 "diag",
                 "help",
                 "models",
@@ -1766,27 +1840,29 @@ def repl(agent: Agent, cfg: dict, gateway_holder: dict | None = None) -> int:
                     ui.meta("/rewind <n> undoes turn n and everything after it")
                     continue
                 try:
-                    target = int(arg1)
+                    rewind_to = int(arg1)
                 except ValueError:
                     ui.warn("usage: /rewind [n] — n is a turn number from /rewind")
                     continue
-                if not any(number == target for number, _t, _e in turns):
-                    ui.warn(f"no turn {target} in this session; run /rewind to list them")
+                if not any(number == rewind_to for number, _t, _e in turns):
+                    ui.warn(f"no turn {rewind_to} in this session; run /rewind to list them")
                     continue
                 # Newest first: a later edit to the same file must be undone
                 # before an earlier one, or the earlier "before" text gets
                 # clobbered by the later restore.
-                doomed = [e for e in hist if int(e.get("turn", 0)) >= target]
+                doomed = [e for e in hist if int(e.get("turn", 0)) >= rewind_to]
                 _reverted, problems = _revert_edits(list(reversed(doomed)))
                 for problem in problems:
                     ui.error(f"rewind refused: {problem}")
                 if problems:
                     ui.warn("no files were reverted; resolve the conflicts above and retry")
                     continue
-                agent.state.update(edit_history=[e for e in hist if int(e.get("turn", 0)) < target])
-                dropped = _truncate_to_turn(agent, target)
+                agent.state.update(
+                    edit_history=[e for e in hist if int(e.get("turn", 0)) < rewind_to]
+                )
+                dropped = _truncate_to_turn(agent, rewind_to)
                 ui.info(
-                    f"rewound to before turn {target} — reverted {len(doomed)} file "
+                    f"rewound to before turn {rewind_to} — reverted {len(doomed)} file "
                     f"edit(s), dropped {dropped} message(s)"
                 )
                 if not _persist_session():
@@ -1874,6 +1950,9 @@ def repl(agent: Agent, cfg: dict, gateway_holder: dict | None = None) -> int:
                     cfg, model_spec=agent.state.active_model_spec or agent.model
                 )
                 ui.info(f"context: {used:,} / {limit:,} tokens ({used / max(1, limit):.0%})")
+                continue
+            if cmd == "cost":
+                _report_cost(agent)
                 continue
             if cmd == "compact":
                 from .services.compact import auto_compact
@@ -2030,6 +2109,7 @@ def repl(agent: Agent, cfg: dict, gateway_holder: dict | None = None) -> int:
             ui.warn("interrupted")
             continue
         queued = agent.pending_input
+        carried = agent.pending_partial or carried
 
 
 # Built-in slash commands, derived from the one catalog so a project command
@@ -2090,6 +2170,17 @@ def _project_facts(workspace: Path, limit: int = 60) -> str:
 
 
 _BUILTIN_COMMAND_NAMES = frozenset(name.lstrip("/") for name in ALL_COMMANDS)
+
+
+def _branch_label(workspace: Path) -> str:
+    """Git branch (with `*` when dirty) for the prompt toolbar, or ""."""
+    try:
+        from .gitignore import branch_label
+
+        return branch_label(workspace)
+    except Exception:
+        # The toolbar must never be the thing that breaks the prompt.
+        return ""
 
 
 def _revert_edits(entries: list[dict]) -> tuple[int, list[str]]:
@@ -2166,6 +2257,80 @@ def _truncate_to_turn(agent: Agent, target: int) -> int:
     dropped = len(agent.messages) - cut
     agent.load_messages(agent.messages[:cut])
     return dropped
+
+
+def _split_rules(text: str | None) -> list[str]:
+    """Parse a comma-separated --allowed-tools / --disallowed-tools value."""
+    return [part.strip() for part in (text or "").split(",") if part.strip()]
+
+
+def _apply_automation_options(agent: Agent, args: RuntimeOptions) -> None:
+    """Apply the non-interactive flags: permission mode, rules, prompt, resume.
+
+    These exist so Cagentic can be driven from a script or CI, where there is
+    nobody to answer a y/n prompt — which is why `--permission-mode` has to be
+    able to reach the same states the slash commands set interactively.
+    """
+    mode = (args.permission_mode or "").lower()
+    if mode == "yolo":
+        agent.state.update(yolo=True)
+    elif mode == "accept-edits":
+        agent.state.update(approval_mode="accept_edits")
+    elif mode == "plan":
+        agent.state.update(plan_mode=True)
+    elif mode == "ask":
+        agent.state.update(approval_mode="ask", yolo=False)
+
+    allow = _split_rules(args.allowed_tools)
+    deny = _split_rules(args.disallowed_tools)
+    if allow or deny:
+        rules = copy.deepcopy(agent.state.permission_rules or {})
+        rules["allow"] = list(rules.get("allow") or []) + allow
+        rules["deny"] = list(rules.get("deny") or []) + deny
+        agent.state.update(permission_rules=rules)
+
+    if args.append_system_prompt:
+        # Appended rather than replacing: the base prompt carries the tool
+        # contracts the model needs to function at all.
+        suffix = agent.engine.system_suffix or ""
+        agent.engine.system_suffix = (
+            suffix + "\n\n" + args.append_system_prompt if suffix else args.append_system_prompt
+        )
+        agent.engine.refresh_system_prompt()
+
+
+def _resume_session(agent: Agent, args: RuntimeOptions) -> dict | None:
+    """Load the session named by --continue/--resume, or None.
+
+    Returns the session record so the caller keeps saving into it rather than
+    starting a fresh one — resuming into a new session would silently fork the
+    conversation the user asked to continue.
+    """
+    if not (args.continue_last or args.resume_id):
+        return None
+    listed = sessions.list_all()
+    if not listed:
+        ui.warn("no saved conversations to resume")
+        return None
+    target: dict | None
+    if args.continue_last:
+        # list_all() sorts by updated_at descending, so [0] is the newest.
+        target = listed[0]
+    else:
+        target = _resolve_session_arg(args.resume_id or "", listed)
+    if target is None:
+        ui.error(_session_miss(args.resume_id or "", listed))
+        return None
+    loaded = sessions.load(target["id"])
+    if loaded is None:
+        ui.error(f"could not load session {target['id']}")
+        return None
+    agent.load_messages(loaded.get("messages", []))
+    agent.engine.session_id = loaded["id"]
+    ui.info(
+        f"resumed {loaded.get('title') or loaded['id']} ({len(loaded.get('messages', []))} messages)"
+    )
+    return loaded
 
 
 def _list_models_with_retry(client, attempts: int = 5, delay: float = 2.0):
@@ -2370,6 +2535,8 @@ def _run_runtime(args: RuntimeOptions) -> int:
         # only where we intend to (via an explicit state.update).
         permission_rules=copy.deepcopy(config.get_value(cfg, "permissions", {}) or {}),
     )
+    _apply_automation_options(agent, args)
+    resumed_session = _resume_session(agent, args)
 
     saved_groups = config.get_value(cfg, "tool_groups", None)
     if isinstance(saved_groups, list):
@@ -2496,6 +2663,24 @@ def _run_runtime(args: RuntimeOptions) -> int:
         _shutdown()
         return 0
 
+    if args.prompt is not None and args.stream_json:
+        # One JSON object per engine event, newline-delimited — what lets
+        # another program consume the run as it happens. `event_payload` is
+        # shared with the gateway's SSE mapping so the two can't drift.
+        from .engine import event_payload
+
+        sink = args.stream_sink or sys.stdout
+        failed = False
+        try:
+            for event in agent.engine.submit_message(args.prompt):
+                print(json.dumps(event_payload(event), default=str), file=sink, flush=True)
+                if event.kind == "error":
+                    failed = True
+        except (OllamaError, OSError) as exc:
+            print(json.dumps({"kind": "error", "text": str(exc)}), file=sink, flush=True)
+            return 1
+        return 1 if failed else 0
+
     if args.prompt is not None:
         response = agent.turn(args.prompt)
         if args.result is not None:
@@ -2509,7 +2694,7 @@ def _run_runtime(args: RuntimeOptions) -> int:
                 }
             )
         return 1 if agent.last_turn_failed else 0
-    return repl(agent, cfg, gateway_holder)
+    return repl(agent, cfg, gateway_holder, resumed=resumed_session)
 
 
 def _format_option(function: Callable[..., Any]) -> Callable[..., Any]:
@@ -2578,6 +2763,46 @@ def _runtime_options(function: Callable[..., Any]) -> Callable[..., Any]:
             default=None,
             help="Enable or disable automatic tool approval for this run.",
         ),
+        click.option(
+            "-c",
+            "--continue",
+            "continue_last",
+            is_flag=True,
+            help="Resume the most recent conversation.",
+        ),
+        click.option(
+            "--resume",
+            "resume_id",
+            metavar="SESSION",
+            callback=_nonempty,
+            help="Resume a saved conversation by id or list number.",
+        ),
+        click.option(
+            "--allowed-tools",
+            metavar="RULES",
+            callback=_nonempty,
+            help=(
+                "Comma-separated permission rules to allow for this run, e.g. "
+                "'run_bash(git status*),read_file'. Same syntax as /rules."
+            ),
+        ),
+        click.option(
+            "--disallowed-tools",
+            metavar="RULES",
+            callback=_nonempty,
+            help="Comma-separated rules to deny for this run. Deny beats everything.",
+        ),
+        click.option(
+            "--permission-mode",
+            type=PERMISSION_MODE,
+            help="ask (default), accept-edits, plan, or yolo.",
+        ),
+        click.option(
+            "--append-system-prompt",
+            metavar="TEXT",
+            callback=_nonempty,
+            help="Extra instructions appended to the system prompt for this run.",
+        ),
     ]
     for decorator in reversed(decorators):
         function = decorator(function)
@@ -2602,6 +2827,20 @@ def _capture_operation(operation: Callable[[], int]) -> tuple[int, list[str], li
         else:
             os.environ["NO_COLOR"] = previous_no_color
     return code, stdout.getvalue().splitlines(), stderr.getvalue().splitlines()
+
+
+def _run_stream_json(options: RuntimeOptions) -> int:
+    """Run one prompt with stdout reserved for newline-delimited JSON events.
+
+    Start-up is chatty — a browser-bridge port clash, a model-capability
+    warning — and every one of those lines used to land on stdout, where it
+    corrupted the stream the caller was piping into `jq`. Human-facing output
+    is redirected to stderr for the whole run; only events reach stdout.
+    """
+    options.stream_json = True
+    options.stream_sink = sys.stdout
+    with contextlib.redirect_stdout(sys.stderr):
+        return _run_runtime(options)
 
 
 def _run_json(options: RuntimeOptions) -> int:
@@ -2798,6 +3037,12 @@ def cli(
     temperature: float | None,
     name: str | None,
     yolo: bool | None,
+    continue_last: bool,
+    resume_id: str | None,
+    allowed_tools: str | None,
+    disallowed_tools: str | None,
+    permission_mode: str | None,
+    append_system_prompt: str | None,
     doctor: bool,
     sessions: bool,
     search: str | None,
@@ -2865,6 +3110,12 @@ def cli(
         temperature=temperature,
         name=name,
         yolo=yolo,
+        continue_last=continue_last,
+        resume_id=resume_id,
+        allowed_tools=allowed_tools,
+        disallowed_tools=disallowed_tools,
+        permission_mode=permission_mode,
+        append_system_prompt=append_system_prompt,
         doctor=doctor,
         list_sessions=sessions,
         search=search,
@@ -2899,6 +3150,12 @@ def chat_command(
     temperature: float | None,
     name: str | None,
     yolo: bool | None,
+    continue_last: bool,
+    resume_id: str | None,
+    allowed_tools: str | None,
+    disallowed_tools: str | None,
+    permission_mode: str | None,
+    append_system_prompt: str | None,
     dry_run: bool,
 ) -> int:
     """Start an explicitly interactive terminal session."""
@@ -2912,6 +3169,12 @@ def chat_command(
             name=name,
             yolo=yolo,
             dry_run=dry_run,
+            continue_last=continue_last,
+            resume_id=resume_id,
+            allowed_tools=allowed_tools,
+            disallowed_tools=disallowed_tools,
+            permission_mode=permission_mode,
+            append_system_prompt=append_system_prompt,
         )
     )
 
@@ -2929,6 +3192,12 @@ def run_command(
     temperature: float | None,
     name: str | None,
     yolo: bool | None,
+    continue_last: bool,
+    resume_id: str | None,
+    allowed_tools: str | None,
+    disallowed_tools: str | None,
+    permission_mode: str | None,
+    append_system_prompt: str | None,
     dry_run: bool,
     output_format: str,
 ) -> int:
@@ -2943,7 +3212,15 @@ def run_command(
         yolo=yolo,
         prompt=prompt,
         dry_run=dry_run,
+        continue_last=continue_last,
+        resume_id=resume_id,
+        allowed_tools=allowed_tools,
+        disallowed_tools=disallowed_tools,
+        permission_mode=permission_mode,
+        append_system_prompt=append_system_prompt,
     )
+    if output_format == "stream-json":
+        return _run_stream_json(options)
     return _run_json(options) if output_format == "json" else _run_runtime(options)
 
 
@@ -3244,6 +3521,12 @@ def serve_command(
     temperature: float | None,
     name: str | None,
     yolo: bool | None,
+    continue_last: bool,
+    resume_id: str | None,
+    allowed_tools: str | None,
+    disallowed_tools: str | None,
+    permission_mode: str | None,
+    append_system_prompt: str | None,
     port: int | None,
     dry_run: bool,
     output_format: str,
@@ -3259,6 +3542,12 @@ def serve_command(
         yolo=yolo,
         port=port,
         dry_run=dry_run,
+        continue_last=continue_last,
+        resume_id=resume_id,
+        allowed_tools=allowed_tools,
+        disallowed_tools=disallowed_tools,
+        permission_mode=permission_mode,
+        append_system_prompt=append_system_prompt,
     )
     if dry_run:
         return _serve_preview(options, output_format)
@@ -3405,6 +3694,12 @@ def _run_classic_cli(
     temperature: float | None,
     name: str | None,
     yolo: bool | None,
+    continue_last: bool,
+    resume_id: str | None,
+    allowed_tools: str | None,
+    disallowed_tools: str | None,
+    permission_mode: str | None,
+    append_system_prompt: str | None,
     doctor: bool,
     list_sessions: bool,
     search: str | None,
@@ -3632,11 +3927,21 @@ def _run_classic_cli(
         prompt=prompt,
         port=port,
         dry_run=dry_run,
+        continue_last=continue_last,
+        resume_id=resume_id,
+        allowed_tools=allowed_tools,
+        disallowed_tools=disallowed_tools,
+        permission_mode=permission_mode,
+        append_system_prompt=append_system_prompt,
     )
     if serve and dry_run:
         return _serve_preview(options, selected_format)
     if serve and selected_format == "json":
         raise click.UsageError("--json requires --dry-run with the long-running gateway")
+    if selected_format == "stream-json" and prompt is None:
+        raise click.UsageError("--format stream-json needs -p/--prompt")
+    if prompt is not None and selected_format == "stream-json":
+        return _run_stream_json(options)
     if prompt is not None and selected_format == "json":
         return _run_json(options)
     if prompt is None and not serve and selected_format == "json":
