@@ -1,9 +1,8 @@
 """web_search regressions.
 
-Every search had started failing with a bare `ERROR: HTTP 202`. DuckDuckGo
-answers a *GET* on `duckduckgo.com/html/` with 202 and an anti-bot "anomaly"
-interstitial carrying no results at all; the search form on that page POSTs to
-`html.duckduckgo.com`, which answers 200 with real results.
+DuckDuckGo sometimes answers with an anti-bot "anomaly" interstitial carrying
+no results at all. The search tool posts to its HTML form first, then falls
+back to Bing's structured RSS feed when that provider is challenged or down.
 
 The fixtures below are trimmed from live responses captured on 2026-08-13 —
 both the 202 interstitial and a real 200 result page — so the parser is pinned
@@ -60,6 +59,20 @@ _CHALLENGE_PAGE = """<!DOCTYPE html><html><head><title>DuckDuckGo</title></head>
 <body><div class="anomaly-modal__title">Unfortunately, bots use DuckDuckGo too.</div>
 <form class="challenge-form"></form></body></html>"""
 
+_RSS_PAGE = """<?xml version="1.0" encoding="utf-8"?>
+<rss version="2.0"><channel><title>Bing: openai pricing</title>
+  <item>
+    <title>OpenAI API Pricing</title>
+    <link>https://openai.com/api/pricing/</link>
+    <description>Current &lt;b&gt;API pricing&lt;/b&gt; and details.</description>
+  </item>
+  <item>
+    <title>Pricing guide</title>
+    <link>https://example.com/pricing</link>
+    <description>A practical guide.</description>
+  </item>
+</channel></rss>"""
+
 
 def _blocks(out: str) -> list[str]:
     """One entry per result. Splitting on a bare `- ` would cut inside titles
@@ -73,12 +86,20 @@ class _FakeResponse:
     def __init__(self, status: int, text: str) -> None:
         self.status_code = status
         self.text = text
+        self.content = text.encode("utf-8")
+        self.encoding = "utf-8"
 
 
 class _SearchCase(unittest.TestCase):
-    """Swap `requests.post` so the parser is tested without a network call."""
+    """Swap both provider requests so tests never use the network."""
 
-    def run_search(self, response: _FakeResponse, **args) -> str:
+    def run_search(
+        self,
+        response: _FakeResponse,
+        *,
+        fallback: _FakeResponse | None = None,
+        **args,
+    ) -> str:
         import requests
 
         seen: dict = {}
@@ -88,12 +109,20 @@ class _SearchCase(unittest.TestCase):
             seen.update(kw)
             return response
 
+        def fake_get(url, **kw):
+            seen["fallback_url"] = url
+            seen["fallback"] = kw
+            return fallback or _FakeResponse(200, _RSS_PAGE)
+
         original = requests.post
+        original_get = requests.get
         requests.post = fake_post
+        requests.get = fake_get
         try:
             out = t_web_search({"query": "openai pricing", **args}, ToolContext(root=Path(".")))
         finally:
             requests.post = original
+            requests.get = original_get
         self.seen = seen
         return out
 
@@ -182,29 +211,37 @@ class TestRedirectUnwrapping(unittest.TestCase):
 
 
 class TestFailureModesAreDistinguished(_SearchCase):
-    """A bot check, a server error and a genuinely empty result set used to
-    collapse into one unhelpful line."""
+    """Provider failures fall through without hiding total search failure."""
 
-    def test_the_202_interstitial_is_reported_as_a_bot_check(self) -> None:
+    def test_the_202_interstitial_falls_back_to_structured_results(self) -> None:
         out = self.run_search(_FakeResponse(202, _CHALLENGE_PAGE))
-        self.assertTrue(out.startswith("ERROR:"))
-        self.assertIn("bot check", out)
-        self.assertIn("202", out)
+        self.assertFalse(out.startswith("ERROR:"))
+        self.assertIn("OpenAI API Pricing", out)
+        self.assertEqual(self.seen["fallback_url"], "https://www.bing.com/search")
+        self.assertEqual(self.seen["fallback"]["params"]["format"], "rss")
 
-    def test_the_bot_check_message_tells_the_model_what_to_do(self) -> None:
-        """Without a next step the model just retries the same call in a loop."""
+    def test_fallback_rss_is_cleaned_and_includes_snippets(self) -> None:
         out = self.run_search(_FakeResponse(202, _CHALLENGE_PAGE))
-        self.assertIn("retry", out.lower())
-        self.assertIn("web_fetch", out)
+        self.assertIn("https://openai.com/api/pricing/", out)
+        self.assertIn("Current API pricing and details.", out)
+        self.assertNotIn("<b>", out)
 
-    def test_a_challenge_served_with_200_is_still_caught(self) -> None:
-        self.assertIn("bot check", self.run_search(_FakeResponse(200, _CHALLENGE_PAGE)))
+    def test_a_challenge_served_with_200_still_uses_the_fallback(self) -> None:
+        self.assertIn("OpenAI API Pricing", self.run_search(_FakeResponse(200, _CHALLENGE_PAGE)))
 
-    def test_a_server_error_reports_its_status(self) -> None:
+    def test_a_primary_server_error_also_uses_the_fallback(self) -> None:
         out = self.run_search(_FakeResponse(503, "<html>Service Unavailable</html>"))
-        self.assertTrue(out.startswith("ERROR:"))
-        self.assertIn("503", out)
-        self.assertNotIn("bot check", out)
+        self.assertIn("OpenAI API Pricing", out)
+
+    def test_both_provider_failures_are_reported_together(self) -> None:
+        out = self.run_search(
+            _FakeResponse(202, _CHALLENGE_PAGE),
+            fallback=_FakeResponse(503, "Service unavailable"),
+        )
+        self.assertTrue(out.startswith("ERROR: all search providers failed"))
+        self.assertIn("bot check", out)
+        self.assertIn("Bing returned HTTP 503", out)
+        self.assertIn("Do not immediately retry", out)
 
     def test_a_genuinely_empty_search_is_not_an_error(self) -> None:
         out = self.run_search(_FakeResponse(200, "<html><body>No results.</body></html>"))
@@ -223,15 +260,18 @@ class TestFailureModesAreDistinguished(_SearchCase):
         import requests
 
         original = requests.post
+        original_get = requests.get
 
         def boom(*a, **k):
             raise requests.exceptions.SSLError("CERTIFICATE_VERIFY_FAILED")
 
         requests.post = boom
+        requests.get = boom
         try:
             out = t_web_search({"query": "x"}, ToolContext(root=Path(".")))
         finally:
             requests.post = original
+            requests.get = original_get
         self.assertTrue(out.startswith("ERROR:"))
         self.assertNotIn("Traceback", out)
         self.assertIn("certificate", out.lower())

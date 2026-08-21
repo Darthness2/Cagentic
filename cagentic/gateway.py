@@ -45,6 +45,7 @@ from .providers import (
 from .providers import (
     parse_model as _parse_model,
 )
+from .providers import resolve_model_selector as _resolve_model_selector
 from .providers import (
     warm_model_cache as _warm_model_cache,
 )
@@ -1896,8 +1897,32 @@ class Gateway:
 
         if cmd == "model":
             if not full_arg:
-                return {"ok": True, "text": f"current model: {self._model_spec}"}
-            result = self.set_model(full_arg)
+                return {
+                    "ok": True,
+                    "text": (
+                        f"current model: {self._model_spec}\n"
+                        "use /models, then /model <number|unique words>"
+                    ),
+                }
+            try:
+                available_models = agent.client.list_models()
+            except Exception:
+                available_models = []
+            resolved, matches = _resolve_model_selector(full_arg, available_models)
+            if resolved is None and matches:
+                lines = [f"'{full_arg}' matches more than one model:"]
+                for index, model_name in enumerate(available_models, 1):
+                    if model_name in matches:
+                        lines.append(f"  {index}. {model_name}")
+                lines.append("add another word, or use /model <number>")
+                return {"ok": False, "text": "\n".join(lines), "models": matches}
+            if resolved is None and available_models and _parse_model(full_arg)[0] == "ollama":
+                return {
+                    "ok": False,
+                    "text": f"no installed model matches '{full_arg}' — use /models",
+                }
+            selected_model = resolved or full_arg
+            result = self.set_model(selected_model)
             if "error" in result:
                 return {"ok": False, "text": result["error"]}
             return {
@@ -1918,10 +1943,10 @@ class Gateway:
                     "models": [],
                 }
             lines = ["available models:"]
-            for model in models:
+            for index, model in enumerate(models, 1):
                 _, bare_name = _parse_model(model)
                 active = model == self._model_spec or bare_name == self.engine.model
-                lines.append(f"  {model}{'  (active)' if active else ''}")
+                lines.append(f"  {index}. {model}{'  (active)' if active else ''}")
             return {"ok": True, "text": "\n".join(lines), "models": models}
 
         if cmd == "diag":

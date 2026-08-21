@@ -2162,6 +2162,7 @@ def _strip_html(html: str) -> str:
 # with a bare `ERROR: HTTP 202`. The form on that page POSTs to
 # html.duckduckgo.com, and that endpoint answers 200 with real results.
 _DDG_ENDPOINT = "https://html.duckduckgo.com/html/"
+_BING_RSS_ENDPOINT = "https://www.bing.com/search"
 
 _DDG_RESULT_RX = re.compile(
     r'<a[^>]*class="[^"]*result__a[^"]*"[^>]*href="([^"]+)"[^>]*>(.*?)</a>', re.DOTALL
@@ -2175,6 +2176,16 @@ _DDG_SNIPPET_RX = re.compile(
 # The interstitial names itself, which is what lets us say "blocked" instead of
 # reporting an empty-but-successful search.
 _DDG_CHALLENGE_RX = re.compile(r"anomaly|challenge-form|captcha", re.IGNORECASE)
+
+# Search pages increasingly challenge non-browser clients. Keep the primary
+# DDG parser because its results are good, but fail over to Bing's XML/RSS
+# representation when DDG serves an interstitial or is unavailable. XML is a
+# much more stable fallback contract than scraping a second engine's HTML.
+_SEARCH_CHALLENGE_RX = re.compile(
+    r"captcha|challenge-form|verify (?:that )?you are human|unusual traffic|"
+    r"automated queries|bot check|bots use",
+    re.IGNORECASE,
+)
 
 
 def _ddg_clean(fragment: str) -> str:
@@ -2201,16 +2212,24 @@ def _ddg_unwrap(href: str) -> str:
     return target or href
 
 
-def t_web_search(args: dict, ctx: ToolContext) -> str:
-    """DuckDuckGo HTML-frontend scrape (no API key needed)."""
+def _format_search_results(results: list[tuple[str, str, str]], limit: int) -> str:
+    out: list[str] = []
+    for title, url, snippet in results[:limit]:
+        line = f"- {title}\n  {url}"
+        if snippet:
+            line += "\n  " + (snippet if len(snippet) <= 240 else snippet[:239] + "…")
+        out.append(line)
+    return _truncate("\n".join(out)) if out else "(no results)"
+
+
+def _search_ddg(query: str, limit: int, ctx: ToolContext) -> tuple[str | None, str | None]:
+    """Return ``(results, failure)`` for the DuckDuckGo HTML frontend."""
     import requests
 
-    q = args["query"]
-    n = int(args.get("limit", 10))
     try:
         r = requests.post(
             _DDG_ENDPOINT,
-            data={"q": q},
+            data={"q": query},
             headers={
                 "User-Agent": "Mozilla/5.0 cagentic/0.1",
                 # This endpoint is the search form's own target; a matching
@@ -2221,8 +2240,8 @@ def t_web_search(args: dict, ctx: ToolContext) -> str:
             verify=not ctx.insecure_ssl,
         )
     except requests.RequestException as e:
-        logger.warning("web_search: request failed", exc_info=True)
-        return describe_request_error(e, "the search engine")
+        logger.warning("web_search: DuckDuckGo request failed", exc_info=True)
+        return None, describe_request_error(e, _DDG_ENDPOINT).removeprefix("ERROR: ")
 
     # Bound the HTML we run the (DOTALL, backtracking) result regexes over so a
     # huge/adversarial response can't trigger pathological backtracking.
@@ -2232,30 +2251,92 @@ def t_web_search(args: dict, ctx: ToolContext) -> str:
 
     hits = list(_DDG_RESULT_RX.finditer(body))
     if not hits:
-        # Distinguish the three ways "nothing came back" can happen — a bot
-        # check, a genuine server error, and a query with no matches all used
-        # to collapse into one unhelpful line.
-        if _DDG_CHALLENGE_RX.search(body):
-            return (
-                f"ERROR: the search engine returned a bot check (HTTP {r.status_code}) instead "
-                "of results. Wait a moment and retry, or use web_fetch on a specific URL."
-            )
+        if _DDG_CHALLENGE_RX.search(body) or _SEARCH_CHALLENGE_RX.search(body):
+            return None, f"DuckDuckGo returned a bot check (HTTP {r.status_code})"
         if r.status_code != 200:
-            return f"ERROR: the search engine returned HTTP {r.status_code}"
-        return "(no results)"
+            return None, f"DuckDuckGo returned HTTP {r.status_code}"
+        return "(no results)", None
 
     snippets = list(_DDG_SNIPPET_RX.finditer(body))
-    out: list[str] = []
-    for i, m in enumerate(hits[:n]):
-        line = f"- {_ddg_clean(m.group(2))}\n  {_ddg_unwrap(m.group(1))}"
+    results: list[tuple[str, str, str]] = []
+    for i, m in enumerate(hits[:limit]):
         # Pair by position: a snippet belongs to the last title above it, so
         # only accept one that falls before the next result begins.
         stop = hits[i + 1].start() if i + 1 < len(hits) else len(body)
         nxt = next((s for s in snippets if m.end() < s.start() < stop), None)
-        if nxt is not None and (text := _ddg_clean(nxt.group(1))):
-            line += "\n  " + (text if len(text) <= 240 else text[:239] + "…")
-        out.append(line)
-    return _truncate("\n".join(out))
+        snippet = _ddg_clean(nxt.group(1)) if nxt is not None else ""
+        results.append((_ddg_clean(m.group(2)), _ddg_unwrap(m.group(1)), snippet))
+    return _format_search_results(results, limit), None
+
+
+def _search_bing_rss(query: str, limit: int, ctx: ToolContext) -> tuple[str | None, str | None]:
+    """Structured fallback that avoids scraping another challenge-prone page."""
+    import xml.etree.ElementTree as ET
+
+    import requests
+
+    try:
+        r = requests.get(
+            _BING_RSS_ENDPOINT,
+            params={"q": query, "format": "rss"},
+            headers={
+                "User-Agent": "Mozilla/5.0 cagentic/0.1",
+                "Accept": "application/rss+xml, application/xml, text/xml",
+            },
+            timeout=15,
+            verify=not ctx.insecure_ssl,
+        )
+    except requests.RequestException as e:
+        logger.warning("web_search: Bing RSS request failed", exc_info=True)
+        return None, describe_request_error(e, _BING_RSS_ENDPOINT).removeprefix("ERROR: ")
+
+    body = r.content[:_HTML_SCAN_CAP]
+    preview = body[:16_384].decode(r.encoding or "utf-8", errors="replace")
+    if _SEARCH_CHALLENGE_RX.search(preview):
+        return None, f"Bing returned a bot check (HTTP {r.status_code})"
+    if r.status_code != 200:
+        return None, f"Bing returned HTTP {r.status_code}"
+    try:
+        root = ET.fromstring(body)
+    except (ET.ParseError, ValueError):
+        logger.warning("web_search: Bing returned malformed RSS")
+        return None, "Bing returned an unreadable RSS response"
+
+    results: list[tuple[str, str, str]] = []
+    for item in root.findall(".//item"):
+        title = _ddg_clean(item.findtext("title") or "")
+        url = (item.findtext("link") or "").strip()
+        snippet = _ddg_clean(item.findtext("description") or "")
+        if title and url.startswith(("http://", "https://")):
+            results.append((title, url, snippet))
+        if len(results) >= limit:
+            break
+    if not results:
+        return "(no results)", None
+    return _format_search_results(results, limit), None
+
+
+def t_web_search(args: dict, ctx: ToolContext) -> str:
+    """Search the web with automatic fallback when a provider blocks bots."""
+    query = str(args["query"]).strip()
+    if not query:
+        return "ERROR: query must not be empty"
+    limit = max(1, min(int(args.get("limit", 10)), 20))
+
+    result, ddg_failure = _search_ddg(query, limit, ctx)
+    if result is not None:
+        return result
+
+    result, bing_failure = _search_bing_rss(query, limit, ctx)
+    if result is not None:
+        return result
+
+    details = "; ".join(part for part in (ddg_failure, bing_failure) if part)
+    return (
+        "ERROR: all search providers failed"
+        + (f": {details}" if details else "")
+        + ". Do not immediately retry the same search; fetch a known URL or try a narrower query."
+    )
 
 
 # ============================================================================
@@ -4028,7 +4109,7 @@ TOOL_SCHEMAS: list[dict[str, Any]] = [
         "type": "function",
         "function": {
             "name": "web_search",
-            "description": "Search the web (DuckDuckGo HTML frontend). Returns title + URL pairs.",
+            "description": "Search the web with automatic provider fallback. Returns titles, URLs, and snippets.",
             "parameters": {
                 "type": "object",
                 "properties": {

@@ -26,6 +26,7 @@ from cagentic.prompt import (
     _safe_for_history,
     _toolbar_text,
 )
+from cagentic.providers import resolve_model_selector
 from cagentic.state import AppState
 from cagentic.tools import all_tool_schemas, t_write_file
 
@@ -44,6 +45,11 @@ class _NullClient:
 class _CommandClient:
     def list_models(self) -> list[str]:
         return ["test-model"]
+
+
+class _ModelClient:
+    def list_models(self) -> list[str]:
+        return ["llama3.2:3b", "qwen3.8:8b", "qwen3.8:27b"]
 
 
 class _ReplyClient:
@@ -133,6 +139,53 @@ def _gateway(tmp_path, monkeypatch, *, client=None, cfg=None) -> Gateway:
     monkeypatch.setenv("XDG_CONFIG_HOME", str(tmp_path / "config"))
     agent = Agent(client or _NullClient(), "test-model", tmp_path, stream=True)
     return Gateway(agent, cfg if cfg is not None else {}, port=18990)
+
+
+def test_model_selector_accepts_number_unique_fragment_and_multiple_terms():
+    models = ["llama3.2:3b", "qwen3.8:8b", "qwen3.8:27b"]
+    assert resolve_model_selector("3", models)[0] == "qwen3.8:27b"
+    assert resolve_model_selector("27b", models)[0] == "qwen3.8:27b"
+    assert resolve_model_selector("qwen 27b", models)[0] == "qwen3.8:27b"
+
+
+def test_model_selector_refuses_to_guess_when_fragment_is_ambiguous():
+    models = ["qwen3.8:8b", "qwen3.8:27b"]
+    resolved, matches = resolve_model_selector("qwen", models)
+    assert resolved is None
+    assert matches == models
+
+
+def test_terminal_model_command_resolves_short_words(tmp_path, monkeypatch, capsys):
+    monkeypatch.setenv("XDG_CONFIG_HOME", str(tmp_path / "config"))
+    agent = Agent(_ModelClient(), "llama3.2:3b", tmp_path, stream=True)
+    activated: list[str] = []
+
+    def activate(target, _cfg, model):
+        activated.append(model)
+        target.model = model
+        target.state.update(active_model_spec=model)
+
+    monkeypatch.setattr(cli, "_activate_model", activate)
+    monkeypatch.setattr(cli, "_settle_in", lambda _agent: None)
+    monkeypatch.setattr(cli.config, "save", lambda _cfg: None)
+    monkeypatch.setattr(cli.sessions, "save", lambda _session: None)
+    monkeypatch.setattr(cli, "Prompt", lambda: _ScriptedPrompt("/model qwen 27b", "/quit"))
+
+    assert cli.repl(agent, {}) == 0
+    assert activated == ["qwen3.8:27b"]
+    output = capsys.readouterr().out
+    assert "switched to qwen3.8:27b" in output
+
+
+def test_gateway_model_commands_use_the_same_numbered_selector(tmp_path, monkeypatch):
+    gateway = _gateway(tmp_path, monkeypatch, client=_ModelClient())
+    monkeypatch.setattr(gateway, "set_model", lambda model: {"model": model})
+
+    listed = gateway.handle_cmd("models")
+    assert "3. qwen3.8:27b" in listed["text"]
+    selected = gateway.handle_cmd("model", "3")
+    assert selected["ok"] is True
+    assert selected["model"] == "qwen3.8:27b"
 
 
 @pytest.mark.parametrize(

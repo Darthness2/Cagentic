@@ -43,6 +43,7 @@ from .providers import (
 from .providers import (
     parse_model as _parse_model_provider,
 )
+from .providers import resolve_model_selector as _resolve_model_selector
 from .services.compact import SUMMARY_MARKER
 
 OUTPUT_FORMAT = click.Choice(("text", "json", "stream-json"), case_sensitive=False)
@@ -1008,7 +1009,6 @@ def repl(
                 "effort": "/effort [low|medium|high]",
                 "host": "/host [url]",
                 "logout": "/logout github|openai|anthropic",
-                "model": "/model [name]",
                 "plan": "/plan [on|off]",
                 "resume": "/resume [id|number]",
                 "stream": "/stream [on|off]",
@@ -1570,21 +1570,46 @@ def repl(
                 ui.info(f"streaming: {'on' if agent.engine.stream else 'off'} (saved)")
                 continue
             if cmd == "model":
-                if not arg1:
+                if not full_arg:
                     ui.info(f"current model: {agent.state.active_model_spec or agent.model}")
+                    ui.meta("use /models, then /model <number|unique words>")
                 else:
                     try:
-                        _activate_live_model(arg1)
+                        available_models = agent.client.list_models()
+                    except Exception as exc:
+                        logger.warning(
+                            "could not list models while resolving /model", exc_info=True
+                        )
+                        available_models = []
+                        ui.warn(f"could not look up short model names: {exc}")
+
+                    resolved, matches = _resolve_model_selector(full_arg, available_models)
+                    if resolved is None and matches:
+                        ui.warn(f"'{full_arg}' matches more than one model:")
+                        for index, model_name in enumerate(available_models, 1):
+                            if model_name in matches:
+                                ui.list_item(f"{index}. {model_name}")
+                        ui.meta("add another word, or use /model <number>")
+                        continue
+                    if resolved is None and available_models:
+                        provider, _ = _parse_model_provider(full_arg)
+                        if provider == "ollama":
+                            ui.warn(f"no installed model matches '{full_arg}' — use /models")
+                            continue
+                    selected_model = resolved or full_arg
+                    try:
+                        _activate_live_model(selected_model)
                     except RuntimeError as _e:
                         ui.error(str(_e))
                         continue
-                    cfg["model"] = arg1  # save full provider:model
+                    cfg["model"] = selected_model  # save the canonical provider:model
                     if not _persist_config():
                         continue
                     supported = _tools_supported(cfg, agent.state.active_model_spec or agent.model)
                     agent.tools_enabled = bool(supported)
                     _refresh_live_prompts()
-                    ui.info(f"switched to {arg1} (saved)")
+                    suffix = f" · matched '{full_arg}'" if selected_model != full_arg else ""
+                    ui.info(f"switched to {selected_model} (saved){suffix}")
                 continue
             if cmd == "models":
                 try:
@@ -1595,11 +1620,11 @@ def repl(
                         print()
                         ui.heading("Models")
                         print()
-                        for m in models:
+                        for index, m in enumerate(models, 1):
                             _, listed_name = _parse_model_provider(m)
                             current = listed_name == agent.model
                             ui.list_item(
-                                m,
+                                f"{index}. {m}",
                                 detail="current" if current else None,
                                 marker="●" if current else "•",
                             )

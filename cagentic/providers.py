@@ -61,6 +61,46 @@ def parse_model(model_str: str) -> tuple[str, str]:
     return "ollama", model_str
 
 
+def resolve_model_selector(selector: str, models: list[str]) -> tuple[str | None, list[str]]:
+    """Resolve a short human selector against an ordered model list.
+
+    Supports the one-based number shown by ``/models``, exact names, unique
+    fragments (``27b``), and space-separated terms (``qwen 27b``). A caller
+    gets every match back when the selector is ambiguous so it can present the
+    choices instead of silently picking the wrong, potentially huge model.
+    """
+    cleaned = " ".join(str(selector or "").split())
+    ordered = list(dict.fromkeys(str(model).strip() for model in models if str(model).strip()))
+    if not cleaned or not ordered:
+        return None, []
+
+    number = cleaned.removeprefix("#")
+    if number.isdecimal():
+        index = int(number) - 1
+        return (ordered[index], [ordered[index]]) if 0 <= index < len(ordered) else (None, [])
+
+    needle = cleaned.casefold()
+    selector_provider, selector_name = parse_model(cleaned)
+    exact: list[str] = []
+    for model in ordered:
+        provider, name = parse_model(model)
+        if model.casefold() == needle or (
+            selector_provider == provider and selector_name.casefold() == name.casefold()
+        ):
+            exact.append(model)
+    if exact:
+        return exact[0], exact
+
+    terms = needle.split()
+    matches = []
+    for model in ordered:
+        provider, name = parse_model(model)
+        searchable = f"{model} {provider} {name}".casefold()
+        if all(term in searchable for term in terms):
+            matches.append(model)
+    return (matches[0] if len(matches) == 1 else None), matches
+
+
 # Context windows by model-name prefix, longest prefix wins. Only the input
 # window matters here — this drives compaction thresholds and the /context
 # readout, not max_tokens.
