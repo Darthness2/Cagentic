@@ -18,6 +18,15 @@ from cagentic.browser import URL_ACTIONS, _clean_site_rules, host_allowed
 from cagentic.engine import _IMAGE_SUFFIXES, process_user_input
 
 
+class _ReplyClient:
+    def __init__(self) -> None:
+        self.messages: list[dict] = []
+
+    def chat(self, **kwargs) -> dict:
+        self.messages = kwargs["messages"]
+        return {"role": "assistant", "content": "done"}
+
+
 class TestSiteRules(unittest.TestCase):
     def test_no_rules_allows_everything(self) -> None:
         ok, _ = host_allowed("https://example.com/x", {"allow": [], "deny": []})
@@ -238,6 +247,96 @@ class TestPageContext(_GatewayCase):
         merged = self.gw._consume_pending_context("go")
         self.assertNotIn("page 0", merged)
         self.assertIn("page 11", merged)
+
+    def test_saved_history_keeps_the_composer_text_not_expanded_page_context(self) -> None:
+        messages = [
+            {
+                "role": "user",
+                "content": "Context from the page:\nsecret details\n\nwhat does this say?",
+                "_display_content": "what does this say?",
+            }
+        ]
+        self.assertEqual(
+            self.gw.render_messages(messages),
+            [{"role": "user", "content": "what does this say?"}],
+        )
+
+    def test_model_context_and_saved_display_text_are_kept_separate(self) -> None:
+        client = _ReplyClient()
+        self.gw.engine.client = client
+
+        events = list(
+            self.gw.engine.submit_message(
+                "Context from the page:\nsecret details\n\nwhat does this say?",
+                display_prompt="what does this say?",
+            )
+        )
+
+        stored_user = next(m for m in self.gw.engine.messages if m.get("role") == "user")
+        provider_user = next(m for m in client.messages if m.get("role") == "user")
+        self.assertIn("secret details", stored_user["content"])
+        self.assertIn("secret details", provider_user["content"])
+        self.assertEqual(stored_user["_display_content"], "what does this say?")
+        self.assertNotIn("_display_content", provider_user)
+        self.assertEqual(
+            next(e.data["text"] for e in events if e.kind == "user"), "what does this say?"
+        )
+
+
+class TestPersistedTranscriptRendering(_GatewayCase):
+    def test_tool_summaries_and_results_survive_reload(self) -> None:
+        messages = [
+            {
+                "role": "assistant",
+                "content": "I will inspect that.",
+                "tool_calls": [
+                    {
+                        "function": {
+                            "name": "read_file",
+                            "arguments": {"path": "notes.txt"},
+                        }
+                    }
+                ],
+            },
+            {
+                "role": "tool",
+                "name": "read_file",
+                "content": "OK: notes.txt (2 lines)",
+            },
+        ]
+
+        rendered = self.gw.render_messages(messages)
+
+        self.assertEqual(rendered[0]["tools"], ["read_file"])
+        self.assertEqual(
+            rendered[0]["tool_details"],
+            [
+                {
+                    "name": "read_file",
+                    "summary": "notes.txt",
+                    "ok": True,
+                    "first_line": "OK: notes.txt (2 lines)",
+                }
+            ],
+        )
+
+    def test_reasoning_and_plan_blocks_survive_reload(self) -> None:
+        messages = [
+            {
+                "role": "assistant",
+                "content": (
+                    "<think>check the constraints</think>\n"
+                    "<plan>\n- inspect the file\n- make the fix\n</plan>\n"
+                    "I will start now."
+                ),
+            }
+        ]
+
+        rendered = self.gw.render_messages(messages)
+
+        self.assertEqual(rendered[0]["content"], "I will start now.")
+        self.assertEqual(rendered[0]["thinking"], ["check the constraints"])
+        self.assertEqual(rendered[0]["plan"], ["inspect the file", "make the fix"])
 
 
 class TestChatSearch(_GatewayCase):

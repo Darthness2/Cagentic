@@ -382,6 +382,12 @@ function addThinkingBlock(text){
   box.innerHTML='<summary>reasoning</summary><div class="think-body">'+esc(text)+'</div>';
   getThread().appendChild(box); scrollDown(); return box;
 }
+function addPlanBlock(steps){
+  if(!steps||!steps.length) return null;
+  const p=document.createElement('div'); p.className='plan-box';
+  p.innerHTML='<div class="ph">Plan</div><ol>'+steps.map(s=>'<li>'+esc(s)+'</li>').join('')+'</ol>';
+  getThread().appendChild(p); scrollDown(); return p;
+}
 /* Reasoning arrives incrementally on the delta stream, so the live block is
    rewritten in place rather than appended once per token. */
 function syncThinking(raw){
@@ -1707,7 +1713,7 @@ function addAssistant(html, tools){
       '<div class="msg-actions reply">'+REPLY_ACTIONS_HTML+'</div>';
     wireReplyActions(r);
     getThread().appendChild(r);
-    (tools||[]).forEach(t=>addToolRow({name:t},true));
+    (tools||[]).forEach(t=>addToolRow(typeof t==='string'?{name:t}:t,true));
     trimThread(); scrollDown(); return r;
   }
 function wireReplyActions(row){
@@ -1746,6 +1752,7 @@ function addToolRow(t, done){
       if(sumEl) sumEl.textContent=t.summary;
     }
     if(!done){ prev.classList.remove('ok','bad'); prev.classList.add('pending'); }
+    else finishToolRow(prev,t);
     scrollDown(); return prev;
   }
   const row=document.createElement('div'); row.className='tool-row'+(done?'':' pending');
@@ -1758,7 +1765,18 @@ function addToolRow(t, done){
     '<span class="tname">'+esc(t.name||'')+'</span>'+
     (t.summary?'<span class="tsum">'+esc(t.summary)+'</span>':'')+
     (done?'':'<span class="tres">Running&#8230;</span>');
+  if(done) finishToolRow(row,t);
   getThread().appendChild(row); scrollDown(); return row;
+}
+function finishToolRow(row,t){
+  row.classList.remove('pending','ok','bad');
+  if(t.ok===true) row.classList.add('ok');
+  else if(t.ok===false) row.classList.add('bad');
+  let res=row.querySelector('.tres');
+  if(t.ok===true||t.ok===false){
+    if(!res){res=document.createElement('span');res.className='tres';row.appendChild(res);}
+    res.textContent=(t.ok?'\u2713 ':'\u2717 ')+(t.first_line||'').slice(0,90);
+  } else if(res) res.remove();
 }
 function addNote(text, isErr){
   const n=document.createElement('div'); n.className='note-row'+(isErr?' err':'');
@@ -1851,11 +1869,15 @@ function handle(ev){
   const k=ev.kind, d=ev.data||{};
   if(k!=='user') clearThinking();
   if(k==='delta'){
-    if(!live.body){const _r=addAssistant('');live.body=_r.querySelector('.msg-body');live.raw='';}
     live.raw+=d.text||'';
     live.tokensOut+=Math.round((d.text||'').length/4);
-    syncThinking(live.raw); live.body.innerHTML=md(stripThink(stripHud(live.raw)));
-    live.body.classList.add('cursor'); scrollDown();
+    syncThinking(live.raw);
+    const visible=stripThink(stripHud(live.raw));
+    if(visible.trim()){
+      if(!live.body){const _r=addAssistant('');live.body=_r.querySelector('.msg-body');}
+      live.body.innerHTML=md(visible);
+      live.body.classList.add('cursor'); scrollDown();
+    }
   } else if(k==='assistant'){
     const txt=(d.text||'');
     syncThinking(txt);
@@ -1871,17 +1893,15 @@ function handle(ev){
     addThinkingBlock(d.text||'');
     live.body=null;
   } else if(k==='plan'){
-    const p=document.createElement('div'); p.className='plan-box';
-    p.innerHTML='<div class="ph">Plan</div><ol>'+(d.steps||[]).map(s=>'<li>'+esc(s)+'</li>').join('')+'</ol>';
-    getThread().appendChild(p); live.body=null; scrollDown();
+    addPlanBlock(d.steps||[]); live.body=null;
   } else if(k==='tool_call'){
     live.body=null; live.toolRow=addToolRow({name:d.name,summary:d.summary},false);
   } else if(k==='tool_result'){
     if(live.toolRow){
-      live.toolRow.classList.remove('pending'); live.toolRow.classList.add(d.ok?'ok':'bad');
-      const res=live.toolRow.querySelector('.tres')||document.createElement('span');
-      res.className='tres'; res.textContent=(d.ok?'✓ ':'✗ ')+(d.first_line||'').slice(0,90);
-      if(!res.parentNode) live.toolRow.appendChild(res); live.toolRow=null;
+      // Live and reloaded tool rows deliberately share one finalizer so their
+      // status, result excerpt, and error treatment cannot drift again.
+      finishToolRow(live.toolRow,{ok:d.ok,first_line:d.first_line});
+      live.toolRow=null;
     }
   } else if(k==='permission'){ live.body=null; showPermission(d);
   } else if(k==='info'||k==='warn'){ addNote(d.text,false); live.body=null;
@@ -2321,10 +2341,16 @@ function setCurrent(cur){
     let row;
     if(m.role==='user'){ row=addUser(m.content); idx++; }
     else {
+      (m.thinking||[]).forEach(text=>addThinkingBlock(text));
+      addPlanBlock(m.plan||[]);
       const html=md(stripThink(stripHud(m.content)));
       const hasContent=html&&html.trim();
-      if(hasContent){ row=addAssistant(html,m.tools); renderPanels(m.content); idx++; }
-      else { (m.tools||[]).forEach(t=>{ const tr=addToolRow({name:t},true); if(tr) tr.style.setProperty('--i',idx++); }); }
+      // The backend pairs persisted calls with their summaries and results.
+      // Use that same shape as the live SSE renderer; falling back to names
+      // keeps older saved chats compatible.
+      const tools=(m.tool_details&&m.tool_details.length)?m.tool_details:(m.tools||[]);
+      if(hasContent){ row=addAssistant(html,tools); renderPanels(m.content); idx++; }
+      else { tools.forEach(t=>{ const tr=addToolRow(typeof t==='string'?{name:t}:t,true); if(tr) tr.style.setProperty('--i',idx++); }); }
     }
     if(row) row.style.setProperty('--i',Math.min(idx-1,5));
   });
