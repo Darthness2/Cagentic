@@ -5,7 +5,7 @@ and runs the full agent behind it: the same tools, notes, reminders, MCP
 servers, browser control — everything the terminal REPL can do.
 
 The app has a sidebar of saved chats, a settings panel, and streams each
-turn token-by-token. HUD panels appear as draggable floating windows.
+turn token-by-token. Rich visual output opens in a responsive workspace.
 Tools that need approval surface an Approve / Deny prompt right in the
 page. Bound to localhost only.
 """
@@ -192,6 +192,29 @@ def _clean(text: str) -> str:
     return text.strip()
 
 
+def _display_user_content(message: dict) -> str:
+    """Return user-authored text without provider-only attachment expansion.
+
+    New turns retain ``_display_content``. The fallback also protects sessions
+    saved before that metadata existed by trimming the generated ``--- @file``
+    blocks that ``process_user_input`` appended after the original prompt.
+    """
+    display = message.get("_display_content")
+    if isinstance(display, str):
+        return display.strip()
+    content = str(message.get("content") or "").strip()
+    for match in re.finditer(r"\n\n--- @[^\n]+---(?:\n|$)", content):
+        header = match.group(0)
+        if (
+            " lines total)" in header
+            or "(image attached)" in header
+            or "(image too large or unreadable)" in header
+            or "(read failed:" in header
+        ):
+            return content[: match.start()].strip()
+    return content
+
+
 def _tool_details(tool_calls: list[dict], messages: list[dict], start: int) -> list[dict]:
     """Pair an assistant message's stored tool_calls with the result
     messages recorded right after it, in call order.
@@ -246,14 +269,13 @@ def _tool_details(tool_calls: list[dict], messages: list[dict], start: int) -> l
     return details
 
 
-# Taught to the gateway's engine only — lets the model "summon" panels as
-# floating windows by emitting fenced ```hud blocks of JSON. The web
-# UI parses these out of the reply, renders them as draggable cards, and
+# Taught to the gateway's engine only — lets the model create visual output by
+# emitting fenced ```hud blocks of JSON. The web UI parses these out of the
+# reply, renders them in a dedicated workspace, and
 # strips them from the chat text. Purely optional sugar — plain replies still
 # work — but it makes the interface feel alive.
-_HUD_INSTRUCTIONS = """=== HUD Display ===
-You are speaking through a heads-up display. Besides your normal
-reply, you MAY render visual panels as floating windows by emitting one or more
+_HUD_INSTRUCTIONS = """=== Visual workspace ===
+Besides your normal reply, you MAY render visual output in the workspace by emitting one or more
 fenced code blocks with the language tag `hud`, each containing a single JSON
 object. Use them when a visual would help — comparisons, status, search hits,
 images, locations, key numbers, charts. Keep prose short when you show a panel.
@@ -268,13 +290,13 @@ Panel schemas (pick the type that fits; all fields optional except shown):
   {"panel":"alert","level":"info|warn|critical","title":"...","text":"..."}
   {"panel":"progress","title":"...","items":[{"label":"...","pct":75}]}
   {"panel":"map","title":"...","lat":34.05,"lon":-118.24,"label":"..."}
-  {"panel":"bar","title":"...","labels":["Jan","Feb"],"values":[42,87],"color":"#f0a87a"}
-  {"panel":"line","title":"...","labels":["Mon","Tue"],"datasets":[{"label":"CPU","values":[30,80],"color":"#f0a87a"}]}
+  {"panel":"bar","title":"...","labels":["Jan","Feb"],"values":[42,87],"color":"#c79bd8"}
+  {"panel":"line","title":"...","labels":["Mon","Tue"],"datasets":[{"label":"CPU","values":[30,80],"color":"#c79bd8"}]}
   {"panel":"pie","title":"...","labels":["A","B","C"],"values":[40,35,25]}
-  {"panel":"clear"}   ← closes all floating windows when you want a fresh display
+  {"panel":"clear"}   ← clears the output workspace when you want a fresh display
 
-Interactive panels (these render INLINE in the conversation, not as floating
-windows — the user clicks them and their choice is sent back to you as a reply):
+Interactive panels render INLINE in the conversation so the user can act on
+them in context; their choice is sent back to you as a reply:
   {"panel":"actions","title":"...","buttons":[{"label":"Yes, proceed","prompt":"Yes, go ahead"},{"label":"Cancel","prompt":"Cancel that"}]}
   {"panel":"choices","title":"...","prompt":"I choose ","options":["Red","Green","Blue"]}
   {"panel":"form","title":"...","fields":[{"name":"city","label":"City","placeholder":"e.g. Paris"}],"submit":"What's the weather in {city}?","button":"Check"}
@@ -292,8 +314,8 @@ Rules:
 - Emit {"panel":"clear"} before new panels when replacing the previous display.
 - After tool calls that return structured data, a matching panel is a nice touch.
 - Still write a brief natural-language reply alongside the panels.
-- Data panels appear as draggable floating windows; interactive panels appear
-  inline in the chat so the user can act on them in context.
+- Data panels appear in the output workspace; interactive panels appear inline
+  in the chat so the user can act on them in context.
 """
 
 
@@ -727,8 +749,7 @@ class Gateway:
             content = (m.get("content") or "").strip()
             if role == "user":
                 if i in visible_users:
-                    display_content = str(m.get("_display_content", content)).strip()
-                    out.append({"role": "user", "content": display_content})
+                    out.append({"role": "user", "content": _display_user_content(m)})
             elif role == "assistant":
                 tool_calls = m.get("tool_calls") or []
                 tools = [(tc.get("function") or {}).get("name", "?") for tc in tool_calls]
@@ -1040,15 +1061,33 @@ class Gateway:
         finally:
             self._turn_lock.release()
 
-    def autotitle_chat(self) -> dict:
-        """Ask the model itself for a short title for the current chat."""
+    @staticmethod
+    def _needs_autotitle(session: dict, messages: list[dict]) -> bool:
+        """Return True only before the first authored turn in an unnamed chat."""
+        if session.get("title") not in (None, "", "untitled", "New chat"):
+            return False
+        return not any(m.get("role") == "user" for m in messages)
+
+    def _generate_chat_title(
+        self,
+        engine,
+        session: dict,
+        *,
+        messages: list[dict] | None = None,
+        client=None,
+        model: str | None = None,
+    ) -> str:
+        """Generate and persist a short title with the chat's active model."""
         msgs = [
             m
-            for m in self.engine.messages
+            for m in (messages if messages is not None else engine.messages)
             if m.get("role") in ("user", "assistant") and (m.get("content") or "").strip()
         ]
         if not msgs:
-            return {"title": self.session.get("title") or "New chat"}
+            return session.get("title") or "New chat"
+        fallback_title = sessions.derive_title(
+            messages or session.get("messages") or engine.messages
+        )
 
         convo = "\n".join(f"{m['role']}: {_clean(m.get('content') or '')[:300]}" for m in msgs[:4])
         ask = [
@@ -1062,7 +1101,9 @@ class Gateway:
         ]
         title = ""
         try:
-            reply = self.agent.client.chat(self.agent.model, ask, options={"temperature": 0.2})
+            reply = (client or engine.client).chat(
+                model or engine.model, ask, options={"temperature": 0.2}
+            )
             lines = _clean(reply.get("content") or "").strip().strip("\"'").splitlines()
             title = lines[0].strip()[:60] if lines else ""
         except Exception:
@@ -1070,9 +1111,29 @@ class Gateway:
             title = ""
         if not title:
             # Model unavailable — fall back to the first user message
-            title = sessions.derive_title(self.session.get("messages") or [])
-        self.session["title"] = title
-        self._save_current()
+            title = fallback_title
+        # Title generation runs after the conversation lock is released so it
+        # can never block New chat. Merge only the title into the newest saved
+        # copy: a fast chat switch or second turn must not be overwritten by
+        # the snapshot used to generate this title.
+        latest = sessions.load(str(session.get("id") or ""))
+        if latest is not None:
+            latest_title = latest.get("title")
+            if latest_title not in (None, "", "untitled", "New chat", fallback_title):
+                session["title"] = latest_title
+                return latest_title
+            latest["title"] = title
+            sessions.save(latest)
+        else:
+            sessions.save({**session, "title": title})
+        session["title"] = title
+        if self.session.get("id") == session.get("id"):
+            self.session["title"] = title
+        return title
+
+    def autotitle_chat(self) -> dict:
+        """Ask the active model for a short title for the current chat."""
+        title = self._generate_chat_title(self.engine, self.session)
         return {"title": title, "chats": self.list_chats()}
 
     def rename_chat(self, chat_id: str, title: str) -> dict:
@@ -1718,6 +1779,9 @@ class Gateway:
         self._active_emit = emit
         self._thread_context.emit = emit
         self.engine.model = self.agent.model
+        should_autotitle = self._needs_autotitle(self.session, self.engine.messages)
+        completed = False
+        title_job = None
         try:
             # Refresh the user's live goals/calendar context before every turn.
             self._rebuild_suffix()
@@ -1727,6 +1791,8 @@ class Gateway:
                 model_message,
                 display_prompt=display_message,
             ):
+                if ev.kind == "done":
+                    completed = True
                 emit(ev.kind, ev.data)
         except _ClientGone:
             raise
@@ -1739,7 +1805,23 @@ class Gateway:
                 self._save_current()
             except Exception:
                 _log.warning("failed to save chat after turn", exc_info=True)
+            if should_autotitle and completed:
+                title_job = (
+                    self.session,
+                    self.engine.client,
+                    self.engine.model,
+                    [dict(item) for item in self.engine.messages],
+                )
             self._turn_lock.release()
+        if title_job is not None:
+            session, client, model, messages = title_job
+            self._generate_chat_title(
+                self.engine,
+                session,
+                messages=messages,
+                client=client,
+                model=model,
+            )
 
     def _session_actor(self, session_id: str) -> dict | None:
         """Build an isolated engine/runtime for a saved-session API actor."""
@@ -1827,10 +1909,16 @@ class Gateway:
             emit("error", {"text": "session is busy or unavailable"})
             return
         engine = actor["engine"]
+        data = actor["session"]
+        should_autotitle = self._needs_autotitle(data, engine.messages)
+        completed = False
+        title_job = None
         self._thread_context.emit = emit
         try:
             engine.system_suffix = self._composed_suffix()
             for event in engine.submit_message(message):
+                if event.kind == "done":
+                    completed = True
                 emit(event.kind, event.data)
         except _ClientGone:
             raise
@@ -1838,7 +1926,6 @@ class Gateway:
             emit("error", {"text": f"{type(exc).__name__}: {exc}"})
         finally:
             self._thread_context.emit = None
-            data = actor["session"]
             data["model"] = actor["model_spec"]
             data["messages"] = [
                 item
@@ -1846,7 +1933,22 @@ class Gateway:
                 if item.get("role") != "system" or SUMMARY_MARKER in str(item.get("content") or "")
             ]
             sessions.save(data)
+            if should_autotitle and completed:
+                title_job = (
+                    engine.client,
+                    engine.model,
+                    [dict(item) for item in engine.messages],
+                )
             actor["lock"].release()
+        if title_job is not None:
+            client, model, messages = title_job
+            self._generate_chat_title(
+                engine,
+                data,
+                messages=messages,
+                client=client,
+                model=model,
+            )
 
     # -- slash command handler for web UI -----------------------------------
 
@@ -2466,6 +2568,17 @@ class _Handler(BaseHTTPRequestHandler):
                     except WorkspaceError as exc:
                         self._json({"error": str(exc)}, status=exc.status)
                         return
+            elif not gw._turn_lock.acquire(blocking=False):
+                # Reject before beginning an SSE response. The browser can
+                # then roll back its optimistic user bubble and restore the
+                # draft instead of displaying a rejected message as sent.
+                self._json(
+                    {"error": "Cagentic is still working on the previous message."},
+                    status=409,
+                )
+                return
+            else:
+                prelocked = True
             self._stream_chat(
                 message,
                 prelocked=prelocked,
@@ -2549,7 +2662,15 @@ class _Handler(BaseHTTPRequestHandler):
             if b.get("client") == "collama" and project is None:
                 self._json({"error": "a project is required for Collama requests"}, status=400)
                 return
-            self._json({"current": gw.new_chat(project), "chats": gw.list_chats()})
+            current = gw.new_chat(project)
+            if current.get("error"):
+                # A turn can still be winding down after an abort request.  Do
+                # not disguise that conflict as a successful response with an
+                # invalid nested `current` object (or read/save chats while the
+                # turn still owns their lock).
+                self._json({"error": current["error"]}, status=409)
+                return
+            self._json({"current": current, "chats": gw.list_chats()})
             return
         if path == "/api/chats/load":
             cur = gw.load_chat(str(self._body().get("id", "")))
@@ -2566,7 +2687,8 @@ class _Handler(BaseHTTPRequestHandler):
             self._json(gw.autotitle_chat())
             return
         if path == "/api/settings":
-            self._json(gw.update_settings(self._body()))
+            result = gw.update_settings(self._body())
+            self._json(result, status=400 if result.get("error") else 200)
             return
         if path == "/api/model":
             self._json(gw.set_model(str(self._body().get("model", ""))))

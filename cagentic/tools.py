@@ -2820,6 +2820,14 @@ def t_config_get(args: dict, ctx: ToolContext) -> str:
     from .config import get_value
 
     key = args["key"]
+    if key == "model":
+        # The configured default can differ from the model activated for the
+        # current session. Report what will actually handle this turn, which
+        # is also what the gateway badge displays.
+        state = getattr(engine, "state", None) or getattr(ctx, "state", None)
+        active = getattr(state, "active_model_spec", None) or getattr(engine, "model", None)
+        if active:
+            return f"model = {active}"
     v = get_value(engine.config, key, None)
     if v is None:
         return f"(unset: {key})"

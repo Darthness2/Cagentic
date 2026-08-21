@@ -152,22 +152,22 @@ class TestIconSystem(unittest.TestCase):
 class TestThemeIntegrity(unittest.TestCase):
     """Phase 2.5 routed ~40 literals through variables to fix a light-theme
     bug; that work must not be undone, and the same class of bug had crept
-    back into the modal (a hardcoded #151118 rendered dark on a light page)."""
+    back into the modal (a hardcoded dark surface rendered dark on a light page)."""
 
     def test_rules_do_not_hardcode_the_dark_surface(self) -> None:
-        self.assertNotIn("#151118", _RULES)
+        self.assertNotIn("#0a0c10", _RULES)
         self.assertNotIn("#1e1828", _RULES)
 
     def test_rules_do_not_hardcode_the_accent_tint(self) -> None:
-        """Literal mauve washes rendered dark purple on white."""
-        leaks = re.findall(r"rgba\(199,155,216,[^)]*\)", _RULES)
+        """Literal brand washes render incorrectly when the theme changes."""
+        leaks = re.findall(r"rgba\(124,196,255,[^)]*\)", _RULES)
         self.assertEqual(leaks, [], leaks)
 
     def test_both_light_theme_blocks_stay_in_step(self) -> None:
         """The palette is declared twice — for data-theme=light and for
         data-theme=auto under a media query. A token added to one and not the
         other is a silent half-broken theme."""
-        blocks = re.findall(r"--stage-bg: #fdfbfe;(.*?)\n\}", _CSS, re.S)
+        blocks = re.findall(r"--stage-bg: #ffffff;(.*?)\n\}", _CSS, re.S)
         self.assertEqual(len(blocks), 2)
         keys = [set(re.findall(r"(--[\w-]+):", b)) for b in blocks]
         self.assertEqual(keys[0], keys[1])
@@ -188,8 +188,16 @@ class TestThemeIntegrity(unittest.TestCase):
 
         dark = re.search(r"--text-dim: (#\w+);", _CSS).group(1)
         light = re.findall(r"--text-dim: (#\w+);", _CSS)[1]
-        self.assertGreaterEqual(round(ratio(dark, "#151118"), 2), 4.5, dark)
-        self.assertGreaterEqual(round(ratio(light, "#f7f4f9"), 2), 4.5, light)
+        self.assertGreaterEqual(round(ratio(dark, "#0a0c10"), 2), 4.5, dark)
+        self.assertGreaterEqual(round(ratio(light, "#f7f9fb"), 2), 4.5, light)
+
+
+class TestContextMenuStyling(unittest.TestCase):
+    def test_context_actions_do_not_inherit_the_native_button_surface(self) -> None:
+        rules = "\n".join(re.findall(r"\.ctx-item \{([^}]*)\}", _CSS, re.S))
+        self.assertIn("appearance: none", rules)
+        self.assertIn("background: transparent", rules)
+        self.assertIn("border: 0", rules)
 
 
 class TestCodeBlockEscaping(unittest.TestCase):

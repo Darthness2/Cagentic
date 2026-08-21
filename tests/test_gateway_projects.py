@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import json
+import threading
 import urllib.error
 import urllib.parse
 import urllib.request
@@ -10,6 +11,7 @@ import pytest
 
 from cagentic import sessions
 from cagentic.agent import Agent
+from cagentic.engine import Message
 from cagentic.gateway import Gateway
 from cagentic.ollama_client import OllamaClient
 
@@ -35,6 +37,18 @@ def request(gw: Gateway, path: str, body=None):
             return response.status, json.loads(response.read())
     except urllib.error.HTTPError as exc:
         return exc.code, json.loads(exc.read())
+
+
+def test_settings_application_errors_use_an_http_error_status(tmp_path, monkeypatch):
+    gw = make_gateway(tmp_path, monkeypatch, 19007)
+    monkeypatch.setattr(gw, "update_settings", lambda _data: {"error": "model unavailable"})
+    assert gw.start()
+    try:
+        status, payload = request(gw, "/api/settings", {"model": "missing"})
+        assert status == 400
+        assert payload == {"error": "model unavailable"}
+    finally:
+        gw.stop()
 
 
 def test_workspace_browse_roots_children_sorting_and_files(tmp_path, monkeypatch):
@@ -107,6 +121,40 @@ def test_collama_requires_project_but_normal_new_chat_does_not(tmp_path, monkeyp
         with urllib.request.urlopen(req) as response:
             assert response.status == 200
     finally:
+        gw.stop()
+
+
+def test_new_chat_lock_conflict_uses_http_409_without_listing_chats(tmp_path, monkeypatch):
+    gw = make_gateway(tmp_path, monkeypatch, 19008)
+    monkeypatch.setattr(
+        gw,
+        "new_chat",
+        lambda _project=None: {"error": "Cagentic is still working on the previous message."},
+    )
+    monkeypatch.setattr(
+        gw,
+        "list_chats",
+        lambda: pytest.fail("busy chat state must not be listed or saved"),
+    )
+    assert gw.start()
+    try:
+        status, payload = request(gw, "/api/chats/new", {})
+        assert status == 409
+        assert payload == {"error": "Cagentic is still working on the previous message."}
+    finally:
+        gw.stop()
+
+
+def test_web_chat_busy_conflict_is_json_409_before_streaming(tmp_path, monkeypatch):
+    gw = make_gateway(tmp_path, monkeypatch, 19010)
+    assert gw.start()
+    assert gw._turn_lock.acquire(blocking=False)
+    try:
+        status, payload = request(gw, "/api/chat", {"message": "do not append me"})
+        assert status == 409
+        assert payload == {"error": "Cagentic is still working on the previous message."}
+    finally:
+        gw._turn_lock.release()
         gw.stop()
 
 
@@ -215,6 +263,77 @@ def test_gateway_model_switch_changes_provider_and_persists_full_spec(tmp_path, 
     assert gw.engine.client is clients["ollama"]
     assert gw.load_chat(cloud_id)["model"] == "openai:gpt-test"
     assert gw.engine.client is clients["openai"]
+
+
+def test_first_successful_turn_gets_one_ai_generated_title(tmp_path, monkeypatch):
+    gw = make_gateway(tmp_path, monkeypatch, 19009)
+    title_requests = []
+
+    def fake_title(model, messages, **_kwargs):
+        title_requests.append((model, messages))
+        return {"content": "Gateway Reliability Fixes"}
+
+    def fake_turn(message):
+        gw.engine.messages.extend(
+            [
+                {"role": "user", "content": message},
+                {"role": "assistant", "content": "Done."},
+            ]
+        )
+        yield Message("assistant", {"text": "Done."})
+        yield Message("done", {})
+
+    monkeypatch.setattr(gw.engine.client, "chat", fake_title)
+    monkeypatch.setattr(gw.engine, "submit_message", fake_turn)
+
+    gw.run_turn("Please improve gateway reliability", lambda *_args: None)
+    assert gw.session["title"] == "Gateway Reliability Fixes"
+    assert sessions.load(gw.session["id"])["title"] == "Gateway Reliability Fixes"
+    assert len(title_requests) == 1
+
+    gw.run_turn("One more change", lambda *_args: None)
+    assert len(title_requests) == 1
+
+
+def test_ai_title_generation_does_not_block_new_chat(tmp_path, monkeypatch):
+    gw = make_gateway(tmp_path, monkeypatch, 19011)
+    title_started = threading.Event()
+    release_title = threading.Event()
+
+    def slow_title(_model, _messages, **_kwargs):
+        title_started.set()
+        assert release_title.wait(2)
+        return {"content": "Original Chat Title"}
+
+    def fake_turn(message):
+        gw.engine.messages.extend(
+            [
+                {"role": "user", "content": message},
+                {"role": "assistant", "content": "Done."},
+            ]
+        )
+        yield Message("assistant", {"text": "Done."})
+        yield Message("done", {})
+
+    old_id = gw.session["id"]
+    monkeypatch.setattr(gw.engine.client, "chat", slow_title)
+    monkeypatch.setattr(gw.engine, "submit_message", fake_turn)
+    turn = threading.Thread(target=gw.run_turn, args=("First message", lambda *_args: None))
+    turn.start()
+    assert title_started.wait(1)
+    assert not gw._turn_lock.locked()
+
+    current = gw.new_chat()
+    assert "error" not in current
+    assert current["id"] != old_id
+    new_title = current["title"]
+
+    release_title.set()
+    turn.join(2)
+    assert not turn.is_alive()
+    assert sessions.load(old_id)["title"] == "Original Chat Title"
+    assert gw.session["id"] == current["id"]
+    assert gw.current_chat()["title"] == new_title
 
 
 def test_context_compact_is_hidden_persistent_and_idempotent(tmp_path, monkeypatch):

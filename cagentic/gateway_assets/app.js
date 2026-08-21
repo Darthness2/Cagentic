@@ -14,7 +14,7 @@ window.fetch = (resource, options={}) => {
   return _nativeFetch(resource,options);
 };
 let state = {
-  chats: [], currentId: null, settings: {}, busy: false,
+  chats: [], currentId: null, settings: {}, busy: false, bootReady: false, creatingChat: false,
   voiceOut: false, voiceName: '', renderedPanels: new Set(), closedWindows: [],
   projects: [], activeProjectId: null,
   userName: '',
@@ -307,7 +307,13 @@ function trimThread(){
   if(!_stick) log.scrollTop=Math.max(0,log.scrollTop-(before-log.scrollHeight));
 }
 function getThread(){ let t=log.querySelector('.j-thread'); if(!t){t=document.createElement('div');t.className='j-thread';log.appendChild(t);} return t; }
-function clearLog(){ log.innerHTML=''; }
+function setEmptyMode(empty){
+  const app=$('#app'), starter=$('#starterPrompts'), list=$('#starterPromptList');
+  if(app) app.classList.toggle('empty-chat',empty);
+  if(starter) starter.classList.toggle('hidden',!empty);
+  if(!empty&&list) list.innerHTML='';
+}
+function clearLog(){ log.innerHTML=''; setEmptyMode(false); }
 function avatarHTML(){
   return '<div class="j-avatar" aria-hidden="true"><svg class="ico"><use href="#i-spark"/></svg></div>';
 }
@@ -327,7 +333,7 @@ function _focusableIn(el){
 }
 function openDialog(target, initialSelector, returnFocus){
   const modal=typeof target==='string'?$(target):target; if(!modal) return;
-  hideCtx(); closeModelMenu();
+  hideCtx(); closeModelMenu(); closeHeaderMenu();
   $('#restorePill').classList.remove('open');
   $('#restorePillBtn').setAttribute('aria-expanded','false');
   _dialogReturnFocus.set(modal,returnFocus||document.activeElement);
@@ -419,21 +425,20 @@ function renderPanels(text){
       getThread().appendChild(el); scrollDown();
       return;
     }
-    // Data panels render as draggable floating windows.
+    // Durable visual output belongs in the workspace beside the conversation.
     const inner=buildPanelInner(obj); if(!inner) return;
     state.renderedPanels.add(raw);
-    const idx=_winCascade; // capture before _nextWinPos increments
-    const pos=_nextWinPos();
-    const win=document.createElement('div'); win.className='hud-window';
-    win.style.cssText='left:'+pos.x+'px;top:'+pos.y+'px;--i:'+idx;
+    const idx=_winCascade++;
+    const win=document.createElement('section'); win.className='hud-window';
+    win.style.setProperty('--i',idx);
     const title=obj.title||(type.charAt(0).toUpperCase()+type.slice(1));
+    win.setAttribute('aria-label',title);
     win.innerHTML='<div class="hud-win-head"><span class="hud-win-title">'+esc(title)+'</span>'+
-      '<button class="hud-win-close" type="button" title="Close" aria-label="Close '+esc(title)+' panel"><svg class="ico sm" aria-hidden="true"><use href="#i-close"/></svg></button></div>'+
-      '<div class="hud-win-body">'+inner+'</div>'+
-      '<div class="hud-win-resize"></div>';
+      '<button class="hud-win-close" type="button" title="Close" aria-label="Close output: '+esc(title)+'"><svg class="ico sm" aria-hidden="true"><use href="#i-close"/></svg></button></div>'+
+      '<div class="hud-win-body">'+inner+'</div>';
     win.querySelector('.hud-win-close').addEventListener('click',e=>{e.stopPropagation();_closeWindow(win);});
     layer.appendChild(win);
-    _initWindow(win);
+    _syncWorkspacePane();
   });
 }
 // ---- INTERACTIVE WIDGETS ----------------------------------------------------
@@ -448,6 +453,7 @@ function _markUsed(wrap, activeEl){
   if(activeEl) activeEl.classList.add('ix-active');
   wrap.querySelectorAll('button,input').forEach(el=>{ el.disabled=true; });
 }
+let _interactiveFieldSeq=0;
 function buildInteractive(p){
   const type=(p.panel||'').toLowerCase();
   const wrap=document.createElement('div');
@@ -478,11 +484,14 @@ function buildInteractive(p){
     }; });
   } else if(type==='form'){
     const fields=(p.fields||[]); const btnLabel=p.button||'Submit';
+    const formId='ix-form-'+(++_interactiveFieldSeq);
     wrap.innerHTML=title+'<div class="ix-form-fields">'+fields.map((f,i)=>{
       const name=f.name||('field'+i);
-      const lab=f.label?'<label class="ix-flabel">'+esc(f.label)+'</label>':'';
-      return '<div class="ix-field">'+lab+'<input class="ix-input" data-name="'+esc(name)+'" placeholder="'+esc(f.placeholder||'')+'" value="'+esc(f.value||'')+'"/></div>';
-    }).join('')+'</div><button class="ix-submit">'+esc(btnLabel)+'</button>';
+      const inputId=formId+'-'+i;
+      const lab=f.label?'<label class="ix-flabel" for="'+inputId+'">'+esc(f.label)+'</label>':'';
+      const accessibleName=f.label?'':' aria-label="'+esc(f.placeholder||name)+'"';
+      return '<div class="ix-field">'+lab+'<input id="'+inputId+'" class="ix-input" data-name="'+esc(name)+'" placeholder="'+esc(f.placeholder||'')+'" value="'+esc(f.value||'')+'"'+accessibleName+'/></div>';
+    }).join('')+'</div><button class="ix-submit" type="button">'+esc(btnLabel)+'</button>';
     const submit=()=>{
       const vals={};
       wrap.querySelectorAll('.ix-input').forEach(inp=>{ vals[inp.dataset.name]=inp.value.trim(); });
@@ -532,12 +541,12 @@ function buildPanelInner(p){
         '</tr></thead><tbody>'+(p.rows||[]).map(r=>'<tr>'+r.map(c=>'<td>'+esc(String(c))+'</td>').join('')+'</tr>').join('')+'</tbody></table>';
       break;
     case 'image':
-      inner='<div class="vp-image"><img src="'+esc(safeImgUrl(p.url||''))+'" alt="" onerror="this.style.display=\'none\'"/>'+
+      inner='<div class="vp-image"><img src="'+esc(safeImgUrl(p.url||''))+'" alt="'+esc(p.alt||p.caption||p.title||'Generated output')+'" onerror="this.style.display=\'none\'"/>'+
         (p.caption?'<div class="cap">'+esc(p.caption)+'</div>':'')+'</div>';
       break;
     case 'web':
       inner=(p.results||[]).map(r=>'<div class="vp-web-item">'+
-        '<a href="'+esc(r.url||'#')+'" target="_blank" rel="noopener">'+esc(r.title||r.url||'')+'</a>'+
+        '<a href="'+esc(safeUrl(r.url||''))+'" target="_blank" rel="noopener noreferrer">'+esc(r.title||r.url||'')+'</a>'+
         (r.url?'<div class="url">'+esc(r.url)+'</div>':'')+
         (r.snippet?'<div class="snip">'+esc(r.snippet)+'</div>':'')+'</div>').join('');
       break;
@@ -555,7 +564,7 @@ function buildPanelInner(p){
         '<div class="mlabel">'+esc(p.label||((p.lat??'?')+', '+(p.lon??'?')))+'</div></div>';
       break;
     case 'bar':{ const vals=(p.values||[]).map(Number); const labs=p.labels||vals.map((_,i)=>String(i+1));
-      const maxV=Math.max(...vals,1); const col=p.color||'#c79bd8';
+      const maxV=Math.max(...vals,1); const col=p.color||'var(--accent)';
       const W2=320,H2=160,padL=36,padR=10,padT=14,padB=22;
       const plotW=W2-padL-padR, plotH=H2-padT-padB;
       const bw=Math.max(10,Math.min(36,Math.floor(plotW/Math.max(vals.length,1)*0.6)));
@@ -565,8 +574,8 @@ function buildPanelInner(p){
       for(let g=0;g<=4;g++){
         const gy=padT+plotH*(1-g/4);
         const gv=(maxV*g/4);
-        grid+=`<line x1="${padL}" y1="${gy}" x2="${W2-padR}" y2="${gy}" stroke="#2a2235" stroke-width="1"/>`;
-        grid+=`<text x="${padL-4}" y="${gy+3}" text-anchor="end" font-size="8" fill="#6b5f7a">${gv%1===0?gv:gv.toFixed(1)}</text>`;
+        grid+=`<line x1="${padL}" y1="${gy}" x2="${W2-padR}" y2="${gy}" stroke="var(--border)" stroke-width="1"/>`;
+        grid+=`<text x="${padL-4}" y="${gy+3}" text-anchor="end" font-size="8" fill="var(--text-dim)">${gv%1===0?gv:gv.toFixed(1)}</text>`;
       }
       // gradient def
       const gid='bg'+(_winCascade||0);
@@ -575,20 +584,20 @@ function buildPanelInner(p){
       vals.forEach((v,i)=>{
         const bh=Math.round((v/maxV)*plotH); const x=padL+i*gap+(gap-bw)/2; const y=padT+plotH-bh;
         bars+=`<rect x="${x}" y="${y}" width="${bw}" height="${bh}" fill="url(#${gid})" rx="3" ry="3"/>`;
-        bars+=`<text x="${x+bw/2}" y="${H2-4}" text-anchor="middle" font-size="9" fill="#b0a6ba">${esc(String(labs[i]||''))}</text>`;
+        bars+=`<text x="${x+bw/2}" y="${H2-4}" text-anchor="middle" font-size="9" fill="var(--text-2)">${esc(String(labs[i]||''))}</text>`;
         bars+=`<text x="${x+bw/2}" y="${y-4}" text-anchor="middle" font-size="8" font-weight="600" fill="${esc(col)}">${esc(String(v))}</text>`;
       });
       inner=`<svg viewBox="0 0 ${W2} ${H2}" style="width:100%;height:auto">${bars}</svg>`; break; }
-    case 'line':{ const ds=(p.datasets||[{values:p.values||[],label:'',color:'#c79bd8'}]);
+    case 'line':{ const ds=(p.datasets||[{values:p.values||[],label:'',color:'var(--accent)'}]);
       const labs=p.labels||[];  const maxAll=Math.max(...ds.flatMap(d=>d.values||[]).map(Number),1);
       const W2=320,H2=160,padL=36,padR=10,padT=14,padB=22;
       const plotW=W2-padL-padR, plotH=H2-padT-padB;
-      let lines=''; const colors=['#c79bd8','#8ecf95','#e3a978','#c97fd4','#e5928f'];
+      let lines=''; const colors=['var(--accent)','var(--ok)','var(--warn)','#86b6de','var(--hot)'];
       // grid
       for(let g=0;g<=4;g++){
         const gy=padT+plotH*(1-g/4); const gv=(maxAll*g/4);
-        lines+=`<line x1="${padL}" y1="${gy}" x2="${W2-padR}" y2="${gy}" stroke="#2a2235" stroke-width="1"/>`;
-        lines+=`<text x="${padL-4}" y="${gy+3}" text-anchor="end" font-size="8" fill="#6b5f7a">${gv%1===0?gv:gv.toFixed(1)}</text>`;
+        lines+=`<line x1="${padL}" y1="${gy}" x2="${W2-padR}" y2="${gy}" stroke="var(--border)" stroke-width="1"/>`;
+        lines+=`<text x="${padL-4}" y="${gy+3}" text-anchor="end" font-size="8" fill="var(--text-dim)">${gv%1===0?gv:gv.toFixed(1)}</text>`;
       }
       ds.forEach((d,di)=>{ const vals=(d.values||[]).map(Number); const col=d.color||colors[di%colors.length];
         if(!vals.length) return;
@@ -600,19 +609,19 @@ function buildPanelInner(p){
         lines+=`<polygon points="${areaPts}" fill="url(#${aid})"/>`;
         lines+=`<polyline points="${pts.join(' ')}" fill="none" stroke="${esc(col)}" stroke-width="2.5" stroke-linecap="round" stroke-linejoin="round"/>`;
         pts.forEach((pt,i)=>{ const[x,y]=pt.split(',');
-          lines+=`<circle cx="${x}" cy="${y}" r="3.5" fill="#16111c" stroke="${esc(col)}" stroke-width="2"/>`; });
+          lines+=`<circle cx="${x}" cy="${y}" r="3.5" fill="var(--stage-bg)" stroke="${esc(col)}" stroke-width="2"/>`; });
         if(d.label){ const lastPt=pts[pts.length-1].split(',');
           lines+=`<text x="${+lastPt[0]+6}" y="${+lastPt[1]+3}" font-size="9" font-weight="600" fill="${esc(col)}">${esc(d.label)}</text>`; }
       });
       labs.forEach((l,i)=>{ const x=padL+i*plotW/Math.max(labs.length-1,1);
-        lines+=`<text x="${x}" y="${H2-4}" text-anchor="middle" font-size="9" fill="#b0a6ba">${esc(String(l))}</text>`; });
+        lines+=`<text x="${x}" y="${H2-4}" text-anchor="middle" font-size="9" fill="var(--text-2)">${esc(String(l))}</text>`; });
       inner=`<svg viewBox="0 0 ${W2} ${H2}" style="width:100%;height:auto">${lines}</svg>`; break; }
     case 'pie':{ const vals=(p.values||[]).map(Number); const labs=p.labels||vals.map((_,i)=>String(i+1));
       const total=vals.reduce((a,b)=>a+b,0)||1;
-      const colors=['#c79bd8','#8ecf95','#e3a978','#c97fd4','#e5928f','#b0a6ba','#7ec8e3','#d4a76a'];
+      const colors=['var(--accent)','var(--ok)','var(--warn)','#86b6de','var(--hot)','var(--text-2)','#7fa5d8','#bc8cab'];
       const cx=100,cy=80,r=62,ri=32; let angle=-Math.PI/2; let slices=''; let legend='';
       // shadow ring
-      slices+=`<circle cx="${cx+1}" cy="${cy+2}" r="${r+2}" fill="none" stroke="#0a0810" stroke-width="4" opacity="0.4"/>`;
+      slices+=`<circle cx="${cx+1}" cy="${cy+2}" r="${r+2}" fill="none" stroke="var(--stage-bg)" stroke-width="4" opacity="0.4"/>`;
       vals.forEach((v,i)=>{ const sweep=2*Math.PI*(v/total); const col=colors[i%colors.length];
         const mid=angle+sweep/2;
         const x1=cx+r*Math.cos(angle),y1=cy+r*Math.sin(angle);
@@ -622,19 +631,19 @@ function buildPanelInner(p){
         const lg=sweep>Math.PI?1:0;
         // slight explode for large slices
         const ex=sweep>0.3?2*Math.cos(mid):0, ey=sweep>0.3?2*Math.sin(mid):0;
-        slices+=`<path d="M${xi1+ex} ${yi1+ey} L${x1+ex} ${y1+ey} A${r} ${r} 0 ${lg} 1 ${x2+ex} ${y2+ey} L${xi2+ex} ${yi2+ey} A${ri} ${ri} 0 ${lg} 0 ${xi1+ex} ${yi1+ey}" fill="${col}" opacity="0.9" stroke="#16111c" stroke-width="1"/>`;
+        slices+=`<path d="M${xi1+ex} ${yi1+ey} L${x1+ex} ${y1+ey} A${r} ${r} 0 ${lg} 1 ${x2+ex} ${y2+ey} L${xi2+ex} ${yi2+ey} A${ri} ${ri} 0 ${lg} 0 ${xi1+ex} ${yi1+ey}" fill="${col}" opacity="0.9" stroke="var(--stage-bg)" stroke-width="1"/>`;
         // percentage label inside slice
         if(sweep>0.25){
           const lr=(r+ri)/2, lx=cx+lr*Math.cos(mid)+ex, ly=cy+lr*Math.sin(mid)+ey;
           const pct=Math.round(v/total*100);
-          slices+=`<text x="${lx}" y="${ly+3}" text-anchor="middle" font-size="9" font-weight="600" fill="#f0eaf2">${pct}%</text>`;
+          slices+=`<text x="${lx}" y="${ly+3}" text-anchor="middle" font-size="9" font-weight="600" fill="var(--text)">${pct}%</text>`;
         }
         const pct=Math.round(v/total*100);
         legend+=`<rect x="190" y="${8+i*18}" width="10" height="10" rx="2" fill="${col}"/>`;
-        legend+=`<text x="204" y="${17+i*18}" font-size="10" fill="#cdbbd8">${esc(String(labs[i]))} <tspan fill="#8a7e96">${pct}%</tspan></text>`;
+        legend+=`<text x="204" y="${17+i*18}" font-size="10" fill="var(--text-2)">${esc(String(labs[i]))} <tspan fill="var(--text-dim)">${pct}%</tspan></text>`;
         angle+=sweep; });
       // center label
-      slices+=`<circle cx="${cx}" cy="${cy}" r="${ri-4}" fill="#16111c" opacity="0.6"/>`;
+      slices+=`<circle cx="${cx}" cy="${cy}" r="${ri-4}" fill="var(--stage-bg)" opacity="0.6"/>`;
       inner=`<svg viewBox="0 0 320 165" style="width:100%;height:auto">${slices}${legend}</svg>`; break; }
     case 'stocks':{
       const inner=buildStocksCard(p);
@@ -669,7 +678,7 @@ function buildPanelInner(p){
 // ---- SPECIALTY WIDGETS (stocks, weather, crypto, sports, calendar) --------
 //
 // `show_widget` is the agent-facing tool. It emits an SSE `widget` event with
-// {type, title, data}; the frontend drops it into a draggable HUD window.
+// {type, title, data}; the frontend adds it to the output workspace.
 // We share the renderer with the inline `hud` panels (panels also use
 // {panel: 'stocks', ...}) so the model can pick either channel.
 function _fmtNum(n, dp){
@@ -685,7 +694,7 @@ function _fmtNum(n, dp){
 // ============================================================================
 //
 // `show_widget` is the agent-facing tool. It emits an SSE `widget` event with
-// {type, title, data}; the frontend drops it into a draggable HUD window.
+// {type, title, data}; the frontend adds it to the output workspace.
 // We share the renderer with the inline `hud` panels (panels also use
 // {panel: 'stocks', ...}) so the model can pick either channel.
 //
@@ -717,7 +726,7 @@ function _fmtPct(n, dp){
   return x.toFixed(dp===undefined?2:dp)+'%';
 }
 function _greetingColor(n){
-  // color by % change; thresholds tuned for a peach/rose palette
+  // Color by % change using the shared semantic state tokens.
   const x=Number(n);
   if(!isFinite(x)) return 'var(--text-2)';
   if(x>=1) return 'var(--ok)';
@@ -756,14 +765,14 @@ function _sparkSVG(vals, color, w, h){
   const gid=_uid('spk');
   const last=vs[vs.length-1], first=vs[0];
   const up=last>=first;
-  const stroke=up?color:'#e5928f';
+  const stroke=up?color:'var(--hot)';
   return '<svg viewBox="0 0 '+W+' '+H+'" class="vp-spark" preserveAspectRatio="none">'+
     '<defs><linearGradient id="'+gid+'" x1="0" y1="0" x2="0" y2="1">'+
     '<stop offset="0%" stop-color="'+stroke+'" stop-opacity=".35"/>'+
     '<stop offset="100%" stop-color="'+stroke+'" stop-opacity="0"/></linearGradient></defs>'+
     '<polygon points="'+area+'" fill="url(#'+gid+')"/>'+
     '<polyline points="'+pts.join(' ')+'" fill="none" stroke="'+stroke+'" stroke-width="1.5" stroke-linecap="round" stroke-linejoin="round"/>'+
-    '<circle cx="'+xFor(vs.length-1)+'" cy="'+yFor(last)+'" r="2.4" fill="#16111c" stroke="'+stroke+'" stroke-width="1.5"/>'+
+    '<circle cx="'+xFor(vs.length-1)+'" cy="'+yFor(last)+'" r="2.4" fill="var(--stage-bg)" stroke="'+stroke+'" stroke-width="1.5"/>'+
     '</svg>';
 }
 
@@ -775,7 +784,7 @@ function _areaChartSVG(vals, opts){
   const o=opts||{};
   const W=o.w||480, H=o.h||160;
   const padL=o.padL||36, padR=o.padR||52, padT=o.padT||10, padB=o.padB||18;
-  const stroke=o.color||'#c79bd8';
+  const stroke=o.color||'var(--accent)';
   const min=Math.min(...vs), max=Math.max(...vs);
   const span=Math.max(max-min, 1e-9);
   const plotW=W-padL-padR, plotH=H-padT-padB;
@@ -787,15 +796,15 @@ function _areaChartSVG(vals, opts){
   const gid=_uid('ar');
   const last=vs[vs.length-1], first=vs[0];
   const up=last>=first;
-  const lineStroke=up?stroke:'#e5928f';
+  const lineStroke=up?stroke:'var(--hot)';
   // gridlines: 4 horizontal, plus min/max labels on the y-axis
   const grid=[];
   for(let g=0; g<=4; g++){
     const y=padT+(g/4)*plotH;
     const val=max-(g/4)*span;
-    grid.push('<line x1="'+padL+'" y1="'+y+'" x2="'+(W-padR)+'" y2="'+y+'" stroke="rgba(199,155,216,.08)" stroke-width="1" stroke-dasharray="'+(g===0||g===4?'0':'2 3')+'"/>');
+    grid.push('<line x1="'+padL+'" y1="'+y+'" x2="'+(W-padR)+'" y2="'+y+'" stroke="rgba(124,196,255,.08)" stroke-width="1" stroke-dasharray="'+(g===0||g===4?'0':'2 3')+'"/>');
     if(o.showAxis!==false){
-      grid.push('<text x="'+(padL-6)+'" y="'+(y+3)+'" font-size="9" fill="#7d7388" text-anchor="end" font-family="inherit">'+_fmtNum(val, val<10?2:0)+'</text>');
+      grid.push('<text x="'+(padL-6)+'" y="'+(y+3)+'" font-size="9" fill="var(--text-dim)" text-anchor="end" font-family="inherit">'+_fmtNum(val, val<10?2:0)+'</text>');
     }
   }
   // current-price marker on the right
@@ -803,7 +812,7 @@ function _areaChartSVG(vals, opts){
   const marker=o.gradient===false ? '' : (
     '<line x1="'+xFor(vs.length-1)+'" y1="'+padT+'" x2="'+xFor(vs.length-1)+'" y2="'+(padT+plotH)+'" stroke="'+lineStroke+'" stroke-width="1" stroke-dasharray="2 2" opacity=".6"/>'+
     '<rect x="'+(W-padR+2)+'" y="'+(lastY-9)+'" width="'+(padR-6)+'" height="18" rx="2" fill="'+lineStroke+'" opacity=".95"/>'+
-    '<text x="'+(W-padR/2-2)+'" y="'+(lastY+4)+'" font-size="10" fill="#16111c" text-anchor="middle" font-weight="700">'+_fmtNum(last,2)+'</text>'
+    '<text x="'+(W-padR/2-2)+'" y="'+(lastY+4)+'" font-size="10" fill="var(--on-accent)" text-anchor="middle" font-weight="700">'+_fmtNum(last,2)+'</text>'
   );
   return '<svg viewBox="0 0 '+W+' '+H+'" class="st-chart-svg" preserveAspectRatio="none">'+
     '<defs><linearGradient id="'+gid+'" x1="0" y1="0" x2="0" y2="1">'+
@@ -812,7 +821,7 @@ function _areaChartSVG(vals, opts){
     grid.join('')+
     '<path d="'+area+'" fill="url(#'+gid+')"/>'+
     '<path d="'+line+'" fill="none" stroke="'+lineStroke+'" stroke-width="1.6" stroke-linecap="round" stroke-linejoin="round"/>'+
-    '<circle cx="'+xFor(vs.length-1)+'" cy="'+lastY+'" r="3" fill="#16111c" stroke="'+lineStroke+'" stroke-width="1.8"/>'+
+    '<circle cx="'+xFor(vs.length-1)+'" cy="'+lastY+'" r="3" fill="var(--stage-bg)" stroke="'+lineStroke+'" stroke-width="1.8"/>'+
     marker+
   '</svg>';
 }
@@ -836,13 +845,13 @@ function _candleChartSVG(ohlc, opts){
   for(let g=0; g<=4; g++){
     const y=padT+(g/4)*plotH;
     const val=max-(g/4)*span;
-    grid.push('<line x1="'+padL+'" y1="'+y+'" x2="'+(W-padR)+'" y2="'+y+'" stroke="rgba(199,155,216,.08)" stroke-width="1" stroke-dasharray="'+(g===0||g===4?'0':'2 3')+'"/>');
-    grid.push('<text x="'+(padL-6)+'" y="'+(y+3)+'" font-size="9" fill="#7d7388" text-anchor="end" font-family="inherit">'+_fmtNum(val, val<10?2:0)+'</text>');
+    grid.push('<line x1="'+padL+'" y1="'+y+'" x2="'+(W-padR)+'" y2="'+y+'" stroke="rgba(124,196,255,.08)" stroke-width="1" stroke-dasharray="'+(g===0||g===4?'0':'2 3')+'"/>');
+    grid.push('<text x="'+(padL-6)+'" y="'+(y+3)+'" font-size="9" fill="var(--text-dim)" text-anchor="end" font-family="inherit">'+_fmtNum(val, val<10?2:0)+'</text>');
   }
   const candles=vs.map((c,i)=>{
     const cx=padL+i*colW+colW/2;
     const up=c.c>=c.o;
-    const color=up?'#8ecf95':'#e5928f';
+    const color=up?'var(--ok)':'var(--hot)';
     const yo=yFor(c.o), yc=yFor(c.c), yh=yFor(c.h), yl=yFor(c.l);
     const top=Math.min(yo,yc), bot=Math.max(yo,yc);
     return '<line x1="'+cx+'" y1="'+yh+'" x2="'+cx+'" y2="'+yl+'" stroke="'+color+'" stroke-width="1"/>'+
@@ -888,19 +897,19 @@ function _hourlyTempSVG(hourly, opts){
   // hour labels: show every 6th
   const labels=hs.map((h,i)=>{
     if(i!==0 && i!==hs.length-1 && i%6!==0) return '';
-    return '<text x="'+xFor(i)+'" y="'+(H-6)+'" font-size="9" fill="#b0a6ba" text-anchor="middle" font-family="inherit">'+esc(h.h)+'</text>';
+    return '<text x="'+xFor(i)+'" y="'+(H-6)+'" font-size="9" fill="var(--text-2)" text-anchor="middle" font-family="inherit">'+esc(h.h)+'</text>';
   }).join('');
   // spot dots every 6
   const dots=hs.map((h,i)=> i%6===0 || i===hs.length-1
-    ? '<circle cx="'+xFor(i)+'" cy="'+yFor(h.t)+'" r="2.4" fill="#16111c" stroke="#c79bd8" stroke-width="1.4"/>'
+    ? '<circle cx="'+xFor(i)+'" cy="'+yFor(h.t)+'" r="2.4" fill="var(--stage-bg)" stroke="var(--accent)" stroke-width="1.4"/>'
     : '').join('');
   return '<svg viewBox="0 0 '+W+' '+H+'" class="ww-hourly-svg" preserveAspectRatio="none">'+
     '<defs><linearGradient id="'+gid+'" x1="0" y1="0" x2="0" y2="1">'+
-    '<stop offset="0%" stop-color="#c79bd8" stop-opacity=".35"/>'+
-    '<stop offset="100%" stop-color="#c79bd8" stop-opacity="0"/></linearGradient></defs>'+
-    '<rect x="'+bx0+'" y="'+padT+'" width="'+(bx1-bx0)+'" height="'+plotH+'" fill="rgba(199,155,216,.10)"/>'+
+    '<stop offset="0%" stop-color="var(--accent)" stop-opacity=".35"/>'+
+    '<stop offset="100%" stop-color="var(--accent)" stop-opacity="0"/></linearGradient></defs>'+
+    '<rect x="'+bx0+'" y="'+padT+'" width="'+(bx1-bx0)+'" height="'+plotH+'" fill="rgba(124,196,255,.10)"/>'+
     '<path d="'+area+'" fill="url(#'+gid+')"/>'+
-    '<path d="'+path+'" fill="none" stroke="#c79bd8" stroke-width="1.6" stroke-linecap="round" stroke-linejoin="round"/>'+
+    '<path d="'+path+'" fill="none" stroke="var(--accent)" stroke-width="1.6" stroke-linecap="round" stroke-linejoin="round"/>'+
     dots+labels+
   '</svg>';
 }
@@ -929,18 +938,18 @@ function _sunArcSVG(sunrise, sunset, now){
   const sunY = ay - Math.sin(sunFrac*Math.PI)*40;
   const sunOnArc = nowMin>=sr && nowMin<=ss;
   const sun = sunOnArc
-    ? '<circle cx="'+sunX+'" cy="'+sunY+'" r="4.2" fill="#c79bd8" stroke="#16111c" stroke-width="1.4"/>'
-    : '<circle cx="'+sunOnArc?sunX:(nowMin<sr?sx0:sx1)+'" cy="'+(sunOnArc?sunY:ay-3)+'" r="3" fill="#5a4e69"/>';
+    ? '<circle cx="'+sunX+'" cy="'+sunY+'" r="4.2" fill="var(--accent)" stroke="var(--stage-bg)" stroke-width="1.4"/>'
+    : '<circle cx="'+(nowMin<sr?sx0:sx1)+'" cy="'+(ay-3)+'" r="3" fill="var(--text-dim)"/>';
   return '<svg viewBox="0 0 '+W+' '+H+'" class="ww-sun-svg" preserveAspectRatio="xMidYMid meet">'+
     '<defs><linearGradient id="'+gid+'" x1="0" y1="0" x2="1" y2="0">'+
-    '<stop offset="0%" stop-color="#e5928f" stop-opacity=".55"/>'+
-    '<stop offset="50%" stop-color="#c79bd8" stop-opacity=".85"/>'+
-    '<stop offset="100%" stop-color="#e6c073" stop-opacity=".55"/></linearGradient></defs>'+
-    '<line x1="'+ax0+'" y1="'+ay+'" x2="'+ax1+'" y2="'+ay+'" stroke="rgba(199,155,216,.18)" stroke-dasharray="2 3"/>'+
+    '<stop offset="0%" stop-color="var(--hot)" stop-opacity=".55"/>'+
+    '<stop offset="50%" stop-color="var(--accent)" stop-opacity=".85"/>'+
+    '<stop offset="100%" stop-color="var(--warn)" stop-opacity=".55"/></linearGradient></defs>'+
+    '<line x1="'+ax0+'" y1="'+ay+'" x2="'+ax1+'" y2="'+ay+'" stroke="rgba(124,196,255,.18)" stroke-dasharray="2 3"/>'+
     '<path d="'+arc+'" fill="none" stroke="url(#'+gid+')" stroke-width="1.6" stroke-linecap="round"/>'+
     sun+
-    '<text x="'+sx0+'" y="'+(H-1)+'" font-size="9" fill="#b0a6ba" text-anchor="middle" font-family="inherit">'+esc(sunrise)+'</text>'+
-    '<text x="'+sx1+'" y="'+(H-1)+'" font-size="9" fill="#b0a6ba" text-anchor="middle" font-family="inherit">'+esc(sunset)+'</text>'+
+    '<text x="'+sx0+'" y="'+(H-1)+'" font-size="9" fill="var(--text-2)" text-anchor="middle" font-family="inherit">'+esc(sunrise)+'</text>'+
+    '<text x="'+sx1+'" y="'+(H-1)+'" font-size="9" fill="var(--text-2)" text-anchor="middle" font-family="inherit">'+esc(sunset)+'</text>'+
   '</svg>';
 }
 
@@ -1001,7 +1010,7 @@ function _stWatchlist(items){
   return '<div class="st-watch">'+
     items.map(it=>{
       const u=Number(it.change)>=0;
-      const spk=(it.chart&&it.chart.values)?_sparkSVG(it.chart.values, u?'#8ecf95':'#e5928f', 56, 18):'';
+      const spk=(it.chart&&it.chart.values)?_sparkSVG(it.chart.values, u?'var(--ok)':'var(--hot)', 56, 18):'';
       return '<div class="st-watch-row">'+
         '<div class="st-watch-sym">'+esc(it.symbol||'')+'</div>'+
         '<div class="st-watch-spk">'+spk+'</div>'+
@@ -1052,7 +1061,7 @@ function buildStocksCard(p){
   const tf = (p.chart&&p.chart.timeframe) || '1D';
   const chart = p.ohlc
     ? _candleChartSVG(p.ohlc, {w:480,h:160,padL:36,padR:12})
-    : (p.chart&&p.chart.values ? _areaChartSVG(p.chart.values, {w:480,h:160,color:'#c79bd8',padL:36,padR:52}) : '');
+    : (p.chart&&p.chart.values ? _areaChartSVG(p.chart.values, {w:480,h:160,color:'var(--accent)',padL:36,padR:52}) : '');
 
   // watchlist — strip the first item if it duplicates the hero
   const rest = items.length>1 ? items.slice(1) : [];
@@ -1098,7 +1107,7 @@ function buildCryptoCard(p){
   const tf = (p.chart&&p.chart.timeframe) || '24H';
   const chart = p.ohlc
     ? _candleChartSVG(p.ohlc, {w:480,h:160,padL:36,padR:12})
-    : (p.chart&&p.chart.values ? _areaChartSVG(p.chart.values, {w:480,h:160,color:'#c79bd8',padL:36,padR:52}) : '');
+    : (p.chart&&p.chart.values ? _areaChartSVG(p.chart.values, {w:480,h:160,color:'var(--accent)',padL:36,padR:52}) : '');
   const rest = items.length>1 ? items.slice(1) : [];
   const ex = p.exchange || (sym.endsWith('-USD')?'GLOBAL':(sym.length<=4?'CEX':'DEX'));
 
@@ -1326,7 +1335,7 @@ function buildCalendarCard(p){
   // all-day pills
   const allDayHtml = allDay.length
     ? '<div class="cx-allday">'+allDay.map(e=>{
-        const color=e.color||'#c79bd8';
+        const color=e.color||'var(--accent)';
         return '<div class="cx-allday-pill" style="--cx-color:'+esc(color)+'">'+esc(e.title||'')+'</div>';
       }).join('')+'</div>'
     : '';
@@ -1341,7 +1350,7 @@ function buildCalendarCard(p){
     if(en===null||en<=s) en=s+30;
     const top=((s-hourStart*60)/spanMins)*100;
     const height=Math.max(4, ((en-s)/spanMins)*100);
-    const color=e.color||'#c79bd8';
+    const color=e.color||'var(--accent)';
     return '<div class="cx-ev" style="top:'+top.toFixed(2)+'%;height:'+height.toFixed(2)+'%;--cx-color:'+esc(color)+'">'+
       '<div class="cx-ev-bar"></div>'+
       '<div class="cx-ev-body">'+
@@ -1362,7 +1371,7 @@ function buildCalendarCard(p){
   '</div>';
 }
 
-// Orchestrator: turn a `show_widget` SSE event into a draggable HUD window.
+// Orchestrator: turn a `show_widget` SSE event into a workspace output.
 function renderWidget(d){
   const type=(d.type||'').toLowerCase();
   const title=d.title||((type||'').charAt(0).toUpperCase()+(type||'').slice(1));
@@ -1372,96 +1381,72 @@ function renderWidget(d){
   const inner=buildPanelInner(p);
   const layer=$('#windowLayer');
   if(!inner){ return; }
-  const idx=_winCascade;
-  const pos=_nextWinPos();
-  const win=document.createElement('div'); win.className='hud-window sw-window sw-'+type;
-  win.style.cssText='left:'+pos.x+'px;top:'+pos.y+'px;--i:'+idx;
+  const idx=_winCascade++;
+  const win=document.createElement('section'); win.className='hud-window sw-window sw-'+type;
+  win.style.setProperty('--i',idx);
+  win.setAttribute('aria-label',title);
   win.innerHTML='<div class="hud-win-head"><span class="hud-win-title">'+esc(title)+'</span>'+
-    '<button class="hud-win-close" type="button" title="Close" aria-label="Close '+esc(title)+' panel"><svg class="ico sm" aria-hidden="true"><use href="#i-close"/></svg></button></div>'+
-    '<div class="hud-win-body sw-body">'+inner+'</div>'+
-    '<div class="hud-win-resize"></div>';
+    '<button class="hud-win-close" type="button" title="Close" aria-label="Close output: '+esc(title)+'"><svg class="ico sm" aria-hidden="true"><use href="#i-close"/></svg></button></div>'+
+    '<div class="hud-win-body sw-body">'+inner+'</div>';
   win.querySelector('.hud-win-close').addEventListener('click',e=>{e.stopPropagation();_closeWindow(win);});
   layer.appendChild(win);
-  _initWindow(win);
+  _syncWorkspacePane();
 }
 
-// ---- FLOATING HUD WINDOWS ----------------------------------------------------
+// ---- OUTPUT WORKSPACE --------------------------------------------------------
 let _winCascade = 0;
-function _nextWinPos(){
-  const layer=$('#windowLayer');
-  const lw=layer.clientWidth, lh=layer.clientHeight;
-  const cols=Math.max(1, Math.floor((lw-40)/280));
-  const rows=Math.max(1, Math.floor((lh-40)/240));
-  const col=_winCascade%cols, row=Math.floor(_winCascade/cols)%rows;
-  const cellW=(lw-40)/cols, cellH=(lh-40)/rows;
-  const x=20+col*cellW+20, y=20+row*cellH+20;
-  _winCascade++;
-  return {
-    x: Math.max(8,Math.min(x,Math.max(8,lw-260))),
-    y: Math.max(8,Math.min(y,Math.max(8,lh-200)))
-  };
+const WORKSPACE_OVERLAY_MEDIA=window.matchMedia('(max-width: 767px)');
+let _workspaceReturnFocus=null;
+function _visibleWorkspaceWindows(){
+  return [...$('#windowLayer').querySelectorAll('.hud-window')]
+    .filter(win=>win.style.display!=='none');
 }
-// One shared pointer manager drives every window's drag + resize, so windows
-// don't each leak a set of document-level listeners. Pointer events unify
-// mouse and touch in a single path.
-let _drag=null; // {win, mode:'move'|'resize', sx, sy, ox, oy, ow, oh}
-function _initWindow(win){
-  const head=win.querySelector('.hud-win-head');
-  if(head) head.addEventListener('pointerdown',e=>{
-    if(e.target.closest('.hud-win-close')) return;
-    _drag={win, mode:'move', sx:e.clientX, sy:e.clientY,
-      ox:parseInt(win.style.left)||0, oy:parseInt(win.style.top)||0};
-    win.classList.add('dragging'); e.preventDefault();
-  });
-  const handle=win.querySelector('.hud-win-resize');
-  if(handle) handle.addEventListener('pointerdown',e=>{
-    _drag={win, mode:'resize', sx:e.clientX, sy:e.clientY,
-      ow:win.offsetWidth, oh:win.offsetHeight};
-    win.classList.add('resizing'); e.preventDefault(); e.stopPropagation();
-  });
-}
-document.addEventListener('pointermove',e=>{
-  if(!_drag) return;
-  const dx=e.clientX-_drag.sx, dy=e.clientY-_drag.sy;
-  if(_drag.mode==='move'){
-    _drag.win.style.left=(_drag.ox+dx)+'px';
-    _drag.win.style.top=(_drag.oy+dy)+'px';
-  } else {
-    _drag.win.style.width=Math.max(220,_drag.ow+dx)+'px';
-    _drag.win.style.height=Math.max(100,_drag.oh+dy)+'px';
+function _syncWorkspacePane(){
+  const pane=$('#workspacePane'); if(!pane) return;
+  const wasOpen=!pane.classList.contains('hidden');
+  const visible=_visibleWorkspaceWindows();
+  const mobileSheet=WORKSPACE_OVERLAY_MEDIA.matches;
+  // Keep Stop and permission controls reachable while a turn is live. Outputs
+  // collected during generation open as a focused sheet only after it ends.
+  const open=visible.length>0&&!(mobileSheet&&state.busy);
+  pane.classList.toggle('hidden',!open);
+  pane.setAttribute('aria-hidden',open?'false':'true');
+  pane.setAttribute('role',mobileSheet?'dialog':'region');
+  if(mobileSheet) pane.setAttribute('aria-modal','true'); else pane.removeAttribute('aria-modal');
+  document.body.classList.toggle('workspace-open',open);
+  const count=$('#workspaceCount');
+  if(count) count.textContent=open?(visible.length+' output'+(visible.length===1?'':'s')):'';
+  const title=$('#workspaceTitle');
+  if(title) title.textContent='Outputs';
+  if(typeof syncSidebarUI==='function') syncSidebarUI();
+  if(open&&!wasOpen&&mobileSheet){
+    _workspaceReturnFocus=(state.bootReady&&input&&!input.disabled)?input:$('#logsBtn');
+    requestAnimationFrame(()=>$('#workspaceCloseBtn')?.focus());
+  } else if(!open&&wasOpen&&_workspaceReturnFocus&&_workspaceReturnFocus.isConnected){
+    const returnFocus=state.busy?$('#stopBtn'):_workspaceReturnFocus; _workspaceReturnFocus=null;
+    requestAnimationFrame(()=>returnFocus.focus());
   }
-});
-document.addEventListener('pointerup',()=>{
-  if(!_drag) return;
-  _drag.win.classList.remove('dragging','resizing');
-  _drag=null;
-  clampHudWindows();
-});
+}
 function _closeWindow(win){
+  const ownedFocus=win.contains(document.activeElement);
   win.style.display='none';
-  state.closedWindows.push(win);
+  if(!state.closedWindows.includes(win)) state.closedWindows.push(win);
   _updateRestorePill();
+  _syncWorkspacePane();
+  if(ownedFocus){
+    const remaining=_visibleWorkspaceWindows();
+    if(remaining.length) requestAnimationFrame(()=>remaining[0].querySelector('.hud-win-close')?.focus());
+    else if(!WORKSPACE_OVERLAY_MEDIA.matches) requestAnimationFrame(()=>$('#restorePillBtn')?.focus());
+  }
 }
 function _restoreWindow(win){
   win.style.display='';
   state.closedWindows=state.closedWindows.filter(w=>w!==win);
-  // Re-trigger entrance animation
-  win.style.animation='none'; win.offsetHeight; win.style.animation='';
   _updateRestorePill();
-  requestAnimationFrame(clampHudWindows);
+  _syncWorkspacePane();
 }
 function clampHudWindows(){
-  const layer=$('#windowLayer'); if(!layer) return;
-  layer.querySelectorAll('.hud-window').forEach(win=>{
-    if(win.style.display==='none') return;
-    const edge=8;
-    const maxX=Math.max(edge,layer.clientWidth-win.offsetWidth-edge);
-    const maxY=Math.max(edge,layer.clientHeight-win.offsetHeight-edge);
-    const x=Number.parseFloat(win.style.left)||edge;
-    const y=Number.parseFloat(win.style.top)||edge;
-    win.style.left=Math.max(edge,Math.min(x,maxX))+'px';
-    win.style.top=Math.max(edge,Math.min(y,maxY))+'px';
-  });
+  // The docked workspace is CSS-sized; retained for older resize call sites.
 }
 function _updateRestorePill(){
   const pill=$('#restorePill');
@@ -1531,46 +1516,55 @@ function clearViewport(){
   const layer=$('#windowLayer');
   if(layer) layer.innerHTML='';
   _updateRestorePill();
+  _syncWorkspacePane();
 }
 
-// bring window to front on interaction
-$('#windowLayer').addEventListener('pointerdown',e=>{
-  const win=e.target.closest('.hud-window');
-  if(win && !e.target.closest('.hud-win-close')){
-    // move to end of DOM = top of stack
-    e.currentTarget.appendChild(win);
+$('#workspaceCloseBtn').addEventListener('click',()=>{
+  _visibleWorkspaceWindows().forEach(win=>{
+    win.style.display='none';
+    if(!state.closedWindows.includes(win)) state.closedWindows.push(win);
+  });
+  _updateRestorePill();
+  _syncWorkspacePane();
+  if(!WORKSPACE_OVERLAY_MEDIA.matches) requestAnimationFrame(()=>$('#restorePillBtn')?.focus());
+});
+$('#workspacePane').addEventListener('keydown',e=>{
+  if(!WORKSPACE_OVERLAY_MEDIA.matches||e.currentTarget.classList.contains('hidden')) return;
+  if(e.key==='Escape'){
+    e.preventDefault(); e.stopPropagation(); $('#workspaceCloseBtn').click(); return;
   }
+  if(e.key!=='Tab') return;
+  const focusable=_focusableIn(e.currentTarget); if(!focusable.length) return;
+  const first=focusable[0], last=focusable[focusable.length-1];
+  if(e.shiftKey&&document.activeElement===first){ e.preventDefault(); last.focus(); }
+  else if(!e.shiftKey&&document.activeElement===last){ e.preventDefault(); first.focus(); }
 });
 
 // ---- EMPTY STATE ------------------------------------------------------------
-/* Suggestions. The emoji were the loudest hobby-project signal on the first
-   screen a user ever sees — they render differently on every platform and sit
-   at a different weight and colour from everything around them. These use the
-   same sprite as the rest of the UI, and the list is shorter: eight cards is a
-   menu, four is a suggestion. */
+/* Suggestions use the same icon family as the rest of the UI and stay short
+   enough to feel like directions rather than a feature catalogue. The live
+   composer remains the only composer and precedes these buttons in DOM order. */
 const QUICK = [
-  {icon:'i-search', title:'Research a topic', sub:'Search, compare, and summarize sources', prompt:'Research and summarize '},
-  {icon:'i-folder', title:'Explore this workspace', sub:'Understand files, structure, and recent work', prompt:'Help me understand this workspace'},
-  {icon:'i-edit', title:'Draft something', sub:'Turn an idea into clear, polished writing', prompt:'Help me draft '},
-  {icon:'i-more', title:'Create an interactive view', sub:'Build a useful panel with controls', prompt:'Create an interactive panel for '},
+  {icon:'i-folder', title:'Review this workspace', sub:'Map the codebase, recent work, and likely next steps', prompt:'Review this workspace and help me decide what to do next'},
+  {icon:'i-search', title:'Research a question', sub:'Compare sources and return a clear, useful answer', prompt:'Research and summarize '},
+  {icon:'i-edit', title:'Draft and refine', sub:'Turn rough notes into polished, purposeful writing', prompt:'Help me draft '},
 ];
 function showEmpty() {
   clearLog();
+  setEmptyMode(true);
   const wrap=document.createElement('div'); wrap.className='j-empty';
-  const hour=new Date().getHours();
-  const greet=hour<5?'Still up?':hour<12?'Good morning':hour<18?'Good afternoon':'Good evening';
-  const who=(state.userName||'').trim();
+  const who=(state.userName||'').trim().split(/\s+/)[0];
   wrap.innerHTML=
-    '<div class="empty-mark" aria-hidden="true"><svg class="ico"><use href="#i-spark"/></svg></div>'+
-    '<h1 class="j-empty-title">'+esc(greet)+(who?', '+esc(who):'')+'</h1>'+
-    '<p class="j-empty-sub">How can I help you today?</p>'+
-    '<div class="quick-cards">'+
-    QUICK.map((q,i)=>`<button class="qcard" style="--i:${i}" data-prompt="${esc(q.prompt)}">`+
+    '<h1 class="j-empty-title">What should we work on'+(who?', '+esc(who):'')+'?</h1>'+
+    '<p class="j-empty-sub">Start with a thought or choose a direction below.</p>';
+  log.appendChild(wrap);
+  const promptList=$('#starterPromptList');
+  if(!promptList) return;
+  promptList.innerHTML=QUICK.map((q,i)=>`<button class="qcard" type="button" style="--i:${i}" data-prompt="${esc(q.prompt)}">`+
       `<svg class="ico qcard-icon" aria-hidden="true"><use href="#${q.icon}"/></svg>`+
       `<span class="qcard-text"><span class="qcard-title">${esc(q.title)}</span>`+
-      `<span class="qcard-sub">${esc(q.sub)}</span></span></button>`).join('')+'</div>';
-  log.appendChild(wrap);
-  wrap.querySelectorAll('.qcard').forEach(c=>{
+      `<span class="qcard-sub">${esc(q.sub)}</span></span></button>`).join('');
+  promptList.querySelectorAll('.qcard').forEach(c=>{
     c.onclick=()=>{ input.value=c.dataset.prompt; autoGrow(); syncComposerState(); input.focus(); };
   });
 }
@@ -1581,12 +1575,9 @@ const _ICO={
   copy:'<svg class="ico sm" aria-hidden="true"><use href="#i-copy"/></svg>',
   redo:'<svg class="ico sm" aria-hidden="true"><use href="#i-retry"/></svg>',
   edit:'<svg class="ico sm" aria-hidden="true"><use href="#i-edit"/></svg>',
-  trash:'<svg class="ico sm" aria-hidden="true"><use href="#i-trash"/></svg>',
 };const MSG_ACTIONS_HTML=
   '<button class="msg-act-btn" type="button" data-act="copy" title="Copy message" aria-label="Copy message">'+_ICO.copy+'<span>Copy</span></button>'+
-  '<button class="msg-act-btn" type="button" data-act="resend" title="Send again" aria-label="Send again">'+_ICO.redo+'<span>Retry</span></button>'+
-  '<button class="msg-act-btn" type="button" data-act="edit" title="Edit and resend" aria-label="Edit and resend">'+_ICO.edit+'<span>Edit</span></button>'+
-  '<button class="msg-act-btn del-btn" type="button" data-act="delete" title="Delete from here" aria-label="Delete from here">'+_ICO.trash+'<span>Delete</span></button>';
+  '<button class="msg-act-btn" type="button" data-act="edit" title="Edit and resend" aria-label="Edit and resend">'+_ICO.edit+'<span>Edit</span></button>';
 // The assistant's own toolbar: copy the reply, or regenerate it from the user
 // turn above. Regenerate is what the REPL's /retry does, finally reachable here.
 const REPLY_ACTIONS_HTML=
@@ -1601,11 +1592,9 @@ function _wireCopy(btn, getText){
     }).catch(()=>{ label.textContent='Failed'; });
   };
 }
-function wireMsgActions(row, idx, text){
+function wireMsgActions(row, idx, rawText, displayText){
   _wireCopy(row.querySelector('[data-act="copy"]'), ()=>row.querySelector('.bubble').textContent||'');
-  row.querySelector('[data-act="resend"]').onclick=()=>resendMsg(idx,row);
-  row.querySelector('[data-act="edit"]').onclick=()=>editMsg(idx,row,text);
-  row.querySelector('[data-act="delete"]').onclick=()=>deleteMsg(idx,row);
+  row.querySelector('[data-act="edit"]').onclick=()=>editMsg(idx,row,displayText??rawText);
 }
 // Regenerate: find the user turn this reply answered and re-run it.
 function regenerate(replyRow){
@@ -1619,17 +1608,51 @@ function regenerate(replyRow){
   if(!userRow){ addNote('Nothing to regenerate — no user message above this reply.',true); return; }
   const rows=[...thread.querySelectorAll('.msg-row.user')];
   const idx=rows.indexOf(userRow);
-  const text=userRow.querySelector('.bubble').textContent||'';
-  truncateAfter(userRow,false);
+  const text=userRow._rawMessage||userRow.querySelector('.bubble').textContent||'';
   streamEdit(idx,text);
 }
-function addUser(text){
-    const idx=_userMsgIdx++;
-    const r=document.createElement('div'); r.className='msg-row user'; r.dataset.idx=idx;
-    r.innerHTML='<div class="bubble">'+esc(text)+'</div><div class="msg-actions">'+MSG_ACTIONS_HTML+'</div>';
-    wireMsgActions(r, idx, text);
-    getThread().appendChild(r); trimThread(); scrollDown(true); return r;
+const UPLOAD_MARKER='.cagentic/uploads/';
+function _splitUserPayload(raw, explicitAttachments){
+  const attachments=(explicitAttachments||[]).map(a=>({
+    name:a.name||String(a.path||'').split('/').pop()||'Attachment',
+    path:a.path||'', size:a.size||0, kind:a.kind||'file',
+  }));
+  let text=String(raw||'');
+  if(!attachments.length){
+    text=text.replace(/(^|\s)@(?:"([^"]+)"|([^\s]+))/g,(all,lead,quoted,bare)=>{
+      const path=quoted||bare||'';
+      if(!path.includes(UPLOAD_MARKER)) return all;
+      attachments.push({name:path.split('/').pop()||'Attachment',path,size:0,kind:'file'});
+      return lead.includes('\n')?lead:' ';
+    });
+  } else {
+    text=text.replace(/(^|\s)@(?:"([^"]+)"|([^\s]+))/g,(all,lead,quoted,bare)=>{
+      const path=quoted||bare||'';
+      return path.includes(UPLOAD_MARKER)?(lead.includes('\n')?lead:' '):all;
+    });
   }
+  text=text.replace(/[ \t]+\n/g,'\n').replace(/\n{3,}/g,'\n\n').trim();
+  return {text,attachments};
+}
+function _userAttachmentsHTML(attachments){
+  if(!attachments.length) return '';
+  return '<div class="user-attachments" aria-label="Attachments">'+attachments.map(a=>
+    '<span class="user-attachment"><svg class="ico sm" aria-hidden="true"><use href="#i-attach"/></svg>'+
+    '<span class="user-attachment-name">'+esc(a.name)+'</span>'+
+    (a.size?'<span class="user-attachment-size">'+esc(fmtBytes(a.size))+'</span>':'')+'</span>'
+  ).join('')+'</div>';
+}
+function addUser(text,presentation={}){
+  const parsed=_splitUserPayload(text,presentation.attachments);
+  const displayText=presentation.displayText!==undefined?presentation.displayText:parsed.text;
+  const idx=_userMsgIdx++;
+  const r=document.createElement('div'); r.className='msg-row user'; r.dataset.idx=idx;
+  r._rawMessage=text; r._displayMessage=displayText; r._attachments=parsed.attachments;
+  const message=displayText?'<div class="user-message-text">'+esc(displayText)+'</div>':'';
+  r.innerHTML='<div class="bubble">'+message+_userAttachmentsHTML(parsed.attachments)+'</div><div class="msg-actions">'+MSG_ACTIONS_HTML+'</div>';
+  wireMsgActions(r,idx,text,displayText);
+  getThread().appendChild(r); trimThread(); scrollDown(true); return r;
+}
 // ---- DOM HELPERS (shared) ---------------------------------------------------
 function truncateAfter(row, includeSelf){
   // Remove all DOM siblings after (and optionally including) the given row.
@@ -1647,33 +1670,45 @@ function truncateAfter(row, includeSelf){
   _userMsgIdx=thread.querySelectorAll('.msg-row.user').length;
 }
 
-function resendMsg(idx,row){
-  if(state.busy) return;
-  const bubble=row.querySelector('.bubble');
-  const text=bubble.textContent||'';
-  truncateAfter(row, false);
-  streamEdit(idx,text);
+async function reconcileCurrent(message){
+  try{
+    const b=await api('/api/bootstrap'), current=requireCurrent(b);
+    state.chats=b.chats||[]; state.projects=b.projects||[];
+    clearViewport(); setCurrent(current); renderSessions(); setConnectionState('online');
+    if(message) addNote(message,true);
+    return true;
+  }catch(e){
+    setConnectionState('offline'); setBootReady(false);
+    addNote('The gateway could not confirm the saved conversation. Reload this page before continuing.',true);
+    return false;
+  }
 }
-function streamEdit(idx,text){
-  live={body:null,raw:'',toolRow:null,thinking:null,thinkBox:null,turnStart:null,tokensIn:0,tokensOut:0};
+async function streamEdit(idx,text){
+  resetLive();
   showThinking(); setOrbLabel(_curVerb+'\u2026'); setBusy(true); compactOrb(true);
-  fetch('/api/chat/edit',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({index:idx,message:text})})
-  .then(r=>{ if(!r.ok||!r.body) throw new Error(r.status); return readSSE(r,handle); })
-  .then(()=>{clearThinking();if(state.busy)finishTurn();})
-  .catch(()=>{clearThinking();addNote('Connection lost. Try again.',true);finishTurn();});
-}
-
-function deleteMsg(idx,row){
-  if(state.busy) return;
-  truncateAfter(row, true);
-  // If no messages left, show empty state
-  if(!getThread().children.length) showEmpty();
-  // Tell backend to truncate history
-  fetch('/api/chat/delete-msg',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({index:idx})})
-  .then(r=>r.json()).then(d=>{
-    if(d.messages) { /* reload chat state */ }
-    refreshChats();
-  }).catch(()=>{});
+  try{
+    const response=await fetch('/api/chat/edit',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({index:idx,message:text})});
+    if(!response.ok||!response.body) throw new Error('Edit request failed'+(response?' ('+response.status+')':'')+'.');
+    const target=[...getThread().querySelectorAll('.msg-row.user')][idx];
+    if(target){
+      // The indicator was appended after the turn being regenerated, so the
+      // history truncation removes it along with the stale reply. Reattach the
+      // same live node (and its running timer) before consuming the new stream.
+      const thinking=live.thinking;
+      truncateAfter(target,false);
+      if(thinking&&!thinking.isConnected){ getThread().appendChild(thinking); scrollDown(); }
+    }
+    setConnectionState('online');
+    const outcome=await readSSE(response,handle);
+    clearThinking();
+    if(state.busy) finishTurn(!outcome.hadError,!outcome.hadError);
+    if(outcome.hadError) await reconcileCurrent('The edited turn could not be completed. Review the restored conversation and try again.');
+  }catch(e){
+    if(e&&e.name==='AbortError'){ if(state.busy) finishTurn(false,false); return; }
+    setConnectionState('offline'); clearThinking();
+    if(state.busy) finishTurn(false,false);
+    await reconcileCurrent('The edit was interrupted. The conversation was restored to the gateway state.');
+  }
 }
 
 function editMsg(idx,row,origText){
@@ -1681,6 +1716,9 @@ function editMsg(idx,row,origText){
   row.classList.add('editing');
   const bubble=row.querySelector('.bubble');
   const actions=row.querySelector('.msg-actions');
+  const originalBubble=bubble.innerHTML;
+  const originalRaw=row._rawMessage||origText;
+  const originalAttachments=[...(row._attachments||_splitUserPayload(originalRaw).attachments)];
   const ta=document.createElement('textarea'); ta.className='edit-area'; ta.value=origText;
   bubble.innerHTML=''; bubble.appendChild(ta);
   ta.style.height=Math.min(ta.scrollHeight,130)+'px';
@@ -1689,16 +1727,19 @@ function editMsg(idx,row,origText){
   const save=()=>{
     const newText=ta.value.trim(); if(!newText){cancel();return;}
     row.classList.remove('editing');
-    truncateAfter(row, false);
-    // Update the bubble with new text
-    bubble.innerHTML=esc(newText);
-    streamEdit(idx,newText);
+    const mentions=originalAttachments.filter(a=>a.path).map(a=>a.path.includes(' ')?'@"'+a.path+'"':'@'+a.path).join(' ');
+    const newRaw=mentions?newText+'\n\n'+mentions:newText;
+    row._rawMessage=newRaw; row._displayMessage=newText; row._attachments=originalAttachments;
+    bubble.innerHTML='<div class="user-message-text">'+esc(newText)+'</div>'+_userAttachmentsHTML(originalAttachments);
+    actions.innerHTML=MSG_ACTIONS_HTML; wireMsgActions(row,idx,newRaw,newText);
+    streamEdit(idx,newRaw);
   };
   const cancel=()=>{
     row.classList.remove('editing');
-    bubble.innerHTML=esc(origText);
+    bubble.innerHTML=originalBubble;
+    row._rawMessage=originalRaw; row._attachments=originalAttachments;
     actions.innerHTML=MSG_ACTIONS_HTML;
-    wireMsgActions(row, idx, origText);
+    wireMsgActions(row,idx,originalRaw,origText);
   };
   actions.querySelector('.edit-save').onclick=save;
   actions.querySelector('.edit-cancel').onclick=cancel;
@@ -1709,11 +1750,14 @@ function editMsg(idx,row,origText){
 }
 function addAssistant(html, tools){
     const r=document.createElement('div'); r.className='msg-row assistant';
-    r.innerHTML=avatarHTML()+'<div class="msg-body">'+(html||'')+'</div>'+
-      '<div class="msg-actions reply">'+REPLY_ACTIONS_HTML+'</div>';
+    if(!html) r.classList.add('tool-only');
+    r.innerHTML=avatarHTML()+'<div class="assistant-content">'+
+      '<details class="tool-activity hidden"><summary><svg class="ico sm tool-disclosure" aria-hidden="true"><use href="#i-chevron-right"/></svg><span class="tool-summary">Used tools</span></summary><div class="tool-list"></div></details>'+
+      '<div class="msg-body">'+(html||'')+'</div>'+
+      '<div class="msg-actions reply">'+REPLY_ACTIONS_HTML+'</div></div>';
     wireReplyActions(r);
     getThread().appendChild(r);
-    (tools||[]).forEach(t=>addToolRow(typeof t==='string'?{name:t}:t,true));
+    (tools||[]).forEach(t=>addToolRow(typeof t==='string'?{name:t}:t,true,r));
     trimThread(); scrollDown(); return r;
   }
 function wireReplyActions(row){
@@ -1721,23 +1765,34 @@ function wireReplyActions(row){
   _wireCopy(acts.querySelector('[data-act="copy"]'), ()=>{
     // Copy the reply as text the user can paste elsewhere — code blocks keep
     // their fences, everything else loses its markup.
-    const body=row.querySelector('.msg-body'); if(!body) return '';
+    const bodies=[...row.querySelectorAll('.msg-body')]; if(!bodies.length) return '';
     const parts=[];
-    body.childNodes.forEach(n=>{
-      if(n.nodeType===1&&n.classList&&n.classList.contains('codeblock')){
-        const lang=(n.querySelector('.cb-lang')||{}).textContent||'';
-        parts.push('```'+lang+'\n'+(n.dataset.raw||'')+'\n```');
-      } else parts.push((n.textContent||'').trim());
-    });
+    bodies.forEach(body=>body.childNodes.forEach(n=>{
+        if(n.nodeType===1&&n.classList&&n.classList.contains('codeblock')){
+          const lang=(n.querySelector('.cb-lang')||{}).textContent||'';
+          parts.push('```'+lang+'\n'+(n.dataset.raw||'')+'\n```');
+        } else parts.push((n.textContent||'').trim());
+      }));
     return parts.filter(Boolean).join('\n\n');
   });
   acts.querySelector('[data-act="regen"]').onclick=()=>regenerate(row);
 }
-function addToolRow(t, done){
+function syncToolActivity(activity){
+  if(!activity) return;
+  const rows=[...activity.querySelectorAll('.tool-row')];
+  if(!rows.length){ activity.classList.add('hidden'); return; }
+  activity.classList.remove('hidden');
+  const pending=rows.some(row=>row.classList.contains('pending'));
+  const count=rows.reduce((total,row)=>total+(parseInt(row.dataset.cnt)||1),0);
+  const label=activity.querySelector('.tool-summary');
+  if(label) label.textContent=(pending?'Using ':'Used ')+count+' tool'+(count===1?'':'s')+(pending?'\u2026':'');
+}
+function addToolRow(t, done, hostRow){
   // Collapse same-name tool calls, skipping over non-tool-row elements
   // (info notes, assistant text, etc.) so that calls across iterations
   // of the tool loop still collapse into one row.
-  const thread=getThread();
+  const activity=hostRow&&hostRow.querySelector('.tool-activity');
+  const thread=activity?activity.querySelector('.tool-list'):getThread();
   let prev=null;
   for(let el=thread.lastElementChild; el; el=el.previousElementSibling){
     if(el.classList.contains('tool-row')){ prev=el; break; }
@@ -1753,9 +1808,11 @@ function addToolRow(t, done){
     }
     if(!done){ prev.classList.remove('ok','bad'); prev.classList.add('pending'); }
     else finishToolRow(prev,t);
+    syncToolActivity(activity);
     scrollDown(); return prev;
   }
-  const row=document.createElement('div'); row.className='tool-row'+(done?'':' pending');
+  const outcome=done?(t.ok===false?' bad':' ok'):' pending';
+  const row=document.createElement('div'); row.className='tool-row'+outcome;
   row.setAttribute('role','status'); row.setAttribute('aria-live','polite');
   row.dataset.name=t.name||'';
   const isCmd=(t.name||'').startsWith('run_')||(t.name||'').startsWith('bash');
@@ -1764,9 +1821,9 @@ function addToolRow(t, done){
   row.innerHTML='<span class="tool-icon" style="color:'+iconColor+'">'+icon+'</span>'+
     '<span class="tname">'+esc(t.name||'')+'</span>'+
     (t.summary?'<span class="tsum">'+esc(t.summary)+'</span>':'')+
-    (done?'':'<span class="tres">Running&#8230;</span>');
+    '<span class="tres">'+(done?esc(t.first_line||(t.ok===false?'Failed':'Done')):'Running&#8230;')+'</span>';
   if(done) finishToolRow(row,t);
-  getThread().appendChild(row); scrollDown(); return row;
+  thread.appendChild(row); syncToolActivity(activity); scrollDown(); return row;
 }
 function finishToolRow(row,t){
   row.classList.remove('pending','ok','bad');
@@ -1837,19 +1894,81 @@ function showPermission(d){
 
 // ---- SSE STREAM READER (shared) -------------------------------------------
 async function readSSE(response, onEvent){
-  if(!response||!response.body) return;
-  const reader=response.body.getReader(), dec=new TextDecoder(); let buf='';
+  if(!response||!response.body) throw new Error('Response stream is unavailable.');
+  const reader=response.body.getReader(), dec=new TextDecoder(); let buf='', ended=false, hadError=false, errorText='';
   while(true){
-    let chunk; try{chunk=await reader.read();}catch(e){break;}
-    if(chunk.done) break;
+    let chunk;
+    try{chunk=await reader.read();}catch(e){
+      if(e&&e.name==='AbortError') throw e;
+      throw new Error('Response stream interrupted.');
+    }
+    if(chunk.done){ buf+=dec.decode(); break; }
     buf+=dec.decode(chunk.value,{stream:true}); let i;
     while((i=buf.indexOf('\n\n'))>=0){ const line=buf.slice(0,i); buf=buf.slice(i+2);
-      if(line.startsWith('data: ')){ try{onEvent(JSON.parse(line.slice(6)));}catch(e){} } }
+      if(line.startsWith('data: ')){
+        let event; try{event=JSON.parse(line.slice(6));}catch(e){throw new Error('The gateway sent an invalid stream event.');}
+        if(event.kind==='end') ended=true;
+        if(event.kind==='error'){ hadError=true; errorText=String((event.data&&event.data.text)||''); }
+        onEvent(event);
+      }
+    }
   }
+  if(!ended) throw new Error('Response stream ended before completion.');
+  return {hadError,errorText};
 }
 
 // ---- LIVE TURN --------------------------------------------------------------
-let live={body:null,raw:'',toolRow:null,thinking:null,thinkBox:null,turnStart:null,tokensIn:0,tokensOut:0};
+let live={row:null,body:null,raw:'',toolRow:null,thinking:null,thinkBox:null,turnStart:null,tokensIn:0,tokensOut:0};
+let _liveRenderFrame=0;
+function resetLive(){
+  if(_liveRenderFrame) cancelAnimationFrame(_liveRenderFrame);
+  _liveRenderFrame=0;
+  live={row:null,body:null,raw:'',toolRow:null,thinking:null,thinkBox:null,turnStart:null,tokensIn:0,tokensOut:0};
+}
+function ensureLiveAssistant(){
+  if(live.row&&live.row.isConnected) return live.row;
+  live.row=addAssistant('');
+  return live.row;
+}
+function ensureLiveBody(){
+  const row=ensureLiveAssistant();
+  let body=row.querySelector('.msg-body:not([data-settled])');
+  if(!body){
+    body=document.createElement('div'); body.className='msg-body';
+    row.querySelector('.msg-actions.reply').before(body);
+  }
+  live.body=body; live.raw=''; return body;
+}
+function settleLiveSegment(){
+  if(live.body){ flushLiveBody(); live.body.classList.remove('cursor'); live.body.dataset.settled='true'; }
+  live.body=null; live.raw='';
+}
+function paintLiveBody(){
+  _liveRenderFrame=0;
+  if(!live.body||!live.body.isConnected) return;
+  syncThinking(live.raw);
+  live.body.innerHTML=md(stripThink(stripHud(live.raw)));
+  live.body.classList.add('cursor'); scrollDown();
+}
+function scheduleLiveBody(){
+  if(!_liveRenderFrame) _liveRenderFrame=requestAnimationFrame(paintLiveBody);
+}
+function flushLiveBody(){
+  if(_liveRenderFrame){ cancelAnimationFrame(_liveRenderFrame); _liveRenderFrame=0; }
+  paintLiveBody();
+}
+function settleLiveBody(discard=false){
+  if(!live.body) return;
+  if(discard){
+    if(_liveRenderFrame) cancelAnimationFrame(_liveRenderFrame);
+    _liveRenderFrame=0;
+    live.body.closest('.msg-row.assistant')?.remove();
+  } else {
+    flushLiveBody();
+    live.body.classList.remove('cursor');
+  }
+  live.body=null; live.raw='';
+}
 let _thinkTimer=null;
 const _VERBS=['Thinking','Reading context','Working','Reviewing'];
 let _curVerb='thinking';
@@ -1867,22 +1986,19 @@ function showThinking(){
 function clearThinking(){ if(live.thinking){live.thinking.remove();live.thinking=null;} if(_thinkTimer){clearInterval(_thinkTimer);_thinkTimer=null;} }
 function handle(ev){
   const k=ev.kind, d=ev.data||{};
-  if(k!=='user') clearThinking();
+  const internalTokenNote=k==='info'&&/^sending ~[\d,]+ tokens to /.test(d.text||'');
+  if(k!=='user'&&!internalTokenNote) clearThinking();
   if(k==='delta'){
+    if(!live.body) ensureLiveBody();
+    live.row.classList.remove('tool-only');
     live.raw+=d.text||'';
     live.tokensOut+=Math.round((d.text||'').length/4);
-    syncThinking(live.raw);
-    const visible=stripThink(stripHud(live.raw));
-    if(visible.trim()){
-      if(!live.body){const _r=addAssistant('');live.body=_r.querySelector('.msg-body');}
-      live.body.innerHTML=md(visible);
-      live.body.classList.add('cursor'); scrollDown();
-    }
+    scheduleLiveBody();
   } else if(k==='assistant'){
     const txt=(d.text||'');
+    if(!live.body&&stripThink(stripHud(txt)).trim()){ensureLiveBody();live.body.innerHTML=md(stripThink(stripHud(txt)));live.raw=txt;live.row.classList.remove('tool-only');}
+    else if(live.body){ live.raw=txt; flushLiveBody(); }
     syncThinking(txt);
-    if(!live.body&&stripThink(stripHud(txt)).trim()){const _r=addAssistant(md(stripThink(stripHud(txt))));live.body=_r.querySelector('.msg-body');live.raw=txt;}
-    else if(live.body){ live.raw=txt; live.body.innerHTML=md(stripThink(stripHud(txt))); }
     if(live.body) live.body.classList.remove('cursor');
     renderPanels(txt);
     if(state.voiceOut){ const p=plain(txt); if(p) speak(p); }
@@ -1891,11 +2007,11 @@ function handle(ev){
        Nothing rendered it before, so on the web the reasoning was either lost
        (non-streaming) or dumped raw into the answer body (streaming). */
     addThinkingBlock(d.text||'');
-    live.body=null;
+    settleLiveSegment();
   } else if(k==='plan'){
-    addPlanBlock(d.steps||[]); live.body=null;
+    addPlanBlock(d.steps||[]); settleLiveSegment();
   } else if(k==='tool_call'){
-    live.body=null; live.toolRow=addToolRow({name:d.name,summary:d.summary},false);
+    const row=ensureLiveAssistant(); settleLiveSegment(); live.toolRow=addToolRow({name:d.name,summary:d.summary},false,row);
   } else if(k==='tool_result'){
     if(live.toolRow){
       // Live and reloaded tool rows deliberately share one finalizer so their
@@ -1903,19 +2019,22 @@ function handle(ev){
       finishToolRow(live.toolRow,{ok:d.ok,first_line:d.first_line});
       live.toolRow=null;
     }
-  } else if(k==='permission'){ live.body=null; showPermission(d);
-  } else if(k==='info'||k==='warn'){ addNote(d.text,false); live.body=null;
-    /* If the info message mentions tokens, update live.tokensIn */
+  } else if(k==='permission'){ settleLiveSegment(); showPermission(d);
+  } else if(k==='info'){
+    // Token/model routing is useful live telemetry, not conversation content.
+    // Keep it in the footer counter without inserting a transcript message.
     const m=d.text&&d.text.match(/~(\d[\d,]*)\s*tokens/);
     if(m) live.tokensIn=parseInt(m[1].replace(/,/g,''),10);
-  } else if(k==='error'){ addNote(d.text||'Something went wrong. Try again.',true); live.body=null;
+    if(!internalTokenNote){ addNote(d.text,false); settleLiveBody(false); }
+  } else if(k==='warn'){ settleLiveBody(true); addNote(d.text,false);
+  } else if(k==='error'){ settleLiveBody(false); addNote(d.text||'Something went wrong. Try again.',true);
   } else if(k==='widget'){
-    // show_widget SSE event — render a dedicated specialty card. We translate
-    // the (type, title, data) payload into a HUD panel so it benefits from
-    // dragging/resizing like the inline ```hud``` panels.
+    // show_widget SSE event — render a dedicated specialty card in the output
+    // workspace, using the same renderer as fenced visual-output directives.
     live.body=null;
     renderWidget(d);
   } else if(k==='done'){
+    flushLiveBody();
     if(live.body) live.body.classList.remove('cursor'); live.body=null;
     if(_thinkTimer){clearInterval(_thinkTimer);_thinkTimer=null;}
     /* turn_usage is this turn alone; usage is the session running total, which
@@ -1925,7 +2044,7 @@ function handle(ev){
     if(hasStats||live.turnStart){
       const row=document.createElement('div'); row.className='done-stats';
       let parts=[];
-      if(usage.input||usage.output) parts.push('\u2191'+fmtTokens(usage.input)+' \u2193'+fmtTokens(usage.output));
+      if(usage.input||usage.output) parts.push('\u2193'+fmtTokens(usage.input)+' \u2191'+fmtTokens(usage.output));
       if(usage.cache_read) parts.push(fmtTokens(usage.cache_read)+' cached');
       /* spent is null when the model has no known rate \u2014 show nothing rather
          than implying the turn was free. */
@@ -1939,13 +2058,15 @@ function handle(ev){
         parts.push(elapsed+'s');
       }
       row.innerHTML=parts.map(esc).join('<span class="ds-sep">\u00b7</span>');
-      getThread().appendChild(row); scrollDown();
+      const actions=live.row&&live.row.querySelector('.msg-actions.reply');
+      if(actions) actions.before(row); else getThread().appendChild(row);
+      scrollDown();
     }
     /* Show token stats in footer */
     const ts=$('#tokenStats');
     if(ts){ let tp=[]; if(usage.input) tp.push('\u2193'+usage.input); if(usage.output) tp.push('\u2191'+usage.output); if(tp.length){ts.textContent=tp.join(' ');ts.classList.remove('hidden');}else{ts.classList.add('hidden');} }
     live.turnStart=null;
-  } else if(k==='end'){ finishTurn(); }
+  }
   scrollDown();
 }
 // Clipboard helper that survives a non-secure origin (the gateway is plain
@@ -1995,14 +2116,24 @@ function pickVoice(){
 }
 function speak(text){
   if(!window.speechSynthesis) return;
+  const run=++_speechRun;
   speechSynthesis.cancel();
-  const u=new SpeechSynthesisUtterance(text.slice(0,600));
-  const v=pickVoice(); if(v) u.voice=v;
-  u.rate=1.0; u.pitch=0.9;
-  window.__jSpeak=true;
-  u.onend=()=>{ window.__jSpeak=false; };
-  speechSynthesis.speak(u);
+  const chunks=[]; let rest=String(text||'').trim();
+  while(rest){
+    let cut=Math.min(600,rest.length);
+    if(cut<rest.length){ const boundary=Math.max(rest.lastIndexOf('. ',cut),rest.lastIndexOf(' ',cut)); if(boundary>240) cut=boundary+1; }
+    chunks.push(rest.slice(0,cut).trim()); rest=rest.slice(cut).trim();
+  }
+  const voice=pickVoice(); let at=0;
+  const next=()=>{
+    if(run!==_speechRun||at>=chunks.length){ window.__jSpeak=false; return; }
+    const u=new SpeechSynthesisUtterance(chunks[at++]); if(voice) u.voice=voice;
+    u.rate=1.0; u.pitch=0.9; u.onend=next; u.onerror=()=>{window.__jSpeak=false;};
+    window.__jSpeak=true; speechSynthesis.speak(u);
+  };
+  next();
 }
+let _speechRun=0;
 function populateVoiceSelect(){
   const sel=$('#setVoice'); if(!sel) return;
   sel.innerHTML='<option value="">Auto</option>'+
@@ -2013,22 +2144,36 @@ function populateVoiceSelect(){
 // ---- VOICE INPUT (STT) ------------------------------------------------------
 const SR = window.SpeechRecognition || window.webkitSpeechRecognition;
 let recog=null, recognizing=false;
+let _dictationBase='', _dictationStart=0, _dictationEnd=0;
+function setVoiceInputState(active){
+  recognizing=active; const mic=$('#micBtn'); mic.classList.toggle('listening',active); $('#cmdBox').classList.toggle('listening',active);
+  if(active) mic.title='Listening\u2026'; else if(mic.title==='Listening\u2026') mic.title='Voice input (Ctrl+M)';
+  document.body.classList.toggle('listening',active);
+}
+function announceVoiceError(message){
+  const status=$('#responseStatus'); if(status) status.textContent=message;
+  $('#micBtn').title=message;
+  setTimeout(()=>{ if(status&&status.textContent===message) status.textContent=''; },3000);
+}
 if(SR){
   recog=new SR(); recog.lang='en-US'; recog.interimResults=true; recog.continuous=false;
-  recog.onstart=()=>{ recognizing=true; $('#micBtn').classList.add('listening'); $('#cmdBox').classList.add('listening');
-    document.body.classList.add('listening'); };
-  recog.onend=()=>{ recognizing=false; $('#micBtn').classList.remove('listening'); $('#cmdBox').classList.remove('listening');
-    document.body.classList.remove('listening'); };
-  recog.onerror=()=>{ recognizing=false; $('#micBtn').classList.remove('listening'); $('#cmdBox').classList.remove('listening'); };
+  recog.onstart=()=>setVoiceInputState(true);
+  recog.onend=()=>setVoiceInputState(false);
+  recog.onerror=e=>{ setVoiceInputState(false); announceVoiceError(e&&e.error==='not-allowed'?'Microphone access was denied.':'Voice input stopped. You can keep typing your draft.'); };
   recog.onresult=e=>{
     let txt=''; for(let i=0;i<e.results.length;i++) txt+=e.results[i][0].transcript;
-    input.value=txt; autoGrow(); syncComposerState();
-    if(e.results[e.results.length-1].isFinal){ setTimeout(()=>{ if(input.value.trim()) submit(); },350); }
+    const left=_dictationBase.slice(0,_dictationStart), right=_dictationBase.slice(_dictationEnd);
+    const before=left&&!/\s$/.test(left)?' ':''; const after=right&&!/^\s/.test(right)?' ':'';
+    input.value=left+before+txt.trim()+after+right; autoGrow(); syncComposerState();
+    if(e.results[e.results.length-1].isFinal) input.focus();
   };
 }
 function toggleMic(){
   if(!SR){ addNote('Voice input not supported in this browser (try Chrome).',true); return; }
-  if(recognizing){ recog.stop(); } else { try{ recog.start(); }catch(e){} }
+  if(recognizing){ recog.stop(); } else {
+    _dictationBase=input.value; _dictationStart=input.selectionStart??input.value.length; _dictationEnd=input.selectionEnd??_dictationStart;
+    try{ recog.start(); }catch(e){ setVoiceInputState(false); announceVoiceError('Voice input could not start. You can keep typing your draft.'); }
+  }
 }
 
 // ---- CONFIRM DIALOG ---------------------------------------------------------
@@ -2247,10 +2392,18 @@ function renderSearchResults(list){
     list.appendChild(el);
   });
 }
-function wireDisclosure(el,isOpen,label,onToggle){
+function wireDisclosure(el,isOpen,label,focusKey,onToggle){
   el.setAttribute('aria-expanded',isOpen?'true':'false');
   el.setAttribute('aria-label',(isOpen?'Collapse ':'Expand ')+label);
-  el.onclick=onToggle;
+  el.dataset.focusKey=focusKey;
+  el.onclick=()=>{
+    onToggle();
+    requestAnimationFrame(()=>{
+      const next=[...$('#sessionList').querySelectorAll('.sg-disclosure')]
+        .find(node=>node.dataset.focusKey===focusKey);
+      if(next) next.focus();
+    });
+  };
 }
 function renderSessions(){
   const list=$('#sessionList'); if(!list) return; list.innerHTML='';
@@ -2265,7 +2418,7 @@ function renderSessions(){
   const projGrp=document.createElement('div'); projGrp.className='sess-group';
   const projHead=document.createElement('div'); projHead.className='sess-group-head'+(state._openProjectsRoot?' open':'');
   projHead.innerHTML='<button class="sg-disclosure" type="button"><svg class="ico sm sg-caret" aria-hidden="true"><use href="#i-chevron-right"/></svg><span class="sg-dot" style="background:var(--accent)"></span><span class="sg-name">Projects</span><span class="sg-count">'+state.projects.length+'</span></button><button class="sg-add" type="button" title="New project" aria-label="New project"><svg class="ico sm" aria-hidden="true"><use href="#i-plus"/></svg></button>';
-  wireDisclosure(projHead.querySelector('.sg-disclosure'),state._openProjectsRoot,'projects',()=>{
+  wireDisclosure(projHead.querySelector('.sg-disclosure'),state._openProjectsRoot,'projects','projects-root',()=>{
     state._openProjectsRoot=!state._openProjectsRoot; renderSessions();
   });
   projHead.querySelector('.sg-add').onclick=e=>{ e.stopPropagation(); showNewProjectModal(); };
@@ -2282,7 +2435,7 @@ function renderSessions(){
       const pGrp=document.createElement('div'); pGrp.className='sess-group';
       const pHead=document.createElement('div'); pHead.className='sess-group-head'+(isOpen?' open':'');
       pHead.innerHTML='<button class="sg-disclosure" type="button"><svg class="ico sm sg-caret" aria-hidden="true"><use href="#i-chevron-right"/></svg><span class="sg-dot" style="background:'+esc(p.color)+'"></span><span class="sg-name">'+esc(p.name)+'</span><span class="sg-count">'+chats.length+'</span></button><button class="sg-menu" type="button" title="Project menu" aria-label="Open menu for '+esc(p.name)+'" aria-haspopup="menu" aria-expanded="false"><svg class="ico sm" aria-hidden="true"><use href="#i-more"/></svg></button>';
-      wireDisclosure(pHead.querySelector('.sg-disclosure'),isOpen,p.name,()=>{
+      wireDisclosure(pHead.querySelector('.sg-disclosure'),isOpen,p.name,'project-'+p.id,()=>{
         if(state._openProjects.has(p.id)) state._openProjects.delete(p.id); else state._openProjects.add(p.id);
         renderSessions();
       });
@@ -2303,7 +2456,7 @@ function renderSessions(){
   const chatGrp=document.createElement('div'); chatGrp.className='sess-group';
   const chatHead=document.createElement('div'); chatHead.className='sess-group-head'+(state._openUnaffiliated!==false?' open':'');
   chatHead.innerHTML='<button class="sg-disclosure" type="button"><svg class="ico sm sg-caret" aria-hidden="true"><use href="#i-chevron-right"/></svg><span class="sg-dot" style="background:var(--text-dim)"></span><span class="sg-name">Chats</span><span class="sg-count">'+unaffiliated.length+'</span></button>';
-  wireDisclosure(chatHead.querySelector('.sg-disclosure'),state._openUnaffiliated!==false,'chats',()=>{
+  wireDisclosure(chatHead.querySelector('.sg-disclosure'),state._openUnaffiliated!==false,'chats','chats-root',()=>{
     state._openUnaffiliated=state._openUnaffiliated===false?true:false;
     renderSessions();
   });
@@ -2335,11 +2488,14 @@ function setCurrent(cur){
   clearLog();
   if(!cur.messages||!cur.messages.length){ showEmpty(); compactOrb(false); return; }
   compactOrb(true);
-  let idx=0;
+  let idx=0, pendingTools=[];
   _stick=true;
   cur.messages.forEach(m=>{
     let row;
-    if(m.role==='user'){ row=addUser(m.content); idx++; }
+    if(m.role==='user'){
+      if(pendingTools.length){ const toolsRow=addAssistant('',pendingTools); toolsRow.style.setProperty('--i',Math.min(idx++,5)); pendingTools=[]; }
+      row=addUser(m.content); idx++;
+    }
     else {
       (m.thinking||[]).forEach(text=>addThinkingBlock(text));
       addPlanBlock(m.plan||[]);
@@ -2349,43 +2505,138 @@ function setCurrent(cur){
       // Use that same shape as the live SSE renderer; falling back to names
       // keeps older saved chats compatible.
       const tools=(m.tool_details&&m.tool_details.length)?m.tool_details:(m.tools||[]);
-      if(hasContent){ row=addAssistant(html,tools); renderPanels(m.content); idx++; }
-      else { tools.forEach(t=>{ const tr=addToolRow(typeof t==='string'?{name:t}:t,true); if(tr) tr.style.setProperty('--i',idx++); }); }
+      if(hasContent){ row=addAssistant(html,pendingTools.concat(tools)); pendingTools=[]; renderPanels(m.content); idx++; }
+      else pendingTools.push(...tools);
     }
     if(row) row.style.setProperty('--i',Math.min(idx-1,5));
   });
+  if(pendingTools.length){ const row=addAssistant('',pendingTools); row.style.setProperty('--i',Math.min(idx,5)); }
   scrollDown(true);
 }
 
 // ---- NETWORK ----------------------------------------------------------------
+function setConnectionState(kind){
+  const states={
+    loading:{label:'Connecting\u2026',title:'Connecting to the local gateway'},
+    online:{label:'Local gateway ready',title:'Connected to the local gateway'},
+    offline:{label:'Gateway unavailable',title:'The local gateway is unavailable'},
+  };
+  const next=states[kind]||states.offline;
+  const status=$('.gateway-status'); if(status) status.title=next.title;
+  const text=$('#gatewayStatusText'); if(text) text.textContent=next.label;
+  for(const dot of [$('#gatewayStatusDot'),$('#msDot')]){
+    if(!dot) continue;
+    dot.classList.remove('loading','online','offline','off');
+    dot.classList.add(kind);
+  }
+}
+function showBootState(kind){
+  clearLog(); setEmptyMode(false);
+  const wrap=document.createElement('div'); wrap.className='boot-state '+kind;
+  if(kind==='loading'){
+    wrap.setAttribute('role','status');
+    wrap.innerHTML='<span class="boot-spinner" aria-hidden="true"></span><span>Opening your local workspace\u2026</span>';
+  } else {
+    wrap.setAttribute('role','alert');
+    wrap.innerHTML='<span class="boot-icon" aria-hidden="true"><svg class="ico"><use href="#i-warning"/></svg></span>'+
+      '<div><h1>Could not open the workspace</h1><p>Check that the local gateway is running, then try again. Your draft and local data have not been changed.</p></div>'+
+      '<button class="btn-primary boot-retry" type="button"><svg class="ico sm" aria-hidden="true"><use href="#i-retry"/></svg>Try again</button>';
+    wrap.querySelector('.boot-retry').onclick=boot;
+  }
+  log.appendChild(wrap);
+}
 async function api(path,body){
-  const r=await fetch(path,{method:body?'POST':'GET',headers:{'Content-Type':'application/json'},body:body?JSON.stringify(body):undefined});
-  return r.json();
+  let r;
+  try{
+    r=await fetch(path,{method:body?'POST':'GET',headers:{'Content-Type':'application/json'},body:body?JSON.stringify(body):undefined});
+  }catch(error){
+    error.isNetworkError=true;
+    throw error;
+  }
+  let data;
+  try{ data=await r.json(); }catch(e){
+    const error=new Error('The gateway returned an unreadable response.'); error.status=r.status; throw error;
+  }
+  if(!r.ok||(data&&data.error)){
+    const error=new Error((data&&data.error)||('Request failed ('+r.status+').'));
+    error.status=r.status; throw error;
+  }
+  return data;
+}
+function requireCurrent(result){
+  const current=result&&result.current;
+  if(!current||current.error) throw new Error((current&&current.error)||'The gateway returned an incomplete chat.');
+  return current;
+}
+function setBootReady(ready){
+  state.bootReady=!!ready;
+  for(const id of ['modelSwitch','newMissionBtn','sidebarNewChatBtn','configBtn','sidebarSettingsBtn']){
+    const control=$('#'+id); if(control) control.disabled=!state.bootReady||(state.creatingChat&&/new/i.test(id));
+  }
+  syncComposerState();
 }
 function setModelBadge(m){ const n=$('#msName'); if(n) n.textContent=(m||'').replace(/^(anthropic|openai|ollama):/,''); }
 async function boot(){
-  const b=await api('/api/bootstrap');
-  state.chats=b.chats; state.settings=b.settings; state.projects=b.projects||[];
-  state.userName=b.user_name||'';
-  setModelBadge(b.model);
-  const vs=$('#versionSpan'); if(vs) vs.textContent=b.version||'--';
-  renderModelMenu();
-  setCurrent(b.current); renderSessions();
+  setBootReady(false);
+  setConnectionState('loading'); showBootState('loading');
+  try{
+    const b=await api('/api/bootstrap');
+    if(!b||!b.current||b.current.error||!b.settings) throw new Error((b&&b.current&&b.current.error)||'Bootstrap response is incomplete.');
+    state.chats=b.chats||[]; state.settings=b.settings; state.projects=b.projects||[];
+    state.userName=b.user_name||'';
+    setModelBadge(b.model);
+    const vs=$('#versionSpan'); if(vs) vs.textContent=b.version||'--';
+    renderModelMenu();
+    setBootReady(true);
+    setCurrent(b.current); renderSessions(); setConnectionState('online');
+  }catch(e){
+    setBootReady(false);
+    setConnectionState('offline'); showBootState('error');
+  }
 }
 async function newChat(){
-  const r=await api('/api/chats/new',{}); state.chats=r.chats; setCurrent(r.current); renderSessions();
-  if(r.current&&r.current.model){state.settings.model=r.current.model;setModelBadge(r.current.model);renderModelMenu();}
-  clearViewport(); closeSessions(); input.focus();
+  if(!state.bootReady||state.creatingChat) return;
+  state.creatingChat=true; setBootReady(true);
+  try{
+    // Starting over while a response is streaming first asks the engine to
+    // stop, then lets the server serialize the session swap behind that turn.
+    // This avoids the intermittent lock conflict users saw from a direct swap.
+    if(state.busy) await abortGeneration({announce:false,refresh:false});
+    const r=await api('/api/chats/new',{}), current=requireCurrent(r); state.chats=r.chats; setCurrent(current); renderSessions();
+    if(current.model){state.settings.model=current.model;setModelBadge(current.model);renderModelMenu();}
+    clearViewport(); closeSessions(false,false); input.focus(); setConnectionState('online');
+  }catch(e){
+    if(e&&e.isNetworkError){
+      setConnectionState('offline'); addNote('The local gateway could not be reached. Try New chat again.',true);
+    }else if(e&&e.status===409){
+      setConnectionState('online'); addNote('The previous response is still stopping. Try New chat again in a moment.',true);
+    }else{
+      addNote('A new chat could not be created. '+((e&&e.message)||'Try again.'),true);
+    }
+  }finally{
+    state.creatingChat=false; setBootReady(state.bootReady);
+  }
 }
 async function loadChat(id){
-  const r=await api('/api/chats/load',{id}); state.chats=r.chats; clearViewport(); setCurrent(r.current); renderSessions(); if(r.current&&r.current.model){state.settings.model=r.current.model;setModelBadge(r.current.model);renderModelMenu();} closeSessions();
+  if(!state.bootReady) return;
+  try{
+    const r=await api('/api/chats/load',{id}), current=requireCurrent(r); state.chats=r.chats; clearViewport(); setCurrent(current); renderSessions(); if(current.model){state.settings.model=current.model;setModelBadge(current.model);renderModelMenu();} closeSessions(false,false);
+    setConnectionState('online'); requestAnimationFrame(()=>$('#mainContent').focus());
+  }catch(e){ setConnectionState('offline'); addNote('That chat could not be opened. Try again.',true); }
 }
 async function deleteChat(id){
-  const r=await api('/api/chats/delete',{id}); state.chats=r.chats; state.projects=r.projects||state.projects; setCurrent(r.current); renderSessions(); closeSessions();
+  if(!state.bootReady) return;
+  try{
+    const r=await api('/api/chats/delete',{id}), current=requireCurrent(r); state.chats=r.chats; state.projects=r.projects||state.projects; setCurrent(current); renderSessions(); closeSessions(false,false);
+    setConnectionState('online'); requestAnimationFrame(()=>$('#mainContent').focus());
+  }catch(e){ setConnectionState('offline'); addNote('The chat could not be deleted. Try again.',true); }
 }
 async function refreshChats(){
-  const b=await api('/api/bootstrap'); state.chats=b.chats; state.projects=b.projects||[];
-  renderSessions(); setConversationTitle(b.current.title); setOrbLabel(b.current.title||'New Chat');
+  try{
+    const b=await api('/api/bootstrap'), current=requireCurrent(b); state.chats=b.chats||[]; state.projects=b.projects||[];
+    renderSessions(); setConversationTitle(current.title); setOrbLabel(current.title||'New Chat');
+    setConnectionState('online');
+  }catch(e){ setConnectionState('offline'); }
 }
 
 // ---- MODEL SWITCHER ---------------------------------------------------------
@@ -2397,10 +2648,13 @@ function renderModelMenu(){
   menu.querySelectorAll('.mm-item').forEach(it=>{ if(it.dataset.m) it.onclick=()=>switchModel(it.dataset.m); });
 }
 async function switchModel(m){
+  if(!state.bootReady) return;
   closeModelMenu();
-  const r=await api('/api/model',{model:m});
-  state.settings.model=r.model; setModelBadge(r.model); renderModelMenu();
-  addNote('Model switched to '+r.model);
+  try{
+    const r=await api('/api/model',{model:m});
+    state.settings.model=r.model; setModelBadge(r.model); renderModelMenu();
+    addNote('Model switched to '+r.model); setConnectionState('online');
+  }catch(e){ addNote(e.message||'The model could not be switched.',true); }
 }
 function closeModelMenu(){
   $('#modelMenu').classList.add('hidden');
@@ -2431,9 +2685,44 @@ $('#modelMenu').addEventListener('keydown',e=>{
   else if(e.key==='Escape'){ e.preventDefault(); closeModelMenu(); $('#modelSwitch').focus(); }
 });
 
+// ---- COMPACT HEADER ACTIONS -------------------------------------------------
+function closeHeaderMenu(restoreFocus=false){
+  const menu=$('#headerMenu'), trigger=$('#headerMenuBtn'); if(!menu||!trigger) return;
+  const wasOpen=!menu.classList.contains('hidden');
+  menu.classList.add('hidden'); trigger.setAttribute('aria-expanded','false');
+  if(wasOpen&&restoreFocus) requestAnimationFrame(()=>trigger.focus());
+}
+function toggleHeaderMenu(){
+  const menu=$('#headerMenu'), trigger=$('#headerMenuBtn');
+  const opening=menu.classList.contains('hidden');
+  closeModelMenu();
+  menu.classList.toggle('hidden',!opening);
+  trigger.setAttribute('aria-expanded',opening?'true':'false');
+  if(opening) requestAnimationFrame(()=>menu.querySelector('.header-menu-item')?.focus());
+}
+$('#headerMenuBtn').addEventListener('click',e=>{ e.stopPropagation(); toggleHeaderMenu(); });
+$('#headerMenu').addEventListener('click',e=>e.stopPropagation());
+$('#headerMenu').addEventListener('keydown',e=>{
+  const items=[...e.currentTarget.querySelectorAll('.header-menu-item:not([disabled])')]; if(!items.length) return;
+  const at=Math.max(0,items.indexOf(document.activeElement));
+  if(e.key==='ArrowDown'||e.key==='ArrowUp'){
+    e.preventDefault(); items[(at+(e.key==='ArrowDown'?1:-1)+items.length)%items.length].focus();
+  } else if(e.key==='Home'){ e.preventDefault(); items[0].focus(); }
+  else if(e.key==='End'){ e.preventDefault(); items[items.length-1].focus(); }
+  else if(e.key==='Escape'){ e.preventDefault(); closeHeaderMenu(true); }
+  else if(e.key==='Tab'){
+    e.preventDefault(); closeHeaderMenu();
+    (e.shiftKey?$('#headerMenuBtn'):$('#mainContent')).focus();
+  }
+});
+document.addEventListener('click',e=>{
+  if(!e.target.closest('.header-actions')) closeHeaderMenu();
+});
+
 // ---- DRAWER / MODAL ---------------------------------------------------------
 const SIDEBAR_MEDIA=window.matchMedia('(min-width: 901px)');
 let _sidebarCollapsed=false;
+let _sidebarReturnFocus=null;
 try{ _sidebarCollapsed=localStorage.getItem('cagentic_sidebar_collapsed')==='1'; }catch(e){}
 function _saveSidebarState(){
   try{ localStorage.setItem('cagentic_sidebar_collapsed',_sidebarCollapsed?'1':'0'); }catch(e){}
@@ -2448,24 +2737,38 @@ function syncSidebarUI(){
   $('#logsBtn').setAttribute('aria-expanded',open?'true':'false');
   const dialogOpen=!!_visibleDialog();
   const drawerOpen=!desktop&&open;
+  const workspaceOverlay=WORKSPACE_OVERLAY_MEDIA.matches&&document.body.classList.contains('workspace-open');
   panel.inert=dialogOpen||!open;
-  app.inert=dialogOpen||drawerOpen;
-  $('#windowLayer').inert=dialogOpen||drawerOpen;
-  $('#restorePill').inert=dialogOpen||drawerOpen;
+  app.inert=dialogOpen||drawerOpen||workspaceOverlay;
+  $('#workspacePane').inert=dialogOpen||drawerOpen;
+  $('#restorePill').inert=dialogOpen||drawerOpen||workspaceOverlay;
   $('#ctxMenu').inert=dialogOpen;
   if(!desktop) backdrop.classList.toggle('hidden',!open);
   requestAnimationFrame(clampHudWindows);
 }
 function openSessions(){
   if(SIDEBAR_MEDIA.matches){ _sidebarCollapsed=false; _saveSidebarState(); }
-  else $('#sessionsPanel').classList.add('open');
+  else {
+    _sidebarReturnFocus=document.activeElement;
+    $('#sessionsPanel').classList.add('open');
+  }
   syncSidebarUI();
+  if(!SIDEBAR_MEDIA.matches) requestAnimationFrame(()=>{
+    const panel=$('#sessionsPanel');
+    if(panel.classList.contains('open')&&!panel.contains(document.activeElement)) $('#closeSessionsBtn').focus();
+  });
 }
-function closeSessions(collapseDesktop=false){
+function closeSessions(collapseDesktop=false,restoreFocus=true){
+  const wasMobileOpen=!SIDEBAR_MEDIA.matches&&$('#sessionsPanel').classList.contains('open');
+  const returnFocus=_sidebarReturnFocus;
   if(SIDEBAR_MEDIA.matches){
     if(collapseDesktop){ _sidebarCollapsed=true; _saveSidebarState(); }
   } else $('#sessionsPanel').classList.remove('open');
   syncSidebarUI();
+  if(wasMobileOpen){
+    _sidebarReturnFocus=null;
+    if(restoreFocus&&returnFocus&&returnFocus.isConnected) requestAnimationFrame(()=>returnFocus.focus());
+  }
 }
 function toggleSessions(){
   if(SIDEBAR_MEDIA.matches){
@@ -2474,11 +2777,16 @@ function toggleSessions(){
 }
 if(SIDEBAR_MEDIA.addEventListener) SIDEBAR_MEDIA.addEventListener('change',syncSidebarUI);
 else SIDEBAR_MEDIA.addListener(syncSidebarUI);
+function syncWorkspaceMode(){ _syncWorkspacePane(); syncSidebarUI(); }
+if(WORKSPACE_OVERLAY_MEDIA.addEventListener) WORKSPACE_OVERLAY_MEDIA.addEventListener('change',syncWorkspaceMode);
+else WORKSPACE_OVERLAY_MEDIA.addListener(syncWorkspaceMode);
 window.addEventListener('resize',()=>requestAnimationFrame(clampHudWindows));
 function openSettings(){
+  if(!state.bootReady) return;
   let returnFocus=document.activeElement;
-  if(!SIDEBAR_MEDIA.matches&&$('#sessionsPanel').contains(returnFocus)) returnFocus=$('#configBtn');
-  closeSessions();
+  if($('#headerMenu').contains(returnFocus)) returnFocus=$('#headerMenuBtn');
+  if(!SIDEBAR_MEDIA.matches&&$('#sessionsPanel').contains(returnFocus)) returnFocus=$('#logsBtn');
+  closeSessions(false,false);
   const s=state.settings, sel=$('#setModel'); sel.innerHTML='';
   (s.models&&s.models.length?s.models:[s.model]).forEach(m=>{
     const o=document.createElement('option'); o.value=m; o.textContent=m; if(m===s.model) o.selected=true; sel.appendChild(o);
@@ -2491,22 +2799,33 @@ function openSettings(){
   $('#setProactive').checked=!!(s.proactive_enabled!==false);
   $('#setDesktopNotifications').checked=!!(s.desktop_notifications!==false);
   $('#setSysPrompt').value=s.system_prompt||'';
+  const status=$('#settingsStatus'); if(status){ status.textContent=''; status.classList.remove('error'); }
   populateVoiceSelect();
   openDialog('#settingsModal','#setModel',returnFocus);
 }
 function closeSettings(){ closeDialog('#settingsModal'); }
 async function saveSettings(){
+  const save=$('#saveSettings'), status=$('#settingsStatus');
+  save.disabled=true; save.textContent='Saving\u2026';
+  if(status){ status.textContent='Saving settings\u2026'; status.classList.remove('error'); }
   state.voiceName=$('#setVoice').value||'';
   try{ localStorage.setItem('cagentic_voice',state.voiceName); }catch(e){}
-  state.settings=await api('/api/settings',{
-    model:$('#setModel').value, user_name:$('#setName').value, temperature:parseFloat($('#setTemp').value),
-    stream:$('#setStream').checked, yolo:$('#setYolo').checked,
-    gateway_port:parseInt($('#setGwPort').value)||8700,
-    gateway_auto_start:$('#setGwAuto').checked,
-    proactive_enabled:$('#setProactive').checked,
-    desktop_notifications:$('#setDesktopNotifications').checked,
-    system_prompt:$('#setSysPrompt').value });
-  setModelBadge(state.settings.model); renderModelMenu(); closeSettings();
+  try{
+    state.settings=await api('/api/settings',{
+      model:$('#setModel').value, user_name:$('#setName').value, temperature:parseFloat($('#setTemp').value),
+      stream:$('#setStream').checked, yolo:$('#setYolo').checked,
+      gateway_port:parseInt($('#setGwPort').value)||8700,
+      gateway_auto_start:$('#setGwAuto').checked,
+      proactive_enabled:$('#setProactive').checked,
+      desktop_notifications:$('#setDesktopNotifications').checked,
+      system_prompt:$('#setSysPrompt').value });
+    state.userName=state.settings.user_name||$('#setName').value.trim();
+    setModelBadge(state.settings.model); renderModelMenu(); setConnectionState('online'); closeSettings();
+  }catch(e){
+    if(status){ status.textContent=e.message||'Settings could not be saved. Try again.'; status.classList.add('error'); }
+  }finally{
+    save.disabled=false; save.textContent='Save changes';
+  }
 }
 
 // ---- VOICE OUT TOGGLE -------------------------------------------------------
@@ -2516,7 +2835,8 @@ function toggleVoiceOut(){
   vb.classList.toggle('active', state.voiceOut);
   vb.setAttribute('aria-pressed', state.voiceOut?'true':'false');
   vb.title='Read replies aloud: '+(state.voiceOut?'on':'off');
-  if(!state.voiceOut && window.speechSynthesis) speechSynthesis.cancel();
+  const stateLabel=$('#voiceOutState'); if(stateLabel) stateLabel.textContent=state.voiceOut?'On':'Off';
+  if(!state.voiceOut && window.speechSynthesis){ _speechRun++; speechSynthesis.cancel(); window.__jSpeak=false; }
   try{ localStorage.setItem('cagentic_voiceout', state.voiceOut?'1':'0'); }catch(e){}
 }
 
@@ -2524,24 +2844,51 @@ function toggleVoiceOut(){
 function syncComposerState(){
   const ready=_attachments.some(a=>a.path&&!a.error&&!a.pending);
   const uploading=_attachments.some(a=>a.pending);
-  sendBtn.disabled=state.busy||uploading||(!input.value.trim()&&!ready);
+  // Keep the textarea available while a response streams so the next thought
+  // can be drafted immediately. Sending and input side effects stay gated
+  // until the current turn completes.
+  input.disabled=!state.bootReady;
+  $('#attachBtn').disabled=state.busy||!state.bootReady;
+  $('#micBtn').disabled=state.busy||!state.bootReady;
+  sendBtn.disabled=state.busy||!state.bootReady||uploading||(!input.value.trim()&&!ready);
 }
 function setBusy(on){
-  state.busy=on; input.disabled=on; log.setAttribute('aria-busy',on?'true':'false');
+  state.busy=on; log.setAttribute('aria-busy',on?'true':'false');
   const bl=$('#busyLabel');
   if(bl){ bl.textContent=_curVerb+'\u2026'; bl.classList.toggle('hidden',!on); }
-  $('#stopBtn').classList.toggle('hidden',!on); syncComposerState();
+  sendBtn.classList.toggle('hidden',on);
+  $('#stopBtn').classList.toggle('hidden',!on); syncComposerState(); _syncWorkspacePane();
 }
-function finishTurn(){ setBusy(false); const ts=$('#tokenStats'); if(ts) ts.classList.add('hidden'); input.focus(); refreshChats(); }
+function finishTurn(announce=true, refresh=true){
+  setBusy(false); const ts=$('#tokenStats'); if(ts) ts.classList.add('hidden');
+  const status=$('#responseStatus');
+  if(status&&announce){ status.textContent='Response complete'; setTimeout(()=>{ if(status.textContent==='Response complete') status.textContent=''; },1800); }
+  else if(status) status.textContent='';
+  if(!(WORKSPACE_OVERLAY_MEDIA.matches&&document.body.classList.contains('workspace-open'))) input.focus();
+  _abortCtrl=null;
+  if(refresh) refreshChats();
+}
 let _abortCtrl=null;
-async function abortGeneration(){
+async function abortGeneration({announce=true,refresh=true}={}){
   if(!state.busy) return;
   try{ await fetch('/api/abort',{method:'POST'}); }catch(e){}
   if(_abortCtrl) try{ _abortCtrl.abort(); }catch(e){}
-  clearThinking(); addNote('Generation stopped.',false); finishTurn();
+  clearThinking(); if(announce) addNote('Generation stopped.',false); finishTurn(false,refresh);
 }
-async function send(text){
-  if(state.busy) return;
+function restoreComposerDraft(text,presentation={}){
+  const display=presentation.displayText!==undefined?presentation.displayText:_splitUserPayload(text).text;
+  if(!input.value) input.value=display||'';
+  const returning=(presentation.attachments||[]).filter(a=>a.path).map(a=>({...a,pending:false,error:null}));
+  const existing=new Set(_attachments.map(a=>a.path).filter(Boolean));
+  _attachments=[...returning.filter(a=>!existing.has(a.path)),..._attachments];
+  renderAttachments(); autoGrow(); syncComposerState();
+}
+function removeOptimisticTurn(row){
+  if(row&&row.isConnected) row.remove();
+  _userMsgIdx=getThread().querySelectorAll('.msg-row.user').length;
+}
+async function send(text,presentation={}){
+  if(state.busy||!state.bootReady) return;
   // Slash commands → /api/cmd instead of /api/chat
   if(text.startsWith('/')){
     const parts=text.split(/\s+/);
@@ -2552,35 +2899,59 @@ async function send(text){
     try{
       const r=await fetch('/api/cmd',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({cmd,arg1,arg2})});
       const d=await r.json();
-      if(d.current) setCurrent(d.current);
+      if(!r.ok||d.error) throw new Error(d.error||('Command failed ('+r.status+').'));
+      if(d.current){ if(d.current.error) throw new Error(d.current.error); setCurrent(d.current); }
       if(d.model) { state.settings.model=d.model; setModelBadge(d.model); renderModelMenu(); }
       if(d.ok && d.action && d.action.type==='retry'){
         clearThinking(); setBusy(false);
         const rows=[...getThread().querySelectorAll('.msg-row.user')];
         const idx=Number(d.action.index), row=rows[idx];
         if(!Number.isInteger(idx)||!row){ addNote('Nothing to retry in this chat.',true); return; }
-        truncateAfter(row,false);
         streamEdit(idx,String(d.action.message||''));
         return;
       }
       addNote(d.text||'Done',!d.ok);
-    }catch(e){ addNote('Command failed: '+e,true); }
+    }catch(e){ restoreComposerDraft(text,presentation); addNote('Command failed: '+(e.message||e),true); }
     clearThinking(); setBusy(false);
     return;
   }
   if(log.querySelector('.j-empty')) clearLog();
-  addUser(text);
-  live={body:null,raw:'',toolRow:null,thinking:null,thinkBox:null,turnStart:null,tokensIn:0,tokensOut:0};
+  const optimistic=addUser(text,presentation);
+  resetLive();
   showThinking(); setOrbLabel(_curVerb+'\u2026'); setBusy(true); compactOrb(true);
   _abortCtrl=new AbortController();
   let res;
   try{ res=await fetch('/api/chat',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({message:text}),signal:_abortCtrl.signal}); }
-  catch(e){ if(e.name==='AbortError'){finishTurn();return;} clearThinking(); addNote('Connection lost. Try again.',true); finishTurn(); return; }
-  if(!res||!res.ok||!res.body){ clearThinking(); addNote('Request failed ('+(res?res.status:'no response')+').',true); finishTurn(); return; }
+  catch(e){
+    if(e.name==='AbortError'){if(state.busy)finishTurn(false);return;}
+    setConnectionState('offline'); clearThinking(); removeOptimisticTurn(optimistic); restoreComposerDraft(text,presentation);
+    addNote('The local gateway could not be reached. Your draft was restored.',true); finishTurn(false); return;
+  }
+  if(!res||!res.ok||!res.body){
+    let detail='';
+    if(res&&!res.ok) try{ detail=String((await res.json()).error||''); }catch(e){}
+    const conflict=!!res&&res.status===409;
+    setConnectionState(conflict?'online':'offline'); clearThinking(); removeOptimisticTurn(optimistic); restoreComposerDraft(text,presentation);
+    addNote(conflict?(detail||'The previous response is still finishing.')+' Your message was not sent and your draft was restored.':'The request could not be completed'+(res?' ('+res.status+')':'')+'. Your draft was restored.',true); finishTurn(false); return;
+  }
+  setConnectionState('online');
   try{
-    await readSSE(res, handle);
-  }catch(e){ console.error('Stream read error:',e); }
-  clearThinking(); if(state.busy) finishTurn();
+    const outcome=await readSSE(res, handle);
+    clearThinking();
+    if(outcome.hadError){
+      const rejected=/still working|session is busy|busy or unavailable/i.test(outcome.errorText||'');
+      if(rejected){ removeOptimisticTurn(optimistic); restoreComposerDraft(text,presentation); }
+      if(state.busy) finishTurn(false,false);
+      await reconcileCurrent(rejected?'Your message was not sent because the previous response was still finishing. Your draft was restored.':'The response could not be completed. The conversation was restored to the gateway state.');
+      return;
+    }
+    if(state.busy) finishTurn(true);
+  }catch(e){
+    if(e&&e.name==='AbortError'){ if(state.busy) finishTurn(false); return; }
+    setConnectionState('offline'); settleLiveBody(false); clearThinking();
+    if(state.busy) finishTurn(false,false);
+    await reconcileCurrent('The response was interrupted. The conversation was restored to the gateway state.');
+  }
 }
 
 // ---- ATTACHMENTS ------------------------------------------------------------
@@ -2647,11 +3018,12 @@ async function addFiles(files){
 // Turn ready attachments into @path mentions appended to the outgoing message.
 function consumeAttachments(text){
   const ready=_attachments.filter(a=>a.path&&!a.error);
-  if(!ready.length) return text;
+  if(!ready.length) return {message:text,attachments:[]};
   // Quote paths containing spaces so the mention regex takes the whole path.
   const mentions=ready.map(a=>a.path.includes(' ')?'@"'+a.path+'"':'@'+a.path).join(' ');
+  const attachments=ready.map(a=>({name:a.name,path:a.path,size:a.size,kind:a.kind}));
   _attachments=[]; renderAttachments();
-  return text?text+'\n\n'+mentions:mentions;
+  return {message:text?text+'\n\n'+mentions:mentions,attachments};
 }
 $('#attachBtn').onclick=()=>$('#fileInput').click();
 $('#fileInput').addEventListener('change',e=>{ addFiles(e.target.files); e.target.value=''; });
@@ -2706,7 +3078,7 @@ const THEME_MEDIA=window.matchMedia('(prefers-color-scheme: dark)');
 function syncThemeChrome(t){
   const meta=document.querySelector('meta[name="theme-color"]'); if(!meta) return;
   const dark=t==='dark'||(t==='auto'&&THEME_MEDIA.matches);
-  meta.content=dark?'#151118':'#f7f4f9';
+  meta.content=dark?'#0a0c10':'#f7f9fb';
 }
 function applyTheme(t){
   document.documentElement.setAttribute('data-theme',t);
@@ -2717,6 +3089,8 @@ function applyTheme(t){
     btn.title=label+' \u2014 click to change'; btn.setAttribute('aria-label',label);
     btn.classList.toggle('active', t!=='auto');
   }
+  const stateLabel=$('#themeState');
+  if(stateLabel) stateLabel.textContent=t==='auto'?'System':t.charAt(0).toUpperCase()+t.slice(1);
   try{ localStorage.setItem('cagentic_theme',t); }catch(e){}
 }
 function cycleTheme(){
@@ -2737,10 +3111,12 @@ if(THEME_MEDIA.addEventListener){
 // ---- COMPOSER + WIRING ------------------------------------------------------
 function autoGrow(){ input.style.height='auto'; input.style.height=Math.min(input.scrollHeight,130)+'px'; }
 function submit(){
+  if(!state.bootReady||state.busy) return;
   const typed=input.value.trim();
-  const t=consumeAttachments(typed);
-  if(!t||state.busy)return;
-  input.value=''; autoGrow(); syncComposerState(); send(t);
+  const outgoing=consumeAttachments(typed);
+  if(!outgoing.message||state.busy)return;
+  input.value=''; autoGrow(); syncComposerState();
+  send(outgoing.message,{displayText:typed,attachments:outgoing.attachments});
 }
 input.addEventListener('input',()=>{ autoGrow(); syncComposerState(); });
 input.addEventListener('keydown', e=>{ if(e.key==='Enter'&&!e.shiftKey){e.preventDefault();submit();} });
@@ -2749,10 +3125,10 @@ $('#stopBtn').onclick=abortGeneration;
 $('#micBtn').onclick=toggleMic;
 $('#logsBtn').onclick=toggleSessions;
 $('#newMissionBtn').onclick=newChat;
-$('#configBtn').onclick=openSettings;
-$('#themeBtn').onclick=cycleTheme;
+$('#configBtn').onclick=()=>{ closeHeaderMenu(); openSettings(); };
+$('#themeBtn').onclick=()=>{ cycleTheme(); closeHeaderMenu(true); };
 $('#jumpBtn').onclick=()=>{ scrollDown(true); $('#jumpBtn').classList.add('hidden'); };
-$('#voiceOutBtn').onclick=toggleVoiceOut;
+$('#voiceOutBtn').onclick=()=>{ toggleVoiceOut(); closeHeaderMenu(true); };
 
 $('#closeSessionsBtn').onclick=()=>closeSessions(true);
 $('#sidebarNewChatBtn').onclick=newChat;
@@ -2775,6 +3151,7 @@ $('#settingsModal').addEventListener('click',e=>{if(e.target.id==='settingsModal
 document.addEventListener('keydown',e=>{
   // Dialogs own the keyboard while open; global chat shortcuts must not
   // create a conversation or open another surface behind the modal.
+  if(WORKSPACE_OVERLAY_MEDIA.matches&&document.body.classList.contains('workspace-open')) return;
   if(_visibleDialog()&&e.key!=='Escape') return;
   if((e.ctrlKey||e.metaKey)&&e.key==='k'){ e.preventDefault(); newChat(); return; }
   if((e.ctrlKey||e.metaKey)&&e.key==='m'){ e.preventDefault(); toggleMic(); return; }
@@ -2791,6 +3168,7 @@ document.addEventListener('keydown',e=>{
     else if(!$('#projConfigModal').classList.contains('hidden')) closeProjectConfig();
     else if(!$('#settingsModal').classList.contains('hidden')) closeSettings();
     else if(!$('#ctxMenu').classList.contains('hidden')) hideCtx(true);
+    else if(!$('#headerMenu').classList.contains('hidden')) closeHeaderMenu(true);
     else if($('#sessionsPanel').classList.contains('open')) closeSessions();
     else closeModelMenu();
   }

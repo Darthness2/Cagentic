@@ -171,7 +171,7 @@ def test_permission_prompt_has_safe_hierarchy_and_explicit_choices(tmp_path, mon
     assert answer == "always"
     output = capsys.readouterr().out
     flattened = " ".join(output.split())
-    assert "APPROVAL REQUIRED" in flattened
+    assert "Approval required" in flattened
     assert "Run shell command" in flattened
     assert "python -m pytest -q" in flattened
     assert "workspace:" in flattened

@@ -1,6 +1,6 @@
 {
   "manifest_version": 3,
-  "name": "Cagentic Bridge",
+  "name": "Cagentic Browser Companion",
   "version": "0.2.0",
   "description": "Lets your local Cagentic assistant see and act in this browser, and chat with it in a side panel.",
   "_comment_permissions": "All listed permissions are used: tabs (query/create/update/remove/group), tabGroups (the Cagentic group), scripting (executeScript for read/click/fill/eval/etc. and the side panel's page-context grab), alarms (keep the MV3 service worker's poll loop alive), storage (port + bridge token + site rules), sidePanel (the chat panel).",
@@ -9,8 +9,18 @@
   "host_permissions": ["<all_urls>"],
   "background": { "service_worker": "background.js" },
   "side_panel": { "default_path": "sidepanel.html" },
+  "icons": {
+    "16": "icons/cagentic-16.png",
+    "32": "icons/cagentic-32.png",
+    "48": "icons/cagentic-48.png",
+    "128": "icons/cagentic-128.png"
+  },
   "action": {
     "default_popup": "popup.html",
-    "default_title": "Cagentic Bridge"
+    "default_title": "Cagentic",
+    "default_icon": {
+      "16": "icons/cagentic-16.png",
+      "32": "icons/cagentic-32.png"
+    }
   }
 }

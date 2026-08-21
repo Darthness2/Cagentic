@@ -217,6 +217,32 @@ class TestUploads(_GatewayCase):
         )
         self.assertIn("attachment body", msg["content"])
 
+    def test_gateway_redisplays_only_the_authored_attachment_prompt(self) -> None:
+        payload, _ = self._upload("private-notes.txt", b"provider-only attachment body\n")
+        prompt = f"summarise @{payload['path']}"
+        msg = process_user_input(prompt, workspace=self.root, home=self.root)
+        msg.pop("_attachment_count", None)
+
+        rendered = self.gw.render_messages([msg])
+
+        self.assertEqual(rendered, [{"role": "user", "content": prompt}])
+        self.assertNotIn("provider-only attachment body", rendered[0]["content"])
+
+    def test_legacy_attachment_expansion_is_not_exposed_after_reload(self) -> None:
+        prompt = "summarise @.cagentic/uploads/notes.txt"
+        legacy = {
+            "role": "user",
+            "content": (
+                prompt
+                + "\n\n--- @/workspace/.cagentic/uploads/notes.txt  (1 lines total) ---\n"
+                + "    1  private historical content"
+            ),
+        }
+
+        rendered = self.gw.render_messages([legacy])
+
+        self.assertEqual(rendered, [{"role": "user", "content": prompt}])
+
 
 class TestPageContext(_GatewayCase):
     def test_context_rides_along_with_the_next_message(self) -> None:

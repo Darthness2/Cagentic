@@ -5,7 +5,7 @@
 <meta name="viewport" content="width=device-width, initial-scale=1" />
 <meta name="cagentic-token" content="{{CAGENTIC_TOKEN}}" />
 <meta name="color-scheme" content="dark light" />
-<meta name="theme-color" content="#151118" />
+<meta name="theme-color" content="#0a0c10" />
 <title>Cagentic</title>
 <link rel="stylesheet" href="/app.css" />
 </head>
@@ -72,15 +72,25 @@
       <button class="icon-btn hdr-icon" id="newMissionBtn" type="button" title="New chat (Ctrl+K)" aria-label="New chat">
         <svg class="ico" aria-hidden="true"><use href="#i-plus"/></svg>
       </button>
-      <button class="icon-btn hdr-icon toggle-btn" id="voiceOutBtn" type="button" title="Read replies aloud" aria-label="Read replies aloud" aria-pressed="false">
-        <svg class="ico" aria-hidden="true"><use href="#i-volume"/></svg>
-      </button>
-      <button class="icon-btn hdr-icon" id="themeBtn" type="button" title="Switch theme" aria-label="Switch theme">
-        <svg class="ico" aria-hidden="true"><use href="#i-theme"/></svg>
-      </button>
-      <button class="icon-btn hdr-icon" id="configBtn" type="button" title="Settings (Ctrl+S)" aria-label="Settings">
-        <svg class="ico" aria-hidden="true"><use href="#i-settings"/></svg>
-      </button>
+      <div class="header-actions">
+        <button class="icon-btn hdr-icon" id="headerMenuBtn" type="button" title="Conversation options" aria-label="Conversation options" aria-haspopup="menu" aria-controls="headerMenu" aria-expanded="false">
+          <svg class="ico" aria-hidden="true"><use href="#i-more"/></svg>
+        </button>
+        <div class="header-menu hidden" id="headerMenu" role="menu" aria-label="Conversation options">
+          <button class="header-menu-item" id="voiceOutBtn" type="button" role="menuitem" aria-pressed="false">
+            <svg class="ico" aria-hidden="true"><use href="#i-volume"/></svg>
+            <span><strong>Read replies aloud</strong><small id="voiceOutState">Off</small></span>
+          </button>
+          <button class="header-menu-item" id="themeBtn" type="button" role="menuitem">
+            <svg class="ico" aria-hidden="true"><use href="#i-theme"/></svg>
+            <span><strong>Appearance</strong><small id="themeState">System</small></span>
+          </button>
+          <button class="header-menu-item" id="configBtn" type="button" role="menuitem">
+            <svg class="ico" aria-hidden="true"><use href="#i-settings"/></svg>
+            <span><strong>Settings</strong><small>Model, gateway, and preferences</small></span>
+          </button>
+        </div>
+      </div>
     </div>
   </header>
   <span id="jSession" hidden></span>
@@ -89,6 +99,7 @@
     <div class="chat-stage">
       <div class="center-stack" id="centerStack">
         <div id="log" class="chat-log" role="region" aria-label="Conversation"></div>
+        <span id="responseStatus" class="sr-only" role="status" aria-live="polite"></span>
         <button id="jumpBtn" class="jump-btn hidden" type="button" title="Jump to latest" aria-label="Jump to latest message">
           <svg class="ico sm" aria-hidden="true"><use href="#i-arrow-down"/></svg>
           <span>Latest</span>
@@ -96,14 +107,6 @@
       </div>
     </div>
   </main>
-
-  <div id="windowLayer"></div>
-  <div id="restorePill" class="restore-pill" style="display:none">
-    <button id="restorePillBtn" class="restore-pill-trigger" type="button" aria-haspopup="menu" aria-controls="restoreDropdown" aria-expanded="false">
-      <svg class="ico sm restore-pill-icon" aria-hidden="true"><use href="#i-chevron-right"/></svg><span class="restore-pill-count">0</span> panels
-    </button>
-    <div class="restore-dropdown" id="restoreDropdown" role="menu" aria-label="Closed panels"></div>
-  </div>
 
   <section class="cmd-area" aria-label="Message composer">
     <div id="attachBar" class="attach-bar hidden"></div>
@@ -113,7 +116,8 @@
       </button>
       <input id="fileInput" type="file" multiple hidden />
       <label class="sr-only" for="input">Message Cagentic</label>
-      <textarea id="input" rows="1" placeholder="Message Cagentic&#8230;" aria-describedby="composerHint"></textarea>
+      <span id="composerHint" class="sr-only">Cagentic can make mistakes. Check important information.</span>
+      <textarea id="input" rows="1" placeholder="Ask Cagentic&#8230;" aria-describedby="composerHint"></textarea>
       <button id="micBtn" class="icon-action" type="button" title="Voice input (Ctrl+M)" aria-label="Voice input">
         <svg class="ico" aria-hidden="true"><use href="#i-mic"/></svg>
       </button>
@@ -126,8 +130,12 @@
         <span class="exec-label">Stop</span>
       </button>
     </div>
+    <div id="starterPrompts" class="starter-prompts hidden" role="group" aria-labelledby="starterPromptsTitle">
+      <p id="starterPromptsTitle" class="starter-prompts-title">Try asking</p>
+      <div id="starterPromptList" class="quick-cards"></div>
+    </div>
     <div class="cmd-footer">
-      <span id="composerHint" class="composer-note">Cagentic can make mistakes. Check important information.</span>
+      <span class="composer-note" aria-hidden="true">Cagentic can make mistakes. Check important information.</span>
       <span id="hintText" class="keyboard-hint">Enter to send &bull; Shift+Enter for a new line</span>
       <span id="busyLabel" class="busy-label hidden" role="status" aria-live="polite">Thinking&#8230;</span>
       <span id="tokenStats" class="token-stats hidden"></span>
@@ -143,12 +151,35 @@
   </div>
 </div>
 
+<!-- Rich outputs use a stable workspace that keeps the conversation readable.
+     On narrow screens this becomes a focused, keyboard-accessible sheet. -->
+<aside id="workspacePane" class="workspace-pane hidden" role="region" aria-labelledby="workspaceTitle" aria-hidden="true">
+  <div class="workspace-head">
+    <div class="workspace-heading">
+      <span class="workspace-kicker">Workspace</span>
+      <strong id="workspaceTitle">Outputs</strong>
+    </div>
+    <span id="workspaceCount" class="workspace-count" role="status" aria-live="polite"></span>
+    <button id="workspaceCloseBtn" class="icon-btn" type="button" title="Close outputs" aria-label="Close output workspace">
+      <svg class="ico" aria-hidden="true"><use href="#i-close"/></svg>
+    </button>
+  </div>
+  <div id="windowLayer" class="workspace-content"></div>
+</aside>
+
+<div id="restorePill" class="restore-pill" style="display:none">
+  <button id="restorePillBtn" class="restore-pill-trigger" type="button" aria-haspopup="menu" aria-controls="restoreDropdown" aria-expanded="false">
+    <svg class="ico sm restore-pill-icon" aria-hidden="true"><use href="#i-chevron-right"/></svg><span class="restore-pill-count">0</span> outputs
+  </button>
+  <div class="restore-dropdown" id="restoreDropdown" role="menu" aria-label="Closed outputs"></div>
+</div>
+
 <!-- Sessions drawer -->
 <aside id="sessionsPanel" class="sessions-panel" aria-label="Chats">
   <div class="sessions-head">
     <div class="brand-lockup">
       <span class="brand-mark" aria-hidden="true"><svg class="ico"><use href="#i-spark"/></svg></span>
-      <span><strong>Cagentic</strong><small>Personal AI workspace</small></span>
+      <span><strong>Cagentic</strong><small>Local AI workspace</small></span>
     </div>
     <button id="closeSessionsBtn" class="icon-btn" type="button" title="Collapse sidebar" aria-label="Collapse chats"><svg class="ico" aria-hidden="true"><use href="#i-sidebar"/></svg></button>
   </div>
@@ -163,16 +194,15 @@
     <input id="chatSearch" type="search" placeholder="Search chats" autocomplete="off" spellcheck="false" />
     <button id="chatSearchClear" class="icon-btn sm hidden" type="button" title="Clear search" aria-label="Clear chat search"><svg class="ico" aria-hidden="true"><use href="#i-close"/></svg></button>
   </div>
-  <div class="sidebar-section-head"><span>Conversations</span><span>Recent</span></div>
   <div id="sessionList" class="session-list"></div>
   <div class="sidebar-foot">
     <button id="sidebarSettingsBtn" class="sidebar-utility" type="button">
       <svg class="ico" aria-hidden="true"><use href="#i-settings"/></svg>
       <span>Settings</span>
     </button>
-    <div class="gateway-status" title="This gateway runs locally">
-      <span class="gateway-status-dot" aria-hidden="true"></span>
-      <span>Local gateway</span>
+    <div class="gateway-status" title="This gateway runs locally" role="status" aria-live="polite">
+      <span id="gatewayStatusDot" class="gateway-status-dot loading" aria-hidden="true"></span>
+      <span id="gatewayStatusText">Connecting&#8230;</span>
       <span class="gateway-version">v<span id="versionSpan">--</span></span>
     </div>
   </div>
@@ -208,10 +238,11 @@
         <label class="field-label" for="setStream">Stream responses</label>
         <label class="toggle"><input id="setStream" type="checkbox" /><span></span></label>
       </div>
-      <div class="field row">
-        <label class="field-label" for="setYolo">Auto-approve tools</label>
-        <label class="toggle"><input id="setYolo" type="checkbox" /><span></span></label>
+      <div class="field row setting-risk">
+        <label class="field-label" for="setYolo">Auto-approve tool actions</label>
+        <label class="toggle"><input id="setYolo" type="checkbox" aria-describedby="setYoloHint" /><span></span></label>
       </div>
+      <div id="setYoloHint" class="field-hint warning">Skips confirmation before tools make changes. Leave this off unless you trust the active workspace and prompt.</div>
       <hr class="settings-divider" />
       <div class="section-label">Gateway</div>
       <div class="field">
@@ -241,6 +272,7 @@
       </div>
     </div>
     <div class="modal-foot">
+      <span id="settingsStatus" class="settings-status" role="status" aria-live="polite"></span>
       <button id="cancelSettings" class="btn-ghost" type="button">Cancel</button>
       <button id="saveSettings" class="btn-primary" type="button">Save changes</button>
     </div>
@@ -258,7 +290,7 @@
     </div>
     <div class="modal-foot">
       <button id="confirmCancel" class="btn-ghost" type="button">Cancel</button>
-      <button id="confirmOk" class="btn-primary" type="button">Delete</button>
+      <button id="confirmOk" class="btn-danger" type="button">Delete</button>
     </div>
   </div>
 </div>
