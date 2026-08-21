@@ -625,7 +625,15 @@ def process_user_input(raw: str, workspace: Path | None = None, home: Path | Non
     if not attachments:
         return {"role": "user", "content": raw}
     body = raw + "\n\n" + "\n\n".join(attachments)
-    msg: dict = {"role": "user", "content": body, "_attachment_count": len(attachments)}
+    # Keep the prompt the person actually typed alongside the provider-facing
+    # expanded body. The gateway must never redisplay extracted file contents
+    # as if the user pasted them, and retries need the original @mentions.
+    msg: dict = {
+        "role": "user",
+        "content": body,
+        "_attachment_count": len(attachments),
+        "_display_content": raw,
+    }
     if images:
         # normalize_messages_for_api keeps "images", so this reaches any
         # vision-capable provider without further plumbing.

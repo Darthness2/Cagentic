@@ -119,10 +119,11 @@ class TestWebUIReasoning(unittest.TestCase):
 
     def test_the_live_block_is_reset_between_turns(self) -> None:
         """Otherwise turn 2's reasoning is written into turn 1's block."""
-        self.assertNotIn(
-            "live={body:null,raw:'',toolRow:null,thinking:null,turnStart:null", self.js
-        )
-        self.assertGreaterEqual(self.js.count("thinkBox:null"), 3)
+        reset = self.js[
+            self.js.index("function resetLive()") : self.js.index("function paintLiveBody()")
+        ]
+        self.assertIn("thinkBox:null", reset)
+        self.assertGreaterEqual(self.js.count("resetLive();"), 2)
 
     def test_reasoning_is_escaped_not_injected(self) -> None:
         """Model output is untrusted; the renderer is careful elsewhere and

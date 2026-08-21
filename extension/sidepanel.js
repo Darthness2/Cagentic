@@ -50,8 +50,11 @@ async function connect() {
 // the page you're looking at, handed to the assistant without copy-paste.
 async function addPageContext() {
   const btn = $("ctxBtn");
+  const label = btn.querySelector("span");
   const [tab] = await chrome.tabs.query({ active: true, currentWindow: true });
   if (!tab || !tab.url) return;
+  btn.disabled = true;
+  label.textContent = "Adding…";
 
   let selection = "";
   try {
@@ -88,15 +91,17 @@ async function addPageContext() {
     });
     if (!res.ok) throw new Error(String(res.status));
     btn.classList.add("done");
-    btn.lastChild.textContent = " Added";
+    label.textContent = "Added";
     setTimeout(() => {
       btn.classList.remove("done");
-      btn.lastChild.textContent = " Add page";
+      btn.disabled = false;
+      label.textContent = "Add page";
     }, 1600);
   } catch (e) {
-    btn.lastChild.textContent = " Failed";
+    label.textContent = "Failed";
     setTimeout(() => {
-      btn.lastChild.textContent = " Add page";
+      btn.disabled = false;
+      label.textContent = "Add page";
     }, 1600);
   }
 }

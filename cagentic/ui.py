@@ -1118,7 +1118,7 @@ def _message(marker: str, msg: str, marker_c: str, text_c: str, *, stream=None) 
 
 def heading(label: str) -> None:
     """Print a compact section heading used by command output."""
-    print("  " + color(truncate(single_line(label).upper(), max(1, width() - 2)), DUSK + BOLD))
+    print("  " + color(truncate(single_line(label), max(1, width() - 2)), DUSK + BOLD))
 
 
 def field(
@@ -1280,7 +1280,7 @@ def banner(
 
     columns = width()
     print()
-    brand = color("Cagentic", GLOW + BOLD)
+    brand = color("✦", GLOW + BOLD) + color(" Cagentic", SURFACE + BOLD)
     if version:
         brand += color(f" {single_line(version)}", SOFT)
     if user_name:

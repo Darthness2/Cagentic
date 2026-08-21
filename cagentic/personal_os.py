@@ -86,7 +86,7 @@ class CalendarEvent:
     status: str = "confirmed"
     source: str = "cagentic"
     external_id: str = ""
-    color: str = "#f0a87a"
+    color: str = "#c79bd8"
     created_at: float = field(default_factory=time.time)
     updated_at: float = field(default_factory=time.time)
 
@@ -182,7 +182,7 @@ def create_event(
     all_day: bool = False,
     source: str = "cagentic",
     external_id: str = "",
-    color: str = "#f0a87a",
+    color: str = "#c79bd8",
 ) -> dict:
     clean_title = str(title or "").strip()
     start = parse_timestamp(start_at)
@@ -228,7 +228,7 @@ def create_event(
         all_day=bool(all_day),
         source=clean_source,
         external_id=clean_external,
-        color=str(color or "#f0a87a")[:24],
+        color=str(color or "#c79bd8")[:24],
     )
     storage.put("os_events", event.id, event.to_dict(), event.updated_at)
     return event.to_dict()

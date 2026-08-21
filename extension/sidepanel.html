@@ -2,88 +2,140 @@
 <html lang="en">
 <head>
 <meta charset="utf-8" />
+<meta name="viewport" content="width=device-width, initial-scale=1" />
+<meta name="color-scheme" content="dark light" />
 <title>Cagentic</title>
+<link rel="stylesheet" href="theme.css" />
 <style>
-  /* The panel is a thin shell around the gateway's own chat UI: it frames the
-     iframe and handles the "not running / not paired" states. Everything
-     inside the frame is the same app served at localhost, so there is exactly
-     one chat implementation to maintain. */
-  :root {
-    --bg: #161118; --surface: #221b2a;
-    --border: rgba(236,231,240,.08);
-    --text: #ece7f0; --text-2: #b0a6ba; --text-3: #7d7388;
-    --accent: #f0a87a; --orchid: #c79ccf; --ok: #8ecf95; --err: #e5928f;
-  }
-  @media (prefers-color-scheme: light) {
-    :root {
-      --bg: #f7f4f9; --surface: #ffffff;
-      --border: rgba(34,28,39,.12);
-      --text: #221c27; --text-2: #5d5366; --text-3: #8b8194;
-      --orchid: #7b4f92;
-    }
-  }
-  * { box-sizing: border-box; }
-  html, body { height: 100%; margin: 0; }
+  html,
+  body { height: 100%; margin: 0; }
   body {
-    display: flex; flex-direction: column;
-    background: var(--bg); color: var(--text);
-    font: 13px -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, sans-serif;
+    display: flex;
+    flex-direction: column;
+    background: var(--cag-bg);
+    color: var(--cag-text);
+    font: 13px/1.5 var(--cag-font);
+    -webkit-font-smoothing: antialiased;
   }
   header {
-    display: flex; align-items: center; gap: 8px; flex-shrink: 0;
-    padding: 8px 10px; border-bottom: 1px solid var(--border);
+    display: flex;
+    min-height: 52px;
+    padding: 8px 10px;
+    flex-shrink: 0;
+    align-items: center;
+    gap: 8px;
+    border-bottom: 1px solid var(--cag-border);
+    background: var(--cag-elev);
   }
-  .logo {
-    width: 20px; height: 20px; border-radius: 6px; flex-shrink: 0;
-    background: linear-gradient(135deg, var(--accent), var(--orchid));
-    display: flex; align-items: center; justify-content: center;
-    color: #1a1420; font-weight: 700; font-size: 11px;
-  }
-  .title { font-weight: 600; letter-spacing: .02em; }
+  header .cag-brand-subtitle { display: none; }
   .spacer { flex: 1; }
-  .ctx-btn {
-    display: inline-flex; align-items: center; gap: 5px;
-    padding: 5px 9px; border-radius: 7px; cursor: pointer; font-size: 11.5px;
-    background: var(--surface); color: var(--text-2); border: 1px solid var(--border);
+  .ctx-btn,
+  .retry {
+    display: inline-flex;
+    min-height: 36px;
+    padding: 7px 10px;
+    align-items: center;
+    justify-content: center;
+    gap: 6px;
+    border: 1px solid var(--cag-border);
+    border-radius: var(--cag-r-control);
+    background: var(--cag-surface);
+    color: var(--cag-text-2);
+    cursor: pointer;
+    font-weight: 550;
+    transition: border-color var(--cag-fast) var(--cag-ease),
+                color var(--cag-fast) var(--cag-ease),
+                background var(--cag-fast) var(--cag-ease);
   }
-  .ctx-btn:hover { color: var(--orchid); border-color: var(--orchid); }
-  .ctx-btn.done { color: var(--ok); border-color: var(--ok); }
+  .ctx-btn svg {
+    width: 15px;
+    height: 15px;
+    fill: none;
+    stroke: currentColor;
+    stroke-width: 1.8;
+    stroke-linecap: round;
+    stroke-linejoin: round;
+  }
+  .ctx-btn:hover,
+  .retry:hover {
+    border-color: var(--cag-border-hover);
+    background: var(--cag-accent-layer);
+    color: var(--cag-accent);
+  }
+  .ctx-btn.done { border-color: var(--cag-ok); color: var(--cag-ok); }
   .ctx-btn:disabled { opacity: .45; cursor: default; }
-  #frame { flex: 1; width: 100%; border: 0; display: none; }
+  #frame { width: 100%; flex: 1; border: 0; display: none; background: var(--cag-bg); }
   .fallback {
-    flex: 1; display: flex; flex-direction: column; align-items: center;
-    justify-content: center; gap: 10px; padding: 24px; text-align: center;
+    display: flex;
+    flex: 1;
+    padding: 32px 24px;
+    align-items: center;
+    justify-content: center;
+    flex-direction: column;
+    gap: 10px;
+    text-align: center;
   }
-  .fallback h2 { margin: 0; font-size: 14px; font-weight: 600; }
-  .fallback p { margin: 0; font-size: 12px; color: var(--text-2); line-height: 1.55; }
+  .fallback .cag-mark { width: 40px; height: 40px; flex-basis: 40px; border-radius: var(--cag-r-card); }
+  .fallback .cag-mark svg { width: 21px; height: 21px; }
+  .fallback h1 { margin: 6px 0 0; font-size: 18px; font-weight: 650; line-height: 1.3; }
+  .fallback p {
+    max-width: 32ch;
+    margin: 0;
+    color: var(--cag-text-2);
+    font-size: 13px;
+    line-height: 1.6;
+  }
   .fallback code {
-    font-family: ui-monospace, "SF Mono", Consolas, monospace; font-size: 11.5px;
-    background: var(--surface); border: 1px solid var(--border);
-    padding: 2px 6px; border-radius: 5px;
+    padding: 2px 6px;
+    border: 1px solid var(--cag-border);
+    border-radius: 6px;
+    background: var(--cag-surface);
+    color: var(--cag-text);
+    font-family: var(--cag-code);
+    font-size: 12px;
   }
   .retry {
-    margin-top: 4px; padding: 7px 14px; border-radius: 7px; cursor: pointer;
-    background: var(--surface); color: var(--text); border: 1px solid var(--border);
+    min-height: 40px;
+    margin-top: 6px;
+    padding-inline: 16px;
+    border-color: transparent;
+    background: var(--cag-accent);
+    color: var(--cag-on-accent);
   }
-  .retry:hover { border-color: var(--orchid); color: var(--orchid); }
+  .retry:hover { border-color: transparent; background: var(--cag-accent); color: var(--cag-on-accent); opacity: .9; }
+  @media (max-width: 360px) {
+    header { padding-inline: 8px; }
+    .ctx-btn { min-width: 40px; padding-inline: 8px; }
+    .ctx-btn span { display: none; }
+  }
 </style>
 </head>
 <body>
   <header>
-    <span class="logo">C</span>
-    <span class="title">Cagentic</span>
+    <div class="cag-brand">
+      <span class="cag-mark" aria-hidden="true">
+        <svg viewBox="0 0 24 24"><path d="M12 3c.7 5.1 3.9 8.3 9 9-5.1.7-8.3 3.9-9 9-.7-5.1-3.9-8.3-9-9 5.1-.7 8.3-3.9 9-9z"/></svg>
+      </span>
+      <span class="cag-brand-copy">
+        <span class="cag-brand-name">Cagentic</span>
+        <span class="cag-brand-subtitle">Local AI assistant</span>
+      </span>
+    </div>
     <span class="spacer"></span>
-    <button id="ctxBtn" class="ctx-btn" title="Send this page's URL, title and any selected text into the chat">
-      <svg viewBox="0 0 24 24" width="13" height="13" aria-hidden="true"><path fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round" d="M14 3H6v18h12V7z M14 3v4h4M9 12h6M9 16h4"/></svg>
-      Add page
+    <button id="ctxBtn" class="ctx-btn" title="Add this page's URL, title, and selected text to the chat">
+      <svg viewBox="0 0 24 24" aria-hidden="true"><path d="M14 3H6v18h12V7zM14 3v4h4M9 12h6M9 16h4"/></svg>
+      <span>Add page</span>
     </button>
   </header>
 
   <iframe id="frame" title="Cagentic chat"></iframe>
 
   <div class="fallback" id="fallback">
-    <h2 id="fbTitle">Cagentic isn&rsquo;t running</h2>
-    <p id="fbBody">Start it with <code>cagentic --serve</code>, then reopen this panel.</p>
+    <span class="cag-mark" aria-hidden="true">
+      <svg viewBox="0 0 24 24"><path d="M12 3c.7 5.1 3.9 8.3 9 9-5.1.7-8.3 3.9-9 9-.7-5.1-3.9-8.3-9-9 5.1-.7 8.3-3.9 9-9z"/></svg>
+    </span>
+    <h1 id="fbTitle">Cagentic isn&rsquo;t running</h1>
+    <p id="fbBody">Start it with <code>cagentic --serve</code>, then try again.</p>
     <button class="retry" id="retry">Try again</button>
   </div>
 

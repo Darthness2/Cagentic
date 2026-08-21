@@ -33,6 +33,7 @@ from cagentic.tools import (
     _all_tools,
     all_tool_schemas,
     dispatch,
+    t_config_get,
     t_task_get,
     t_task_list,
     t_tool_search,
@@ -66,6 +67,20 @@ def test_every_grouped_tool_has_a_schema():
 
 def test_tool_search_includes_split_registries(ctx):
     assert "notebook_edit" in t_tool_search({"query": "notebook"}, ctx)
+
+
+def test_config_get_model_reports_the_active_runtime_model(tmp_path):
+    class Engine:
+        config = {"model": "configured-default"}
+        model = "runtime-bare-name"
+        state = AppState(
+            workspace=tmp_path,
+            home=tmp_path,
+            active_model_spec="openai:active-session-model",
+        )
+
+    tool_ctx = ToolContext(root=tmp_path, state=Engine.state, engine=Engine())
+    assert t_config_get({"key": "model"}, tool_ctx) == "model = openai:active-session-model"
     assert "gh_list_pulls" in t_tool_search({"query": "pull requests"}, ctx)
 
 

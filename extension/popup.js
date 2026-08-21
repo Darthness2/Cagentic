@@ -43,7 +43,7 @@ function renderActivity(activity) {
   }
   const t = document.createElement("span");
   t.textContent = idle ? "Idle" : cap(activity);
-  t.style.color = idle ? "var(--text-2)" : "var(--gold)";
+  t.style.color = idle ? "var(--cag-text-2)" : "var(--cag-warn)";
   wrap.appendChild(t);
 }
 
@@ -114,8 +114,9 @@ function renderSites(rules) {
     name.textContent = host;
     const x = document.createElement("button");
     x.className = "site-x";
-    x.textContent = "\u2715";
-    x.title = "Remove";
+    x.textContent = "Remove";
+    x.title = "Remove " + host;
+    x.setAttribute("aria-label", "Remove " + host + " permission");
     x.addEventListener("click", () => {
       siteRules[kind] = siteRules[kind].filter((h) => h !== host);
       saveSites();
@@ -180,7 +181,7 @@ function renderOnline(s) {
   renderActivity(s.activity);
   renderSites(s.sites);
   renderRecent(s.recent);
-  $("ver").textContent = "cagentic v" + (s.version || "?") + " · bridge on 127.0.0.1:" + port;
+  $("ver").textContent = "Cagentic v" + (s.version || "?") + " · bridge on 127.0.0.1:" + port;
 }
 
 function renderOffline(msg) {
@@ -188,7 +189,7 @@ function renderOffline(msg) {
   $("statusText").textContent = msg || "Cagentic not running";
   $("statusSub").textContent = "";
   $("details").classList.add("hidden");
-  $("ver").textContent = "start Cagentic, then this connects automatically";
+  $("ver").textContent = "Start Cagentic; this connects automatically.";
 }
 
 async function poll() {
@@ -216,10 +217,18 @@ async function poll() {
 }
 
 $("save").addEventListener("click", async () => {
+  const save = $("save");
+  save.disabled = true;
+  save.textContent = "Saving…";
   port = parseInt($("port").value, 10) || 8765;
   token = $("token").value.trim();
-  await chrome.storage.local.set({ port, token });
-  poll();
+  try {
+    await chrome.storage.local.set({ port, token });
+    await poll();
+  } finally {
+    save.disabled = false;
+    save.textContent = "Save";
+  }
 });
 
 (async () => {

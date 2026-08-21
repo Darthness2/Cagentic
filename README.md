@@ -14,7 +14,7 @@ Cagentic **remembers things about you** across sessions, keeps a persistent remi
 - **MCP bridges** — point Cagentic at any MCP server (Notion, Google Drive, Slack, your own custom ones) via stdio JSON-RPC and it can call their tools and read their resources.
 - **Controls your browser** — a companion Chrome extension lets Cagentic read pages, open tabs, click links, and fill forms in your actual browser.
 - **Web UI** — `/gateway` starts a local web app: the full assistant in a browser tab, with tool approvals shown right on the page.
-- **Rich answers in the tab** — the assistant can draw bar/line/pie charts, tables, stat blocks and progress bars as draggable panels in the web UI instead of dumping an ASCII table into the chat.
+- **Rich answers in the tab** — the assistant can draw bar/line/pie charts, tables, stat blocks and progress bars in a responsive output workspace instead of dumping an ASCII table into the chat.
 - **Personal OS data** — goals, calendar events, deadlines, a unified inbox and scheduled AI routines are stored locally and available to the assistant as tools (the `life` group). Ask for them in chat; there is no separate dashboard to keep in sync.
 - **Conversations persist** — sessions auto-save to `~/.config/cagentic/sessions/`. `/resume` to come back to one.
 - **Background jobs** — slow shell commands run in the background; their output gets injected back into the conversation when they finish.
@@ -365,8 +365,8 @@ same local data through the `inbox_*`, `calendar_event_*`, `goal_*`,
 bridge to services such as Notion, Drive, and Slack.
 
 When an answer is easier to read as a picture, the assistant calls
-`show_widget` and the result opens as a draggable panel in the tab — bar, line
-and pie charts, tables, stat blocks, progress bars, metrics, and alerts.
+`show_widget` and the result opens in a responsive workspace beside the chat —
+bar, line and pie charts, tables, stat blocks, progress bars, metrics, and alerts.
 
 Calendars can synchronize directly:
 
