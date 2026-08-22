@@ -959,7 +959,20 @@ class QueryEngine:
         else:
             self.messages.insert(0, {"role": "system", "content": prompt})
 
-    def submit_message(self, prompt: str) -> Iterator[Message]:
+    def submit_message(
+        self,
+        prompt: str,
+        *,
+        display_prompt: str | None = None,
+    ) -> Iterator[Message]:
+        """Run one user turn.
+
+        ``prompt`` is the model-facing text and may contain expanded file or
+        browser-page context. ``display_prompt`` is the text the user actually
+        submitted. Keeping the two separate prevents a saved web chat from
+        changing shape after reload and exposing a large inline attachment as
+        if the user had pasted it into the composer.
+        """
         # `_usage` accumulates for the whole session, so a per-turn figure has
         # to be a delta against this snapshot. Without it the "tokens ... in"
         # line reported the running total while reading like a per-turn cost.
@@ -978,14 +991,20 @@ class QueryEngine:
             self.state.update(**resets)
         _poke_browser(self.state, model=self.model, activity="thinking")
 
+        visible_prompt = prompt if display_prompt is None else display_prompt
         user_msg = process_user_input(prompt, workspace=self.state.workspace, home=self.state.home)
         attachment_count = int(user_msg.pop("_attachment_count", 0))
-        yield Message("user", {"text": prompt})
+        if str(user_msg.get("content") or "") != visible_prompt:
+            # Display-only metadata is deliberately stripped by
+            # normalize_messages_for_api, so providers still receive the full
+            # model-facing content and never see this duplicate field.
+            user_msg["_display_content"] = visible_prompt
+        yield Message("user", {"text": visible_prompt})
         if attachment_count:
             noun = "file" if attachment_count == 1 else "files"
             yield Message("info", {"text": f"attached {attachment_count} {noun} to this turn"})
 
-        self._record_transcript("user", prompt)
+        self._record_transcript("user", visible_prompt)
         self.messages.append(user_msg)
         # Stamp edits made from here on with this turn's number, so /rewind can
         # restore "everything since turn N" as one unit.

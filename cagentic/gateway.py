@@ -132,7 +132,7 @@ class _ClientGone(Exception):
     """Raised when the browser hangs up mid-stream."""
 
 
-from .engine import _PLAN_RX, _THINK_RX
+from .engine import _PLAN_RX, _THINK_RX, _extract_plan, _extract_thinking
 
 _STEP_RX = re.compile(r"<step\s+\d+(?:\s*/\s*\d+)?\s*>", re.IGNORECASE)
 
@@ -753,9 +753,19 @@ class Gateway:
             elif role == "assistant":
                 tool_calls = m.get("tool_calls") or []
                 tools = [(tc.get("function") or {}).get("name", "?") for tc in tool_calls]
+                thinking, without_thinking = _extract_thinking(content)
+                plan, _without_plan = _extract_plan(without_thinking)
                 cleaned = _clean(content)
-                if cleaned or tools:
-                    msg = {"role": "assistant", "content": cleaned, "tools": tools}
+                if cleaned or tools or thinking or plan:
+                    msg = {
+                        "role": "assistant",
+                        "content": cleaned,
+                        "tools": tools,
+                    }
+                    if thinking:
+                        msg["thinking"] = thinking
+                    if plan:
+                        msg["plan"] = plan
                     if tool_calls:
                         # Rich per-call info (args summary + outcome) so
                         # clients can re-render tool chips after a reload.
@@ -1775,8 +1785,12 @@ class Gateway:
         try:
             # Refresh the user's live goals/calendar context before every turn.
             self._rebuild_suffix()
-            message = self._consume_pending_context(message)
-            for ev in self.engine.submit_message(message):
+            display_message = message
+            model_message = self._consume_pending_context(message)
+            for ev in self.engine.submit_message(
+                model_message,
+                display_prompt=display_message,
+            ):
                 if ev.kind == "done":
                     completed = True
                 emit(ev.kind, ev.data)

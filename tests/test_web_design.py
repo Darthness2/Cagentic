@@ -240,5 +240,19 @@ class TestReducedMotion(unittest.TestCase):
         self.assertIn("opacity: 1 !important", block)
 
 
+class TestHistoryParity(unittest.TestCase):
+    def test_reloaded_tools_use_the_persisted_live_details(self) -> None:
+        self.assertIn("m.tool_details&&m.tool_details.length", _JS)
+        self.assertIn("finishToolRow(row,t)", _JS)
+        self.assertIn("finishToolRow(live.toolRow,{ok:d.ok,first_line:d.first_line})", _JS)
+
+    def test_old_name_only_tool_history_still_loads(self) -> None:
+        self.assertIn("typeof t==='string'?{name:t}:t", _JS)
+
+    def test_reasoning_and_plans_share_live_and_reload_renderers(self) -> None:
+        self.assertGreaterEqual(_JS.count("addThinkingBlock("), 3)
+        self.assertGreaterEqual(_JS.count("addPlanBlock("), 3)
+
+
 if __name__ == "__main__":
     unittest.main()

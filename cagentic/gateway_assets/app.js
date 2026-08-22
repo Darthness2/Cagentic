@@ -388,6 +388,12 @@ function addThinkingBlock(text){
   box.innerHTML='<summary>reasoning</summary><div class="think-body">'+esc(text)+'</div>';
   getThread().appendChild(box); scrollDown(); return box;
 }
+function addPlanBlock(steps){
+  if(!steps||!steps.length) return null;
+  const p=document.createElement('div'); p.className='plan-box';
+  p.innerHTML='<div class="ph">Plan</div><ol>'+steps.map(s=>'<li>'+esc(s)+'</li>').join('')+'</ol>';
+  getThread().appendChild(p); scrollDown(); return p;
+}
 /* Reasoning arrives incrementally on the delta stream, so the live block is
    rewritten in place rather than appended once per token. */
 function syncThinking(raw){
@@ -1801,6 +1807,7 @@ function addToolRow(t, done, hostRow){
       if(sumEl) sumEl.textContent=t.summary;
     }
     if(!done){ prev.classList.remove('ok','bad'); prev.classList.add('pending'); }
+    else finishToolRow(prev,t);
     syncToolActivity(activity);
     scrollDown(); return prev;
   }
@@ -1815,7 +1822,18 @@ function addToolRow(t, done, hostRow){
     '<span class="tname">'+esc(t.name||'')+'</span>'+
     (t.summary?'<span class="tsum">'+esc(t.summary)+'</span>':'')+
     '<span class="tres">'+(done?esc(t.first_line||(t.ok===false?'Failed':'Done')):'Running&#8230;')+'</span>';
+  if(done) finishToolRow(row,t);
   thread.appendChild(row); syncToolActivity(activity); scrollDown(); return row;
+}
+function finishToolRow(row,t){
+  row.classList.remove('pending','ok','bad');
+  if(t.ok===true) row.classList.add('ok');
+  else if(t.ok===false) row.classList.add('bad');
+  let res=row.querySelector('.tres');
+  if(t.ok===true||t.ok===false){
+    if(!res){res=document.createElement('span');res.className='tres';row.appendChild(res);}
+    res.textContent=(t.ok?'\u2713 ':'\u2717 ')+(t.first_line||'').slice(0,90);
+  } else if(res) res.remove();
 }
 function addNote(text, isErr){
   const n=document.createElement('div'); n.className='note-row'+(isErr?' err':'');
@@ -1991,18 +2009,15 @@ function handle(ev){
     addThinkingBlock(d.text||'');
     settleLiveSegment();
   } else if(k==='plan'){
-    const p=document.createElement('div'); p.className='plan-box';
-    p.innerHTML='<div class="ph">Plan</div><ol>'+(d.steps||[]).map(s=>'<li>'+esc(s)+'</li>').join('')+'</ol>';
-    getThread().appendChild(p); settleLiveSegment(); scrollDown();
+    addPlanBlock(d.steps||[]); settleLiveSegment();
   } else if(k==='tool_call'){
     const row=ensureLiveAssistant(); settleLiveSegment(); live.toolRow=addToolRow({name:d.name,summary:d.summary},false,row);
   } else if(k==='tool_result'){
     if(live.toolRow){
-      live.toolRow.classList.remove('pending'); live.toolRow.classList.add(d.ok?'ok':'bad');
-      const res=live.toolRow.querySelector('.tres')||document.createElement('span');
-      res.className='tres'; res.textContent=(d.ok?'✓ ':'✗ ')+(d.first_line||'').slice(0,90);
-      if(!res.parentNode) live.toolRow.appendChild(res);
-      syncToolActivity(live.toolRow.closest('.tool-activity')); live.toolRow=null;
+      // Live and reloaded tool rows deliberately share one finalizer so their
+      // status, result excerpt, and error treatment cannot drift again.
+      finishToolRow(live.toolRow,{ok:d.ok,first_line:d.first_line});
+      live.toolRow=null;
     }
   } else if(k==='permission'){ settleLiveSegment(); showPermission(d);
   } else if(k==='info'){
@@ -2482,8 +2497,13 @@ function setCurrent(cur){
       row=addUser(m.content); idx++;
     }
     else {
+      (m.thinking||[]).forEach(text=>addThinkingBlock(text));
+      addPlanBlock(m.plan||[]);
       const html=md(stripThink(stripHud(m.content)));
       const hasContent=html&&html.trim();
+      // The backend pairs persisted calls with their summaries and results.
+      // Use that same shape as the live SSE renderer; falling back to names
+      // keeps older saved chats compatible.
       const tools=(m.tool_details&&m.tool_details.length)?m.tool_details:(m.tools||[]);
       if(hasContent){ row=addAssistant(html,pendingTools.concat(tools)); pendingTools=[]; renderPanels(m.content); idx++; }
       else pendingTools.push(...tools);
