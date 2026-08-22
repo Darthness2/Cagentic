@@ -290,8 +290,8 @@ Panel schemas (pick the type that fits; all fields optional except shown):
   {"panel":"alert","level":"info|warn|critical","title":"...","text":"..."}
   {"panel":"progress","title":"...","items":[{"label":"...","pct":75}]}
   {"panel":"map","title":"...","lat":34.05,"lon":-118.24,"label":"..."}
-  {"panel":"bar","title":"...","labels":["Jan","Feb"],"values":[42,87],"color":"#c79bd8"}
-  {"panel":"line","title":"...","labels":["Mon","Tue"],"datasets":[{"label":"CPU","values":[30,80],"color":"#c79bd8"}]}
+  {"panel":"bar","title":"...","labels":["Jan","Feb"],"values":[42,87],"color":"#7cc4ff"}
+  {"panel":"line","title":"...","labels":["Mon","Tue"],"datasets":[{"label":"CPU","values":[30,80],"color":"#7cc4ff"}]}
   {"panel":"pie","title":"...","labels":["A","B","C"],"values":[40,35,25]}
   {"panel":"clear"}   ← clears the output workspace when you want a fresh display
 

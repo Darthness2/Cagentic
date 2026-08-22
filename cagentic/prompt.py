@@ -349,17 +349,17 @@ def _build_pt_session(
             if _safe_for_history(string):
                 super().store_string(string)
 
-    # Restrained graphite/indigo completion menu matching the transcript UI.
+    # Restrained graphite/blue completion menu matching the web gateway.
     style = Style.from_dict(
         {
-            "completion-menu": "bg:#202331 #d5d9e5",
-            "completion-menu.completion": "bg:#202331 #aeb8d8",
-            "completion-menu.completion.current": "bg:#5f6fa8 #ffffff bold",
-            "completion-menu.meta": "bg:#202331 #8b93a7",
-            "completion-menu.meta.current": "bg:#5f6fa8 #e8eaf2",
-            "scrollbar.background": "bg:#202331",
-            "scrollbar.button": "bg:#596176",
-            "bottom-toolbar": "bg:#171923 #8b93a7",
+            "completion-menu": "bg:#10141a #b9c2ce",
+            "completion-menu.completion": "bg:#10141a #b9c2ce",
+            "completion-menu.completion.current": "bg:#132636 #e7edf4 bold",
+            "completion-menu.meta": "bg:#10141a #8f9baa",
+            "completion-menu.meta.current": "bg:#132636 #b9c2ce",
+            "scrollbar.background": "bg:#10141a",
+            "scrollbar.button": "bg:#27313c",
+            "bottom-toolbar": "bg:#0a0c10 #8f9baa",
         }
     )
 

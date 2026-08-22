@@ -14,6 +14,7 @@ Cagentic **remembers things about you** across sessions, keeps a persistent remi
 - **MCP bridges** — point Cagentic at any MCP server (Notion, Google Drive, Slack, your own custom ones) via stdio JSON-RPC and it can call their tools and read their resources.
 - **Controls your browser** — a companion Chrome extension lets Cagentic read pages, open tabs, click links, and fill forms in your actual browser.
 - **Web UI** — `/gateway` starts a local web app: the full assistant in a browser tab, with tool approvals shown right on the page.
+- **Native iPhone and iPad app** — `iOS/` contains a SwiftUI Ollama client with guided LAN setup, multiple servers, streaming chat, and photo/file attachments.
 - **Rich answers in the tab** — the assistant can draw bar/line/pie charts, tables, stat blocks and progress bars in a responsive output workspace instead of dumping an ASCII table into the chat.
 - **Personal OS data** — goals, calendar events, deadlines, a unified inbox and scheduled AI routines are stored locally and available to the assistant as tools (the `life` group). Ask for them in chat; there is no separate dashboard to keep in sync.
 - **Conversations persist** — sessions auto-save to `~/.config/cagentic/sessions/`. `/resume` to come back to one.
@@ -77,6 +78,20 @@ Ollama models are listed and your selection is saved to
 Type `/` in the REPL to see slash-command completions (`/notes`, `/remind`, `/mcp`, etc.).
 Type `@` anywhere in a prompt to complete files from the active workspace.
 Use `Esc+Enter` for a newline and Enter to send.
+
+## Native iPhone and iPad app
+
+The app in [`iOS/`](iOS/) connects directly to Ollama on a trusted LAN or through
+an authenticated HTTPS proxy. It supports named server profiles, per-server
+model choices and Keychain credentials, local chat history, streaming responses,
+thinking output, and bounded photo, PDF, text, and source-code attachments. See
+the [iOS build and connection guide](iOS/README.md) for XcodeGen commands and the
+required `OLLAMA_HOST` setup.
+
+The native app currently targets Ollama's `/api/chat` transport. It does not
+connect to Cagentic's gateway event stream, so Python-agent tools, memory, and MCP
+services remain features of the terminal and web gateway rather than the first
+iOS release.
 
 ## How it remembers you
 
@@ -429,9 +444,10 @@ Sessions, projects, tasks, and reminders are indexed transactionally in `~/.conf
 
 ## Look & feel
 
-Cagentic uses a restrained graphite-and-indigo terminal system with a compact
-startup summary that preserves scrollback. Help, sessions, diagnostics, tool
-activity, and Markdown responses reflow for narrow terminals; `NO_COLOR=1`
+Cagentic uses a restrained graphite-and-blue terminal system shared with the
+web gateway, with a compact startup summary that preserves scrollback. Help,
+sessions, diagnostics, tool activity, and Markdown responses reflow for narrow
+terminals; `NO_COLOR=1`
 produces clean plain text rather than exposing Markdown syntax.
 
 The startup block makes the active model, workspace, tool state, and safety

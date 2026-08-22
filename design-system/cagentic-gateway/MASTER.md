@@ -1,8 +1,9 @@
 # Cagentic product design system
 
-This is the shared visual contract for the CLI, web gateway, and browser extension.
-Page-specific guidance in `pages/` may refine layout, but it must not replace these
-brand, color, typography, state, or accessibility rules.
+This is the shared visual contract for the web gateway, CLI, browser extension,
+and native app. The shipped gateway palette is the source of truth. Page-specific
+guidance in `pages/` may refine layout, but it must not replace these brand, color,
+typography, state, or accessibility rules.
 
 ## Product character
 
@@ -11,7 +12,7 @@ looking like a security console, a game HUD, or a generic purple SaaS dashboard.
 
 - Content first, with quiet product chrome.
 - Flat, layered surfaces instead of decorative gradients or glow.
-- One dusk-mauve brand hue. Green, amber, and red are reserved for meaning.
+- One cool-blue brand hue. Green, amber, and red are reserved for meaning.
 - Native to each medium: the web and extension use system UI controls; the CLI
   uses terminal-safe color and compact text structure.
 - Light and dark themes are designed together.
@@ -37,15 +38,15 @@ looking like a security console, a game HUD, or a generic purple SaaS dashboard.
 
 | Role | Dark | Light | Terminal 256-color mapping |
 |---|---|---|---|
-| Background | `#151118` | `#f7f4f9` | terminal background |
-| Stage / deepest surface | `#120f16` | `#fdfbfe` | terminal background |
+| Background | `#0a0c10` | `#f7f9fb` | terminal background |
+| Stage / deepest surface | `#06080b` | `#ffffff` | terminal background |
 | Elevated surface | `rgba(255,255,255,.028)` | `rgba(0,0,0,.022)` | default background |
-| Primary text | `#f0eaf2` | `#221c27` | `255` |
-| Secondary text | `#a99fb1` | `#5d5366` | `248` |
-| Tertiary text | `#8a8292` | `#6f6a7c` | `245` |
-| Border | `#332b38` | `#ded5e4` | `96` when structural color is needed |
-| Brand / focus | `#c79bd8` | `#7b4f92` | `176` primary, `182` bright |
-| On brand | `#151118` | `#ffffff` | terminal background |
+| Primary text | `#e7edf4` | `#111820` | `255` |
+| Secondary text | `#b9c2ce` | `#46515d` | `248` |
+| Tertiary text | `#8f9baa` | `#596675` | `245` |
+| Border | `#27313c` | `#d0d7de` | `67` when structural color is needed |
+| Brand / focus | `#7cc4ff` | `#0969da` | `117` primary, `153` bright |
+| On brand | `#06101a` | `#ffffff` | terminal background |
 | Success | `#8ecf95` | `#2f7d43` | `114` |
 | Warning | `#d9c069` | `#8a6d10` | `179` |
 | Error | `#d98a87` | `#b03a35` | `174` |
@@ -54,7 +55,7 @@ Rules:
 
 - Brand color is for the mark, focus, selection, active navigation, and the one
   primary action in a view.
-- Do not use peach, blue, cyan, or a second purple as decorative accents.
+- Do not use mauve, purple, cyan, or a second blue as decorative accents.
 - Do not use gradients for brand marks, buttons, panels, or backgrounds.
 - Status colors always accompany a label, icon, or symbol.
 
@@ -94,12 +95,12 @@ Rules:
   analytics dashboard.
 - The side panel shell uses the same mark, stage colors, type hierarchy, and
   control treatment as the gateway inside its frame.
-- Assistant activity injected into a page uses the same mauve accent.
+- Assistant activity injected into a page uses the same gateway blue.
 
 ### CLI
 
 - Preserve terminal conventions and redirected-output safety.
-- Use the spark wordmark, mauve brand markers, neutral text, and the same semantic
+- Use the spark wordmark, cool-blue brand markers, neutral text, and the same semantic
   success/warning/error palette.
 - No boxes around ordinary conversation. Use short rules, indentation, and a
   stable marker vocabulary (`●`, `·`, `→`, `✓`, `×`, `!`).

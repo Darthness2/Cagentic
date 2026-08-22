@@ -49,7 +49,7 @@ def create(name: str, color: str | None = None) -> dict[str, Any]:
     proj = {
         "id": new_id(),
         "name": name.strip() or "Untitled Project",
-        "color": color or "#c79bd8",
+        "color": color or "#7cc4ff",
         "system_prompt": "",
         "context": "",
         "created_at": now,
@@ -130,7 +130,7 @@ def list_all() -> list[dict]:
             {
                 "id": data.get("id", ""),
                 "name": data.get("name", "Untitled Project"),
-                "color": data.get("color", "#c79bd8"),
+                "color": data.get("color", "#7cc4ff"),
                 "system_prompt": data.get("system_prompt", ""),
                 "context": data.get("context", ""),
                 "updated_at": data.get("updated_at", 0),

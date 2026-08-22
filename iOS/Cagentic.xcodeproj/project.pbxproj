@@ -1,0 +1,738 @@
+// !$*UTF8*$!
+{
+	archiveVersion = 1;
+	classes = {
+	};
+	objectVersion = 77;
+	objects = {
+
+/* Begin PBXBuildFile section */
+		011D6C7DD42026FD95142099 /* AttachmentStoreTests.swift in Sources */ = {isa = PBXBuildFile; fileRef = 141C6BBC649DBF7EC44BB37B /* AttachmentStoreTests.swift */; };
+		07B8B9175F4C8EE16BC89393 /* CagenticTheme.swift in Sources */ = {isa = PBXBuildFile; fileRef = 5E8F950BCC3416A1F613C74E /* CagenticTheme.swift */; };
+		0D45393681689C0466479825 /* InterVariable-Italic.ttf in Resources */ = {isa = PBXBuildFile; fileRef = 2DF126A02C8B4595BB22622B /* InterVariable-Italic.ttf */; };
+		1EF99EBC2D2FAD74DB532722 /* OllamaResponseDecodingTests.swift in Sources */ = {isa = PBXBuildFile; fileRef = 755EF2B1D3B8486BF2715B4D /* OllamaResponseDecodingTests.swift */; };
+		2400A8D6D6F69CED5101867F /* NetworkAddress.swift in Sources */ = {isa = PBXBuildFile; fileRef = A08209C2A1ADE502EF1DECD9 /* NetworkAddress.swift */; };
+		25DA62D3DA5139391ADFAA57 /* OllamaModels.swift in Sources */ = {isa = PBXBuildFile; fileRef = 5FD17B2085CD0B1E965DAA54 /* OllamaModels.swift */; };
+		2CE6D18E7574A28A437BB33D /* OllamaEndpointTests.swift in Sources */ = {isa = PBXBuildFile; fileRef = 5D339D385450D8F9E9208C68 /* OllamaEndpointTests.swift */; };
+		3143417927B565D6C25A2B41 /* AppModelTests.swift in Sources */ = {isa = PBXBuildFile; fileRef = B8C84B35B17C3C57FDE0CBC8 /* AppModelTests.swift */; };
+		347466944E14F73D8AE5EB10 /* GatewayClientError.swift in Sources */ = {isa = PBXBuildFile; fileRef = 998523A493F0350A575D9854 /* GatewayClientError.swift */; };
+		37032C779F73A46FCDC2DFEA /* ComposerView.swift in Sources */ = {isa = PBXBuildFile; fileRef = 26E261A2F8BFA11DD13E57C8 /* ComposerView.swift */; };
+		3D939BD19F36C41AFC86EB11 /* ServerManagerView.swift in Sources */ = {isa = PBXBuildFile; fileRef = 848B951ACBDB3DBF696A0394 /* ServerManagerView.swift */; };
+		40D3FBC58A1AD412087DA95C /* AppRepositoryTests.swift in Sources */ = {isa = PBXBuildFile; fileRef = 75BB7679AF10BFACB65594D5 /* AppRepositoryTests.swift */; };
+		44B3F7554A184AB2EB53C859 /* SidebarView.swift in Sources */ = {isa = PBXBuildFile; fileRef = 41FBF55BCD20C374E254F60C /* SidebarView.swift */; };
+		468CC0328A89169B3995B95F /* CagenticThemeTests.swift in Sources */ = {isa = PBXBuildFile; fileRef = 1937A37EA3AAEEB4F224CC37 /* CagenticThemeTests.swift */; };
+		4B94A266723C6A7B502E30A9 /* AttachmentStore.swift in Sources */ = {isa = PBXBuildFile; fileRef = 06058403B05682CE759E56E3 /* AttachmentStore.swift */; };
+		4C78DB45BCC0CFF482542A4F /* Assets.xcassets in Resources */ = {isa = PBXBuildFile; fileRef = 2A11FD0C8F1D53019228C27E /* Assets.xcassets */; };
+		4CFF86292E9CDC6A55560906 /* ServerProfileTests.swift in Sources */ = {isa = PBXBuildFile; fileRef = 1C00CC04491B8AFB9EBDDB85 /* ServerProfileTests.swift */; };
+		4D66A47A46AA91837FFA4038 /* GatewayTextSanitizerTests.swift in Sources */ = {isa = PBXBuildFile; fileRef = 7EA0EEDA5B5A00989F4E6A88 /* GatewayTextSanitizerTests.swift */; };
+		503E909E6237D70F63901E4F /* AppRepository.swift in Sources */ = {isa = PBXBuildFile; fileRef = E89F1A2A9A50399AC02EA96C /* AppRepository.swift */; };
+		5E6F5B7E43EAABEC237B9C81 /* ChatView.swift in Sources */ = {isa = PBXBuildFile; fileRef = B43F5E0658AA6FD37EDFD4E9 /* ChatView.swift */; };
+		5E740947A68405B9E78F9F0D /* OllamaEndpoint.swift in Sources */ = {isa = PBXBuildFile; fileRef = 0F2B22630DD8463EEBB0C542 /* OllamaEndpoint.swift */; };
+		5FF1A19228FDCE182476FC34 /* ModelPickerView.swift in Sources */ = {isa = PBXBuildFile; fileRef = 54A7E8EE033C6EE01A045AAF /* ModelPickerView.swift */; };
+		6091F2A3C33EFCCC3A9B4BBC /* MarkdownRendererTests.swift in Sources */ = {isa = PBXBuildFile; fileRef = 4642C8AADB0F3A349F78EFCC /* MarkdownRendererTests.swift */; };
+		66663A1AC25193C4625DB047 /* AppModelGatewayTests.swift in Sources */ = {isa = PBXBuildFile; fileRef = F69DC39A0D7BDC962A85577D /* AppModelGatewayTests.swift */; };
+		67CFEED6ABFD44B2BD12DB5B /* RootView.swift in Sources */ = {isa = PBXBuildFile; fileRef = 9EDBBD542B632A473FCC0BFD /* RootView.swift */; };
+		6A69D22335D900F3B6182220 /* MarkdownText.swift in Sources */ = {isa = PBXBuildFile; fileRef = 44400C93EF15E7A64AC7B6F2 /* MarkdownText.swift */; };
+		6A93BBBBC7DC5C34C8B7B9E2 /* GatewayEndpoint.swift in Sources */ = {isa = PBXBuildFile; fileRef = EF754EADDF0DDBA04224566E /* GatewayEndpoint.swift */; };
+		6AB4EEBC824B5C8EA9A5E076 /* SettingsView.swift in Sources */ = {isa = PBXBuildFile; fileRef = CF7C77A5AD4672840A8FB66F /* SettingsView.swift */; };
+		6DA5B7B9576D56E1C57F99E1 /* GatewayModels.swift in Sources */ = {isa = PBXBuildFile; fileRef = 38445A75CCE5A84597448BA8 /* GatewayModels.swift */; };
+		6EC8E070FA94054E7F515F17 /* ConnectionSetupView.swift in Sources */ = {isa = PBXBuildFile; fileRef = C8C39CDBD7EB28BF408AEF9C /* ConnectionSetupView.swift */; };
+		7378055BE83D290C68650B0F /* MessageRow.swift in Sources */ = {isa = PBXBuildFile; fileRef = 829A4CD66A1D8725EC5BCA49 /* MessageRow.swift */; };
+		73B44758BDD93731D8DFA961 /* BrandMark.swift in Sources */ = {isa = PBXBuildFile; fileRef = 3E7A9F60557178A79582AA73 /* BrandMark.swift */; };
+		8171600A2BCD5CB5EA6EAC70 /* OllamaClient.swift in Sources */ = {isa = PBXBuildFile; fileRef = 42F6824DF2505703299D223D /* OllamaClient.swift */; };
+		8FBAAE6796F1D26AF5A7BAF3 /* AttachmentModels.swift in Sources */ = {isa = PBXBuildFile; fileRef = B74B48FA3D4022E2C4DAED98 /* AttachmentModels.swift */; };
+		93C2FDBBA1733A409D275FAA /* OllamaRequestContextPlanner.swift in Sources */ = {isa = PBXBuildFile; fileRef = 30FD528765C943E1AAADB345 /* OllamaRequestContextPlanner.swift */; };
+		95DBD2CF0175DD0405150EEE /* GatewayEndpointTests.swift in Sources */ = {isa = PBXBuildFile; fileRef = 032EF1848784E683BD74E9BF /* GatewayEndpointTests.swift */; };
+		973248AB5E7856EB952B7053 /* OllamaRequestContextPlannerTests.swift in Sources */ = {isa = PBXBuildFile; fileRef = 91FD4177D89D9388200AAE26 /* OllamaRequestContextPlannerTests.swift */; };
+		A74D40FDD89D05C32CC2D337 /* ServerProfile.swift in Sources */ = {isa = PBXBuildFile; fileRef = E91B961D7F0D0AD461B6AEC3 /* ServerProfile.swift */; };
+		ACE3DDC0D196B1B4E9F31293 /* OllamaClientError.swift in Sources */ = {isa = PBXBuildFile; fileRef = 21BA7C1D6214CC3805C19896 /* OllamaClientError.swift */; };
+		AE74B42E4992F00C7EFBB888 /* OllamaChatChunkDecoderTests.swift in Sources */ = {isa = PBXBuildFile; fileRef = E73A5E3046ECC2E7B712D34B /* OllamaChatChunkDecoderTests.swift */; };
+		BD6B0F694DA65A441E5A23A9 /* OnboardingView.swift in Sources */ = {isa = PBXBuildFile; fileRef = C5A51E53E18949A06ED5DEAD /* OnboardingView.swift */; };
+		C38BB4BB82CAECFE377136F7 /* GatewayClient.swift in Sources */ = {isa = PBXBuildFile; fileRef = 4DC1F5BC1D396D27E46BB68A /* GatewayClient.swift */; };
+		C96ADAEFCEFA24AF00FF76D3 /* Inter-LICENSE.txt in Resources */ = {isa = PBXBuildFile; fileRef = DC8F1A7D07B66C75BE1166DF /* Inter-LICENSE.txt */; };
+		CD3D5556FBA9FA21EC6C656C /* GatewayEventDecoder.swift in Sources */ = {isa = PBXBuildFile; fileRef = 36B71E1D3BADE8662C8A146A /* GatewayEventDecoder.swift */; };
+		D404ED864688812C2BF8629D /* AppModels.swift in Sources */ = {isa = PBXBuildFile; fileRef = 17E19EDF35365067D5F7E016 /* AppModels.swift */; };
+		DC8639747260E50B3E5B99D0 /* OllamaChatChunkDecoder.swift in Sources */ = {isa = PBXBuildFile; fileRef = 0FA4CB173D103B68BBDBF4AB /* OllamaChatChunkDecoder.swift */; };
+		DD3CF38E1B90D287CC008773 /* AppModel.swift in Sources */ = {isa = PBXBuildFile; fileRef = 7A2006860F74736CA6042D0A /* AppModel.swift */; };
+		E676FF6D27ABA33D65A1655F /* InterVariable.ttf in Resources */ = {isa = PBXBuildFile; fileRef = 63F36BCC4BB7A02FF31D4E3F /* InterVariable.ttf */; };
+		E7285D116AC1EE75392510FE /* AttachmentImporter.swift in Sources */ = {isa = PBXBuildFile; fileRef = 74777658B088FEA5F7AC6E05 /* AttachmentImporter.swift */; };
+		E7B83ABBC40CC4404E5EEC87 /* CagenticApp.swift in Sources */ = {isa = PBXBuildFile; fileRef = 2DC603766EF00A9D15F8BC54 /* CagenticApp.swift */; };
+		EEC71ACC4D6536DB86D5FE97 /* ConversationManagerView.swift in Sources */ = {isa = PBXBuildFile; fileRef = DDB2E8EB4745CFDDD69E8DB3 /* ConversationManagerView.swift */; };
+		EFD5989C8D445F0DFE0F7C50 /* GatewayEventDecoderTests.swift in Sources */ = {isa = PBXBuildFile; fileRef = 8C2DA111F70BEA46894EB760 /* GatewayEventDecoderTests.swift */; };
+		F3D0D0F86ED8C4CB53249498 /* ServerCredentialStore.swift in Sources */ = {isa = PBXBuildFile; fileRef = 101F460205BEE586CDAF6B35 /* ServerCredentialStore.swift */; };
+		F4ACE2C09C74A30A38A491C0 /* GatewayTextSanitizer.swift in Sources */ = {isa = PBXBuildFile; fileRef = 55565EE506A92B03832C77FB /* GatewayTextSanitizer.swift */; };
+		F81AA8F4A15F5672E0754846 /* OllamaServiceContractTests.swift in Sources */ = {isa = PBXBuildFile; fileRef = 15AC2D6AB13C3D6170CB79FE /* OllamaServiceContractTests.swift */; };
+		FA03394B451060BDD9715074 /* KeychainTokenStore.swift in Sources */ = {isa = PBXBuildFile; fileRef = C80F68B64A50982F89EE114B /* KeychainTokenStore.swift */; };
+		FB39B3C138752D39CAA51D72 /* AppModelFeatureTests.swift in Sources */ = {isa = PBXBuildFile; fileRef = 8F6468D590DC2C860FDB6358 /* AppModelFeatureTests.swift */; };
+/* End PBXBuildFile section */
+
+/* Begin PBXContainerItemProxy section */
+		D41A5B509222861A899FC1AC /* PBXContainerItemProxy */ = {
+			isa = PBXContainerItemProxy;
+			containerPortal = EDE4FDAD7FB88A222A9B6D31 /* Project object */;
+			proxyType = 1;
+			remoteGlobalIDString = C3A9E5D4C83E7607567D2AB3;
+			remoteInfo = Cagentic;
+		};
+/* End PBXContainerItemProxy section */
+
+/* Begin PBXFileReference section */
+		032EF1848784E683BD74E9BF /* GatewayEndpointTests.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = GatewayEndpointTests.swift; sourceTree = "<group>"; };
+		06058403B05682CE759E56E3 /* AttachmentStore.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = AttachmentStore.swift; sourceTree = "<group>"; };
+		0F2B22630DD8463EEBB0C542 /* OllamaEndpoint.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = OllamaEndpoint.swift; sourceTree = "<group>"; };
+		0FA4CB173D103B68BBDBF4AB /* OllamaChatChunkDecoder.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = OllamaChatChunkDecoder.swift; sourceTree = "<group>"; };
+		101F460205BEE586CDAF6B35 /* ServerCredentialStore.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = ServerCredentialStore.swift; sourceTree = "<group>"; };
+		141C6BBC649DBF7EC44BB37B /* AttachmentStoreTests.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = AttachmentStoreTests.swift; sourceTree = "<group>"; };
+		15AC2D6AB13C3D6170CB79FE /* OllamaServiceContractTests.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = OllamaServiceContractTests.swift; sourceTree = "<group>"; };
+		17E19EDF35365067D5F7E016 /* AppModels.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = AppModels.swift; sourceTree = "<group>"; };
+		1937A37EA3AAEEB4F224CC37 /* CagenticThemeTests.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = CagenticThemeTests.swift; sourceTree = "<group>"; };
+		1C00CC04491B8AFB9EBDDB85 /* ServerProfileTests.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = ServerProfileTests.swift; sourceTree = "<group>"; };
+		21BA7C1D6214CC3805C19896 /* OllamaClientError.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = OllamaClientError.swift; sourceTree = "<group>"; };
+		26E261A2F8BFA11DD13E57C8 /* ComposerView.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = ComposerView.swift; sourceTree = "<group>"; };
+		2A11FD0C8F1D53019228C27E /* Assets.xcassets */ = {isa = PBXFileReference; lastKnownFileType = folder.assetcatalog; path = Assets.xcassets; sourceTree = "<group>"; };
+		2DC603766EF00A9D15F8BC54 /* CagenticApp.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = CagenticApp.swift; sourceTree = "<group>"; };
+		2DF126A02C8B4595BB22622B /* InterVariable-Italic.ttf */ = {isa = PBXFileReference; lastKnownFileType = file; path = "InterVariable-Italic.ttf"; sourceTree = "<group>"; };
+		30FD528765C943E1AAADB345 /* OllamaRequestContextPlanner.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = OllamaRequestContextPlanner.swift; sourceTree = "<group>"; };
+		36B71E1D3BADE8662C8A146A /* GatewayEventDecoder.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = GatewayEventDecoder.swift; sourceTree = "<group>"; };
+		38445A75CCE5A84597448BA8 /* GatewayModels.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = GatewayModels.swift; sourceTree = "<group>"; };
+		3E7A9F60557178A79582AA73 /* BrandMark.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = BrandMark.swift; sourceTree = "<group>"; };
+		3F5420528E29527D9A870497 /* CagenticTests.xctest */ = {isa = PBXFileReference; includeInIndex = 0; lastKnownFileType = wrapper.cfbundle; path = CagenticTests.xctest; sourceTree = BUILT_PRODUCTS_DIR; };
+		41FBF55BCD20C374E254F60C /* SidebarView.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = SidebarView.swift; sourceTree = "<group>"; };
+		42F6824DF2505703299D223D /* OllamaClient.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = OllamaClient.swift; sourceTree = "<group>"; };
+		44400C93EF15E7A64AC7B6F2 /* MarkdownText.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = MarkdownText.swift; sourceTree = "<group>"; };
+		4642C8AADB0F3A349F78EFCC /* MarkdownRendererTests.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = MarkdownRendererTests.swift; sourceTree = "<group>"; };
+		4DC1F5BC1D396D27E46BB68A /* GatewayClient.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = GatewayClient.swift; sourceTree = "<group>"; };
+		54A7E8EE033C6EE01A045AAF /* ModelPickerView.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = ModelPickerView.swift; sourceTree = "<group>"; };
+		55565EE506A92B03832C77FB /* GatewayTextSanitizer.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = GatewayTextSanitizer.swift; sourceTree = "<group>"; };
+		5D339D385450D8F9E9208C68 /* OllamaEndpointTests.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = OllamaEndpointTests.swift; sourceTree = "<group>"; };
+		5E8F950BCC3416A1F613C74E /* CagenticTheme.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = CagenticTheme.swift; sourceTree = "<group>"; };
+		5FD17B2085CD0B1E965DAA54 /* OllamaModels.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = OllamaModels.swift; sourceTree = "<group>"; };
+		63F36BCC4BB7A02FF31D4E3F /* InterVariable.ttf */ = {isa = PBXFileReference; lastKnownFileType = file; path = InterVariable.ttf; sourceTree = "<group>"; };
+		68924AB478AF7AF78086603B /* Cagentic.app */ = {isa = PBXFileReference; explicitFileType = wrapper.application; includeInIndex = 0; path = Cagentic.app; sourceTree = BUILT_PRODUCTS_DIR; };
+		74777658B088FEA5F7AC6E05 /* AttachmentImporter.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = AttachmentImporter.swift; sourceTree = "<group>"; };
+		755EF2B1D3B8486BF2715B4D /* OllamaResponseDecodingTests.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = OllamaResponseDecodingTests.swift; sourceTree = "<group>"; };
+		75BB7679AF10BFACB65594D5 /* AppRepositoryTests.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = AppRepositoryTests.swift; sourceTree = "<group>"; };
+		7A2006860F74736CA6042D0A /* AppModel.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = AppModel.swift; sourceTree = "<group>"; };
+		7EA0EEDA5B5A00989F4E6A88 /* GatewayTextSanitizerTests.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = GatewayTextSanitizerTests.swift; sourceTree = "<group>"; };
+		829A4CD66A1D8725EC5BCA49 /* MessageRow.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = MessageRow.swift; sourceTree = "<group>"; };
+		848B951ACBDB3DBF696A0394 /* ServerManagerView.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = ServerManagerView.swift; sourceTree = "<group>"; };
+		8C2DA111F70BEA46894EB760 /* GatewayEventDecoderTests.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = GatewayEventDecoderTests.swift; sourceTree = "<group>"; };
+		8F6468D590DC2C860FDB6358 /* AppModelFeatureTests.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = AppModelFeatureTests.swift; sourceTree = "<group>"; };
+		91FD4177D89D9388200AAE26 /* OllamaRequestContextPlannerTests.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = OllamaRequestContextPlannerTests.swift; sourceTree = "<group>"; };
+		998523A493F0350A575D9854 /* GatewayClientError.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = GatewayClientError.swift; sourceTree = "<group>"; };
+		9EDBBD542B632A473FCC0BFD /* RootView.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = RootView.swift; sourceTree = "<group>"; };
+		A08209C2A1ADE502EF1DECD9 /* NetworkAddress.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = NetworkAddress.swift; sourceTree = "<group>"; };
+		B22EB30320DDF8A6AFD7926F /* Info.plist */ = {isa = PBXFileReference; lastKnownFileType = text.plist; path = Info.plist; sourceTree = "<group>"; };
+		B43F5E0658AA6FD37EDFD4E9 /* ChatView.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = ChatView.swift; sourceTree = "<group>"; };
+		B74B48FA3D4022E2C4DAED98 /* AttachmentModels.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = AttachmentModels.swift; sourceTree = "<group>"; };
+		B8C84B35B17C3C57FDE0CBC8 /* AppModelTests.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = AppModelTests.swift; sourceTree = "<group>"; };
+		C5A51E53E18949A06ED5DEAD /* OnboardingView.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = OnboardingView.swift; sourceTree = "<group>"; };
+		C80F68B64A50982F89EE114B /* KeychainTokenStore.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = KeychainTokenStore.swift; sourceTree = "<group>"; };
+		C8C39CDBD7EB28BF408AEF9C /* ConnectionSetupView.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = ConnectionSetupView.swift; sourceTree = "<group>"; };
+		CF7C77A5AD4672840A8FB66F /* SettingsView.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = SettingsView.swift; sourceTree = "<group>"; };
+		DC8F1A7D07B66C75BE1166DF /* Inter-LICENSE.txt */ = {isa = PBXFileReference; lastKnownFileType = text; path = "Inter-LICENSE.txt"; sourceTree = "<group>"; };
+		DDB2E8EB4745CFDDD69E8DB3 /* ConversationManagerView.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = ConversationManagerView.swift; sourceTree = "<group>"; };
+		E73A5E3046ECC2E7B712D34B /* OllamaChatChunkDecoderTests.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = OllamaChatChunkDecoderTests.swift; sourceTree = "<group>"; };
+		E89F1A2A9A50399AC02EA96C /* AppRepository.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = AppRepository.swift; sourceTree = "<group>"; };
+		E91B961D7F0D0AD461B6AEC3 /* ServerProfile.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = ServerProfile.swift; sourceTree = "<group>"; };
+		EF754EADDF0DDBA04224566E /* GatewayEndpoint.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = GatewayEndpoint.swift; sourceTree = "<group>"; };
+		F69DC39A0D7BDC962A85577D /* AppModelGatewayTests.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = AppModelGatewayTests.swift; sourceTree = "<group>"; };
+/* End PBXFileReference section */
+
+/* Begin PBXGroup section */
+		0C14D955AD38E7E0F5A2993A /* Sidebar */ = {
+			isa = PBXGroup;
+			children = (
+				DDB2E8EB4745CFDDD69E8DB3 /* ConversationManagerView.swift */,
+				41FBF55BCD20C374E254F60C /* SidebarView.swift */,
+			);
+			path = Sidebar;
+			sourceTree = "<group>";
+		};
+		314D2AF751909EA16566387E /* Features */ = {
+			isa = PBXGroup;
+			children = (
+				5CEA7EB7E9567A2A07B5AAA2 /* Chat */,
+				76BA8D29405D1001A5147FC8 /* Settings */,
+				0C14D955AD38E7E0F5A2993A /* Sidebar */,
+			);
+			path = Features;
+			sourceTree = "<group>";
+		};
+		31EDE32AB46D3C635F569A1F = {
+			isa = PBXGroup;
+			children = (
+				97FDCD2D119C4AAAD8F40373 /* Cagentic */,
+				877546725D54E55E1C037741 /* CagenticTests */,
+				DBCE177472671BEF79F41BD3 /* Products */,
+			);
+			sourceTree = "<group>";
+		};
+		3A349FAD153DA7911867DBF9 /* Models */ = {
+			isa = PBXGroup;
+			children = (
+				17E19EDF35365067D5F7E016 /* AppModels.swift */,
+				E91B961D7F0D0AD461B6AEC3 /* ServerProfile.swift */,
+			);
+			path = Models;
+			sourceTree = "<group>";
+		};
+		4D6F87B9989F49721B04345E /* Persistence */ = {
+			isa = PBXGroup;
+			children = (
+				E89F1A2A9A50399AC02EA96C /* AppRepository.swift */,
+				C80F68B64A50982F89EE114B /* KeychainTokenStore.swift */,
+				101F460205BEE586CDAF6B35 /* ServerCredentialStore.swift */,
+			);
+			path = Persistence;
+			sourceTree = "<group>";
+		};
+		51F69ACB7B46BF9FF291CB4D /* Fonts */ = {
+			isa = PBXGroup;
+			children = (
+				DC8F1A7D07B66C75BE1166DF /* Inter-LICENSE.txt */,
+				2DF126A02C8B4595BB22622B /* InterVariable-Italic.ttf */,
+				63F36BCC4BB7A02FF31D4E3F /* InterVariable.ttf */,
+			);
+			path = Fonts;
+			sourceTree = "<group>";
+		};
+		5C4C7DD574953832EBAA9FEB /* Attachments */ = {
+			isa = PBXGroup;
+			children = (
+				74777658B088FEA5F7AC6E05 /* AttachmentImporter.swift */,
+				B74B48FA3D4022E2C4DAED98 /* AttachmentModels.swift */,
+				06058403B05682CE759E56E3 /* AttachmentStore.swift */,
+			);
+			path = Attachments;
+			sourceTree = "<group>";
+		};
+		5CEA7EB7E9567A2A07B5AAA2 /* Chat */ = {
+			isa = PBXGroup;
+			children = (
+				B43F5E0658AA6FD37EDFD4E9 /* ChatView.swift */,
+				26E261A2F8BFA11DD13E57C8 /* ComposerView.swift */,
+				44400C93EF15E7A64AC7B6F2 /* MarkdownText.swift */,
+				829A4CD66A1D8725EC5BCA49 /* MessageRow.swift */,
+			);
+			path = Chat;
+			sourceTree = "<group>";
+		};
+		76BA8D29405D1001A5147FC8 /* Settings */ = {
+			isa = PBXGroup;
+			children = (
+				C8C39CDBD7EB28BF408AEF9C /* ConnectionSetupView.swift */,
+				54A7E8EE033C6EE01A045AAF /* ModelPickerView.swift */,
+				848B951ACBDB3DBF696A0394 /* ServerManagerView.swift */,
+				CF7C77A5AD4672840A8FB66F /* SettingsView.swift */,
+			);
+			path = Settings;
+			sourceTree = "<group>";
+		};
+		877546725D54E55E1C037741 /* CagenticTests */ = {
+			isa = PBXGroup;
+			children = (
+				8F6468D590DC2C860FDB6358 /* AppModelFeatureTests.swift */,
+				F69DC39A0D7BDC962A85577D /* AppModelGatewayTests.swift */,
+				B8C84B35B17C3C57FDE0CBC8 /* AppModelTests.swift */,
+				75BB7679AF10BFACB65594D5 /* AppRepositoryTests.swift */,
+				141C6BBC649DBF7EC44BB37B /* AttachmentStoreTests.swift */,
+				1937A37EA3AAEEB4F224CC37 /* CagenticThemeTests.swift */,
+				032EF1848784E683BD74E9BF /* GatewayEndpointTests.swift */,
+				8C2DA111F70BEA46894EB760 /* GatewayEventDecoderTests.swift */,
+				7EA0EEDA5B5A00989F4E6A88 /* GatewayTextSanitizerTests.swift */,
+				4642C8AADB0F3A349F78EFCC /* MarkdownRendererTests.swift */,
+				E73A5E3046ECC2E7B712D34B /* OllamaChatChunkDecoderTests.swift */,
+				5D339D385450D8F9E9208C68 /* OllamaEndpointTests.swift */,
+				91FD4177D89D9388200AAE26 /* OllamaRequestContextPlannerTests.swift */,
+				755EF2B1D3B8486BF2715B4D /* OllamaResponseDecodingTests.swift */,
+				15AC2D6AB13C3D6170CB79FE /* OllamaServiceContractTests.swift */,
+				1C00CC04491B8AFB9EBDDB85 /* ServerProfileTests.swift */,
+			);
+			path = CagenticTests;
+			sourceTree = "<group>";
+		};
+		97FDCD2D119C4AAAD8F40373 /* Cagentic */ = {
+			isa = PBXGroup;
+			children = (
+				E7CE0391DAC10942A3DBDB98 /* App */,
+				5C4C7DD574953832EBAA9FEB /* Attachments */,
+				C761A5240953BF346182E3C5 /* DesignSystem */,
+				314D2AF751909EA16566387E /* Features */,
+				3A349FAD153DA7911867DBF9 /* Models */,
+				A152915AF335F28207F9832A /* Networking */,
+				4D6F87B9989F49721B04345E /* Persistence */,
+				E5210BF0D5DAE8FAE5610651 /* Resources */,
+				D1B6555BD1A775911291E51D /* Views */,
+			);
+			path = Cagentic;
+			sourceTree = "<group>";
+		};
+		A152915AF335F28207F9832A /* Networking */ = {
+			isa = PBXGroup;
+			children = (
+				4DC1F5BC1D396D27E46BB68A /* GatewayClient.swift */,
+				998523A493F0350A575D9854 /* GatewayClientError.swift */,
+				EF754EADDF0DDBA04224566E /* GatewayEndpoint.swift */,
+				36B71E1D3BADE8662C8A146A /* GatewayEventDecoder.swift */,
+				38445A75CCE5A84597448BA8 /* GatewayModels.swift */,
+				55565EE506A92B03832C77FB /* GatewayTextSanitizer.swift */,
+				A08209C2A1ADE502EF1DECD9 /* NetworkAddress.swift */,
+				0FA4CB173D103B68BBDBF4AB /* OllamaChatChunkDecoder.swift */,
+				42F6824DF2505703299D223D /* OllamaClient.swift */,
+				21BA7C1D6214CC3805C19896 /* OllamaClientError.swift */,
+				0F2B22630DD8463EEBB0C542 /* OllamaEndpoint.swift */,
+				5FD17B2085CD0B1E965DAA54 /* OllamaModels.swift */,
+				30FD528765C943E1AAADB345 /* OllamaRequestContextPlanner.swift */,
+			);
+			path = Networking;
+			sourceTree = "<group>";
+		};
+		C761A5240953BF346182E3C5 /* DesignSystem */ = {
+			isa = PBXGroup;
+			children = (
+				3E7A9F60557178A79582AA73 /* BrandMark.swift */,
+				5E8F950BCC3416A1F613C74E /* CagenticTheme.swift */,
+			);
+			path = DesignSystem;
+			sourceTree = "<group>";
+		};
+		D1B6555BD1A775911291E51D /* Views */ = {
+			isa = PBXGroup;
+			children = (
+				C5A51E53E18949A06ED5DEAD /* OnboardingView.swift */,
+			);
+			path = Views;
+			sourceTree = "<group>";
+		};
+		DBCE177472671BEF79F41BD3 /* Products */ = {
+			isa = PBXGroup;
+			children = (
+				68924AB478AF7AF78086603B /* Cagentic.app */,
+				3F5420528E29527D9A870497 /* CagenticTests.xctest */,
+			);
+			name = Products;
+			sourceTree = "<group>";
+		};
+		E5210BF0D5DAE8FAE5610651 /* Resources */ = {
+			isa = PBXGroup;
+			children = (
+				51F69ACB7B46BF9FF291CB4D /* Fonts */,
+				2A11FD0C8F1D53019228C27E /* Assets.xcassets */,
+				B22EB30320DDF8A6AFD7926F /* Info.plist */,
+			);
+			path = Resources;
+			sourceTree = "<group>";
+		};
+		E7CE0391DAC10942A3DBDB98 /* App */ = {
+			isa = PBXGroup;
+			children = (
+				7A2006860F74736CA6042D0A /* AppModel.swift */,
+				2DC603766EF00A9D15F8BC54 /* CagenticApp.swift */,
+				9EDBBD542B632A473FCC0BFD /* RootView.swift */,
+			);
+			path = App;
+			sourceTree = "<group>";
+		};
+/* End PBXGroup section */
+
+/* Begin PBXNativeTarget section */
+		1210C66FAF819FD4C02D2B24 /* CagenticTests */ = {
+			isa = PBXNativeTarget;
+			buildConfigurationList = 7072BF6EA5C28814B4972C40 /* Build configuration list for PBXNativeTarget "CagenticTests" */;
+			buildPhases = (
+				8FE0A8D6506D0959B49F12CD /* Sources */,
+			);
+			buildRules = (
+			);
+			dependencies = (
+				5139FEBF58C810F6089BA810 /* PBXTargetDependency */,
+			);
+			name = CagenticTests;
+			packageProductDependencies = (
+			);
+			productName = CagenticTests;
+			productReference = 3F5420528E29527D9A870497 /* CagenticTests.xctest */;
+			productType = "com.apple.product-type.bundle.unit-test";
+		};
+		C3A9E5D4C83E7607567D2AB3 /* Cagentic */ = {
+			isa = PBXNativeTarget;
+			buildConfigurationList = 303ECB34BA40CC41B7956DCE /* Build configuration list for PBXNativeTarget "Cagentic" */;
+			buildPhases = (
+				BCF1DF57BBB182804AF84128 /* Sources */,
+				C8CD67976F6D0E2000718497 /* Resources */,
+			);
+			buildRules = (
+			);
+			dependencies = (
+			);
+			name = Cagentic;
+			packageProductDependencies = (
+			);
+			productName = Cagentic;
+			productReference = 68924AB478AF7AF78086603B /* Cagentic.app */;
+			productType = "com.apple.product-type.application";
+		};
+/* End PBXNativeTarget section */
+
+/* Begin PBXProject section */
+		EDE4FDAD7FB88A222A9B6D31 /* Project object */ = {
+			isa = PBXProject;
+			attributes = {
+				BuildIndependentTargetsInParallel = YES;
+				LastUpgradeCheck = 2600;
+			};
+			buildConfigurationList = 19AE5A63D6AE7BFAC5FF421F /* Build configuration list for PBXProject "Cagentic" */;
+			developmentRegion = en;
+			hasScannedForEncodings = 0;
+			knownRegions = (
+				Base,
+				en,
+			);
+			mainGroup = 31EDE32AB46D3C635F569A1F;
+			minimizedProjectReferenceProxies = 1;
+			preferredProjectObjectVersion = 77;
+			productRefGroup = DBCE177472671BEF79F41BD3 /* Products */;
+			projectDirPath = "";
+			projectRoot = "";
+			targets = (
+				C3A9E5D4C83E7607567D2AB3 /* Cagentic */,
+				1210C66FAF819FD4C02D2B24 /* CagenticTests */,
+			);
+		};
+/* End PBXProject section */
+
+/* Begin PBXResourcesBuildPhase section */
+		C8CD67976F6D0E2000718497 /* Resources */ = {
+			isa = PBXResourcesBuildPhase;
+			buildActionMask = 2147483647;
+			files = (
+				4C78DB45BCC0CFF482542A4F /* Assets.xcassets in Resources */,
+				C96ADAEFCEFA24AF00FF76D3 /* Inter-LICENSE.txt in Resources */,
+				0D45393681689C0466479825 /* InterVariable-Italic.ttf in Resources */,
+				E676FF6D27ABA33D65A1655F /* InterVariable.ttf in Resources */,
+			);
+			runOnlyForDeploymentPostprocessing = 0;
+		};
+/* End PBXResourcesBuildPhase section */
+
+/* Begin PBXSourcesBuildPhase section */
+		8FE0A8D6506D0959B49F12CD /* Sources */ = {
+			isa = PBXSourcesBuildPhase;
+			buildActionMask = 2147483647;
+			files = (
+				FB39B3C138752D39CAA51D72 /* AppModelFeatureTests.swift in Sources */,
+				66663A1AC25193C4625DB047 /* AppModelGatewayTests.swift in Sources */,
+				3143417927B565D6C25A2B41 /* AppModelTests.swift in Sources */,
+				40D3FBC58A1AD412087DA95C /* AppRepositoryTests.swift in Sources */,
+				011D6C7DD42026FD95142099 /* AttachmentStoreTests.swift in Sources */,
+				468CC0328A89169B3995B95F /* CagenticThemeTests.swift in Sources */,
+				95DBD2CF0175DD0405150EEE /* GatewayEndpointTests.swift in Sources */,
+				EFD5989C8D445F0DFE0F7C50 /* GatewayEventDecoderTests.swift in Sources */,
+				4D66A47A46AA91837FFA4038 /* GatewayTextSanitizerTests.swift in Sources */,
+				6091F2A3C33EFCCC3A9B4BBC /* MarkdownRendererTests.swift in Sources */,
+				AE74B42E4992F00C7EFBB888 /* OllamaChatChunkDecoderTests.swift in Sources */,
+				2CE6D18E7574A28A437BB33D /* OllamaEndpointTests.swift in Sources */,
+				973248AB5E7856EB952B7053 /* OllamaRequestContextPlannerTests.swift in Sources */,
+				1EF99EBC2D2FAD74DB532722 /* OllamaResponseDecodingTests.swift in Sources */,
+				F81AA8F4A15F5672E0754846 /* OllamaServiceContractTests.swift in Sources */,
+				4CFF86292E9CDC6A55560906 /* ServerProfileTests.swift in Sources */,
+			);
+			runOnlyForDeploymentPostprocessing = 0;
+		};
+		BCF1DF57BBB182804AF84128 /* Sources */ = {
+			isa = PBXSourcesBuildPhase;
+			buildActionMask = 2147483647;
+			files = (
+				DD3CF38E1B90D287CC008773 /* AppModel.swift in Sources */,
+				D404ED864688812C2BF8629D /* AppModels.swift in Sources */,
+				503E909E6237D70F63901E4F /* AppRepository.swift in Sources */,
+				E7285D116AC1EE75392510FE /* AttachmentImporter.swift in Sources */,
+				8FBAAE6796F1D26AF5A7BAF3 /* AttachmentModels.swift in Sources */,
+				4B94A266723C6A7B502E30A9 /* AttachmentStore.swift in Sources */,
+				73B44758BDD93731D8DFA961 /* BrandMark.swift in Sources */,
+				E7B83ABBC40CC4404E5EEC87 /* CagenticApp.swift in Sources */,
+				07B8B9175F4C8EE16BC89393 /* CagenticTheme.swift in Sources */,
+				5E6F5B7E43EAABEC237B9C81 /* ChatView.swift in Sources */,
+				37032C779F73A46FCDC2DFEA /* ComposerView.swift in Sources */,
+				6EC8E070FA94054E7F515F17 /* ConnectionSetupView.swift in Sources */,
+				EEC71ACC4D6536DB86D5FE97 /* ConversationManagerView.swift in Sources */,
+				C38BB4BB82CAECFE377136F7 /* GatewayClient.swift in Sources */,
+				347466944E14F73D8AE5EB10 /* GatewayClientError.swift in Sources */,
+				6A93BBBBC7DC5C34C8B7B9E2 /* GatewayEndpoint.swift in Sources */,
+				CD3D5556FBA9FA21EC6C656C /* GatewayEventDecoder.swift in Sources */,
+				6DA5B7B9576D56E1C57F99E1 /* GatewayModels.swift in Sources */,
+				F4ACE2C09C74A30A38A491C0 /* GatewayTextSanitizer.swift in Sources */,
+				FA03394B451060BDD9715074 /* KeychainTokenStore.swift in Sources */,
+				6A69D22335D900F3B6182220 /* MarkdownText.swift in Sources */,
+				7378055BE83D290C68650B0F /* MessageRow.swift in Sources */,
+				5FF1A19228FDCE182476FC34 /* ModelPickerView.swift in Sources */,
+				2400A8D6D6F69CED5101867F /* NetworkAddress.swift in Sources */,
+				DC8639747260E50B3E5B99D0 /* OllamaChatChunkDecoder.swift in Sources */,
+				8171600A2BCD5CB5EA6EAC70 /* OllamaClient.swift in Sources */,
+				ACE3DDC0D196B1B4E9F31293 /* OllamaClientError.swift in Sources */,
+				5E740947A68405B9E78F9F0D /* OllamaEndpoint.swift in Sources */,
+				25DA62D3DA5139391ADFAA57 /* OllamaModels.swift in Sources */,
+				93C2FDBBA1733A409D275FAA /* OllamaRequestContextPlanner.swift in Sources */,
+				BD6B0F694DA65A441E5A23A9 /* OnboardingView.swift in Sources */,
+				67CFEED6ABFD44B2BD12DB5B /* RootView.swift in Sources */,
+				F3D0D0F86ED8C4CB53249498 /* ServerCredentialStore.swift in Sources */,
+				3D939BD19F36C41AFC86EB11 /* ServerManagerView.swift in Sources */,
+				A74D40FDD89D05C32CC2D337 /* ServerProfile.swift in Sources */,
+				6AB4EEBC824B5C8EA9A5E076 /* SettingsView.swift in Sources */,
+				44B3F7554A184AB2EB53C859 /* SidebarView.swift in Sources */,
+			);
+			runOnlyForDeploymentPostprocessing = 0;
+		};
+/* End PBXSourcesBuildPhase section */
+
+/* Begin PBXTargetDependency section */
+		5139FEBF58C810F6089BA810 /* PBXTargetDependency */ = {
+			isa = PBXTargetDependency;
+			target = C3A9E5D4C83E7607567D2AB3 /* Cagentic */;
+			targetProxy = D41A5B509222861A899FC1AC /* PBXContainerItemProxy */;
+		};
+/* End PBXTargetDependency section */
+
+/* Begin XCBuildConfiguration section */
+		2036C1843216545EA22C4280 /* Debug */ = {
+			isa = XCBuildConfiguration;
+			buildSettings = {
+				ASSETCATALOG_COMPILER_APPICON_NAME = AppIcon;
+				ASSETCATALOG_COMPILER_GLOBAL_ACCENT_COLOR_NAME = AccentColor;
+				CODE_SIGN_IDENTITY = "iPhone Developer";
+				DEVELOPMENT_TEAM = W237K258TR;
+				GENERATE_INFOPLIST_FILE = NO;
+				INFOPLIST_FILE = Cagentic/Resources/Info.plist;
+				LD_RUNPATH_SEARCH_PATHS = (
+					"$(inherited)",
+					"@executable_path/Frameworks",
+				);
+				PRODUCT_BUNDLE_IDENTIFIER = com.cagentic.mobile;
+				PRODUCT_NAME = Cagentic;
+				SDKROOT = iphoneos;
+				SUPPORTS_MACCATALYST = NO;
+				TARGETED_DEVICE_FAMILY = "1,2";
+			};
+			name = Debug;
+		};
+		250AF9EBAA3CA07BCD8B5C52 /* Debug */ = {
+			isa = XCBuildConfiguration;
+			buildSettings = {
+				ALWAYS_SEARCH_USER_PATHS = NO;
+				CLANG_ANALYZER_NONNULL = YES;
+				CLANG_ANALYZER_NUMBER_OBJECT_CONVERSION = YES_AGGRESSIVE;
+				CLANG_CXX_LANGUAGE_STANDARD = "gnu++14";
+				CLANG_CXX_LIBRARY = "libc++";
+				CLANG_ENABLE_MODULES = YES;
+				CLANG_ENABLE_OBJC_ARC = YES;
+				CLANG_ENABLE_OBJC_WEAK = YES;
+				CLANG_WARN_BLOCK_CAPTURE_AUTORELEASING = YES;
+				CLANG_WARN_BOOL_CONVERSION = YES;
+				CLANG_WARN_COMMA = YES;
+				CLANG_WARN_CONSTANT_CONVERSION = YES;
+				CLANG_WARN_DEPRECATED_OBJC_IMPLEMENTATIONS = YES;
+				CLANG_WARN_DIRECT_OBJC_ISA_USAGE = YES_ERROR;
+				CLANG_WARN_DOCUMENTATION_COMMENTS = YES;
+				CLANG_WARN_EMPTY_BODY = YES;
+				CLANG_WARN_ENUM_CONVERSION = YES;
+				CLANG_WARN_INFINITE_RECURSION = YES;
+				CLANG_WARN_INT_CONVERSION = YES;
+				CLANG_WARN_NON_LITERAL_NULL_CONVERSION = YES;
+				CLANG_WARN_OBJC_IMPLICIT_RETAIN_SELF = YES;
+				CLANG_WARN_OBJC_LITERAL_CONVERSION = YES;
+				CLANG_WARN_OBJC_ROOT_CLASS = YES_ERROR;
+				CLANG_WARN_QUOTED_INCLUDE_IN_FRAMEWORK_HEADER = YES;
+				CLANG_WARN_RANGE_LOOP_ANALYSIS = YES;
+				CLANG_WARN_STRICT_PROTOTYPES = YES;
+				CLANG_WARN_SUSPICIOUS_MOVE = YES;
+				CLANG_WARN_UNGUARDED_AVAILABILITY = YES_AGGRESSIVE;
+				CLANG_WARN_UNREACHABLE_CODE = YES;
+				CLANG_WARN__DUPLICATE_METHOD_MATCH = YES;
+				COPY_PHASE_STRIP = NO;
+				CURRENT_PROJECT_VERSION = 1;
+				DEBUG_INFORMATION_FORMAT = dwarf;
+				ENABLE_STRICT_OBJC_MSGSEND = YES;
+				ENABLE_TESTABILITY = YES;
+				ENABLE_USER_SCRIPT_SANDBOXING = YES;
+				GCC_C_LANGUAGE_STANDARD = gnu11;
+				GCC_DYNAMIC_NO_PIC = NO;
+				GCC_NO_COMMON_BLOCKS = YES;
+				GCC_OPTIMIZATION_LEVEL = 0;
+				GCC_PREPROCESSOR_DEFINITIONS = (
+					"$(inherited)",
+					"DEBUG=1",
+				);
+				GCC_WARN_64_TO_32_BIT_CONVERSION = YES;
+				GCC_WARN_ABOUT_RETURN_TYPE = YES_ERROR;
+				GCC_WARN_UNDECLARED_SELECTOR = YES;
+				GCC_WARN_UNINITIALIZED_AUTOS = YES_AGGRESSIVE;
+				GCC_WARN_UNUSED_FUNCTION = YES;
+				GCC_WARN_UNUSED_VARIABLE = YES;
+				IPHONEOS_DEPLOYMENT_TARGET = 18.0;
+				MARKETING_VERSION = 1.0.0;
+				MTL_ENABLE_DEBUG_INFO = INCLUDE_SOURCE;
+				MTL_FAST_MATH = YES;
+				ONLY_ACTIVE_ARCH = YES;
+				PRODUCT_NAME = "$(TARGET_NAME)";
+				SDKROOT = iphoneos;
+				SWIFT_ACTIVE_COMPILATION_CONDITIONS = DEBUG;
+				SWIFT_APPROACHABLE_CONCURRENCY = YES;
+				SWIFT_DEFAULT_ACTOR_ISOLATION = MainActor;
+				SWIFT_OPTIMIZATION_LEVEL = "-Onone";
+				SWIFT_STRICT_CONCURRENCY = complete;
+				SWIFT_VERSION = 6.0;
+			};
+			name = Debug;
+		};
+		567DE3342976E7AD6C232143 /* Release */ = {
+			isa = XCBuildConfiguration;
+			buildSettings = {
+				BUNDLE_LOADER = "$(TEST_HOST)";
+				GENERATE_INFOPLIST_FILE = YES;
+				LD_RUNPATH_SEARCH_PATHS = (
+					"$(inherited)",
+					"@executable_path/Frameworks",
+					"@loader_path/Frameworks",
+				);
+				PRODUCT_BUNDLE_IDENTIFIER = com.cagentic.mobile.tests;
+				SDKROOT = iphoneos;
+				TARGETED_DEVICE_FAMILY = "1,2";
+				TEST_HOST = "$(BUILT_PRODUCTS_DIR)/Cagentic.app/$(BUNDLE_EXECUTABLE_FOLDER_PATH)/Cagentic";
+			};
+			name = Release;
+		};
+		67CB21A07AF42D71C700BA05 /* Release */ = {
+			isa = XCBuildConfiguration;
+			buildSettings = {
+				ALWAYS_SEARCH_USER_PATHS = NO;
+				CLANG_ANALYZER_NONNULL = YES;
+				CLANG_ANALYZER_NUMBER_OBJECT_CONVERSION = YES_AGGRESSIVE;
+				CLANG_CXX_LANGUAGE_STANDARD = "gnu++14";
+				CLANG_CXX_LIBRARY = "libc++";
+				CLANG_ENABLE_MODULES = YES;
+				CLANG_ENABLE_OBJC_ARC = YES;
+				CLANG_ENABLE_OBJC_WEAK = YES;
+				CLANG_WARN_BLOCK_CAPTURE_AUTORELEASING = YES;
+				CLANG_WARN_BOOL_CONVERSION = YES;
+				CLANG_WARN_COMMA = YES;
+				CLANG_WARN_CONSTANT_CONVERSION = YES;
+				CLANG_WARN_DEPRECATED_OBJC_IMPLEMENTATIONS = YES;
+				CLANG_WARN_DIRECT_OBJC_ISA_USAGE = YES_ERROR;
+				CLANG_WARN_DOCUMENTATION_COMMENTS = YES;
+				CLANG_WARN_EMPTY_BODY = YES;
+				CLANG_WARN_ENUM_CONVERSION = YES;
+				CLANG_WARN_INFINITE_RECURSION = YES;
+				CLANG_WARN_INT_CONVERSION = YES;
+				CLANG_WARN_NON_LITERAL_NULL_CONVERSION = YES;
+				CLANG_WARN_OBJC_IMPLICIT_RETAIN_SELF = YES;
+				CLANG_WARN_OBJC_LITERAL_CONVERSION = YES;
+				CLANG_WARN_OBJC_ROOT_CLASS = YES_ERROR;
+				CLANG_WARN_QUOTED_INCLUDE_IN_FRAMEWORK_HEADER = YES;
+				CLANG_WARN_RANGE_LOOP_ANALYSIS = YES;
+				CLANG_WARN_STRICT_PROTOTYPES = YES;
+				CLANG_WARN_SUSPICIOUS_MOVE = YES;
+				CLANG_WARN_UNGUARDED_AVAILABILITY = YES_AGGRESSIVE;
+				CLANG_WARN_UNREACHABLE_CODE = YES;
+				CLANG_WARN__DUPLICATE_METHOD_MATCH = YES;
+				COPY_PHASE_STRIP = NO;
+				CURRENT_PROJECT_VERSION = 1;
+				DEBUG_INFORMATION_FORMAT = "dwarf-with-dsym";
+				ENABLE_NS_ASSERTIONS = NO;
+				ENABLE_STRICT_OBJC_MSGSEND = YES;
+				ENABLE_USER_SCRIPT_SANDBOXING = YES;
+				GCC_C_LANGUAGE_STANDARD = gnu11;
+				GCC_NO_COMMON_BLOCKS = YES;
+				GCC_WARN_64_TO_32_BIT_CONVERSION = YES;
+				GCC_WARN_ABOUT_RETURN_TYPE = YES_ERROR;
+				GCC_WARN_UNDECLARED_SELECTOR = YES;
+				GCC_WARN_UNINITIALIZED_AUTOS = YES_AGGRESSIVE;
+				GCC_WARN_UNUSED_FUNCTION = YES;
+				GCC_WARN_UNUSED_VARIABLE = YES;
+				IPHONEOS_DEPLOYMENT_TARGET = 18.0;
+				MARKETING_VERSION = 1.0.0;
+				MTL_ENABLE_DEBUG_INFO = NO;
+				MTL_FAST_MATH = YES;
+				PRODUCT_NAME = "$(TARGET_NAME)";
+				SDKROOT = iphoneos;
+				SWIFT_APPROACHABLE_CONCURRENCY = YES;
+				SWIFT_COMPILATION_MODE = wholemodule;
+				SWIFT_DEFAULT_ACTOR_ISOLATION = MainActor;
+				SWIFT_OPTIMIZATION_LEVEL = "-O";
+				SWIFT_STRICT_CONCURRENCY = complete;
+				SWIFT_VERSION = 6.0;
+			};
+			name = Release;
+		};
+		AC97D2FDAA9D467A9AE881B8 /* Debug */ = {
+			isa = XCBuildConfiguration;
+			buildSettings = {
+				BUNDLE_LOADER = "$(TEST_HOST)";
+				GENERATE_INFOPLIST_FILE = YES;
+				LD_RUNPATH_SEARCH_PATHS = (
+					"$(inherited)",
+					"@executable_path/Frameworks",
+					"@loader_path/Frameworks",
+				);
+				PRODUCT_BUNDLE_IDENTIFIER = com.cagentic.mobile.tests;
+				SDKROOT = iphoneos;
+				TARGETED_DEVICE_FAMILY = "1,2";
+				TEST_HOST = "$(BUILT_PRODUCTS_DIR)/Cagentic.app/$(BUNDLE_EXECUTABLE_FOLDER_PATH)/Cagentic";
+			};
+			name = Debug;
+		};
+		BCEFE26E71DA0AE104B7AEF7 /* Release */ = {
+			isa = XCBuildConfiguration;
+			buildSettings = {
+				ASSETCATALOG_COMPILER_APPICON_NAME = AppIcon;
+				ASSETCATALOG_COMPILER_GLOBAL_ACCENT_COLOR_NAME = AccentColor;
+				CODE_SIGN_IDENTITY = "iPhone Developer";
+				DEVELOPMENT_TEAM = W237K258TR;
+				GENERATE_INFOPLIST_FILE = NO;
+				INFOPLIST_FILE = Cagentic/Resources/Info.plist;
+				LD_RUNPATH_SEARCH_PATHS = (
+					"$(inherited)",
+					"@executable_path/Frameworks",
+				);
+				PRODUCT_BUNDLE_IDENTIFIER = com.cagentic.mobile;
+				PRODUCT_NAME = Cagentic;
+				SDKROOT = iphoneos;
+				SUPPORTS_MACCATALYST = NO;
+				TARGETED_DEVICE_FAMILY = "1,2";
+			};
+			name = Release;
+		};
+/* End XCBuildConfiguration section */
+
+/* Begin XCConfigurationList section */
+		19AE5A63D6AE7BFAC5FF421F /* Build configuration list for PBXProject "Cagentic" */ = {
+			isa = XCConfigurationList;
+			buildConfigurations = (
+				250AF9EBAA3CA07BCD8B5C52 /* Debug */,
+				67CB21A07AF42D71C700BA05 /* Release */,
+			);
+			defaultConfigurationIsVisible = 0;
+			defaultConfigurationName = Debug;
+		};
+		303ECB34BA40CC41B7956DCE /* Build configuration list for PBXNativeTarget "Cagentic" */ = {
+			isa = XCConfigurationList;
+			buildConfigurations = (
+				2036C1843216545EA22C4280 /* Debug */,
+				BCEFE26E71DA0AE104B7AEF7 /* Release */,
+			);
+			defaultConfigurationIsVisible = 0;
+			defaultConfigurationName = Debug;
+		};
+		7072BF6EA5C28814B4972C40 /* Build configuration list for PBXNativeTarget "CagenticTests" */ = {
+			isa = XCConfigurationList;
+			buildConfigurations = (
+				AC97D2FDAA9D467A9AE881B8 /* Debug */,
+				567DE3342976E7AD6C232143 /* Release */,
+			);
+			defaultConfigurationIsVisible = 0;
+			defaultConfigurationName = Debug;
+		};
+/* End XCConfigurationList section */
+	};
+	rootObject = EDE4FDAD7FB88A222A9B6D31 /* Project object */;
+}

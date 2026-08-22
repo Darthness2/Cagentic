@@ -11,6 +11,7 @@ from cagentic import ui
 ROOT = Path(__file__).resolve().parents[1]
 GATEWAY = ROOT / "cagentic" / "gateway_assets"
 EXTENSION = ROOT / "extension"
+IOS = ROOT / "iOS" / "Cagentic"
 
 
 def test_gateway_uses_the_cli_inspired_terminal_palette() -> None:
@@ -37,6 +38,27 @@ def test_gateway_and_extension_share_semantic_state_colors() -> None:
         assert dark in extension and light in extension
 
 
+def test_gateway_extension_and_ios_share_the_product_palette() -> None:
+    gateway = (GATEWAY / "app.css").read_text(encoding="utf-8").lower()
+    extension = (EXTENSION / "theme.css").read_text(encoding="utf-8").lower()
+    ios = (IOS / "DesignSystem" / "CagenticTheme.swift").read_text(encoding="utf-8").lower()
+
+    for dark, light in (
+        ("#0a0c10", "#f7f9fb"),
+        ("#7cc4ff", "#0969da"),
+        ("#e7edf4", "#111820"),
+        ("#b9c2ce", "#46515d"),
+        ("#8f9baa", "#596675"),
+        ("#27313c", "#d0d7de"),
+    ):
+        assert dark in gateway and light in gateway
+        assert dark in extension and light in extension
+        assert dark.removeprefix("#") in ios and light.removeprefix("#") in ios
+
+    background = (EXTENSION / "background.js").read_text(encoding="utf-8").lower()
+    assert 'const cag_accent = "#7cc4ff"' in background
+
+
 def test_extension_shells_use_one_flat_brand_system() -> None:
     popup = (EXTENSION / "popup.html").read_text(encoding="utf-8")
     sidepanel = (EXTENSION / "sidepanel.html").read_text(encoding="utf-8")
@@ -57,10 +79,15 @@ def test_legacy_warm_accents_are_gone_from_product_surfaces() -> None:
         GATEWAY / "app.js",
         ROOT / "cagentic" / "personal_os.py",
         ROOT / "cagentic" / "projects.py",
+        ROOT / "design-system" / "cagentic-gateway" / "MASTER.md",
         EXTENSION / "background.js",
+        EXTENSION / "icons" / "cagentic-mark.svg",
         EXTENSION / "popup.html",
         EXTENSION / "sidepanel.html",
         EXTENSION / "theme.css",
+        IOS / "DesignSystem" / "CagenticTheme.swift",
+        ROOT / "iOS" / "DesignAssets" / "CagenticSpark.svg",
+        ROOT / "iOS" / "DesignAssets" / "generate_app_icons.swift",
     )
     legacy = (
         "#f0a87a",
@@ -71,6 +98,10 @@ def test_legacy_warm_accents_are_gone_from_product_surfaces() -> None:
         "rgba(255,200,120",
         "rgba(229,146,143",
         "rgba(230,192,115",
+        "#c79bd8",
+        "#7b4f92",
+        "#c3a9c9",
+        "#735c7d",
     )
     for path in paths:
         content = path.read_text(encoding="utf-8").lower()
@@ -78,13 +109,26 @@ def test_legacy_warm_accents_are_gone_from_product_surfaces() -> None:
 
 
 def test_cli_palette_is_the_terminal_mapping_of_the_product_roles() -> None:
-    assert ui.DUSK == "\033[38;5;111m"
-    assert ui.GLOW == "\033[38;5;147m"
-    assert ui.PLUM == "\033[38;5;60m"
-    assert ui.GOLD == "\033[38;5;180m"
-    assert ui.WARN == "\033[38;5;214m"
-    assert ui.ERR == "\033[38;5;203m"
-    assert ui.OK == "\033[38;5;114m"
+    assert ui.ACCENT == "\033[38;5;117m"
+    assert ui.ACCENT_BRIGHT == "\033[38;5;153m"
+    assert ui.STRUCTURE == "\033[38;5;67m"
+    assert ui.PRIMARY_TEXT == "\033[38;5;255m"
+    assert ui.SECONDARY_TEXT == "\033[38;5;248m"
+    assert ui.TERTIARY_TEXT == "\033[38;5;245m"
+    assert ui.WARNING == "\033[38;5;179m"
+    assert ui.ERROR == "\033[38;5;174m"
+    assert ui.SUCCESS == "\033[38;5;114m"
+
+    assert ui.DUSK == ui.ACCENT
+    assert ui.GLOW == ui.ACCENT_BRIGHT
+    assert ui.PLUM == ui.STRUCTURE
+    assert ui.GOLD == ui.WARNING
+    assert ui.SURFACE == ui.PRIMARY_TEXT
+    assert ui.MUTED == ui.SECONDARY_TEXT
+    assert ui.SOFT == ui.TERTIARY_TEXT
+    assert ui.WARN == ui.WARNING
+    assert ui.ERR == ui.ERROR
+    assert ui.OK == ui.SUCCESS
 
 
 def test_cli_headings_keep_product_sentence_case(monkeypatch, capsys) -> None:

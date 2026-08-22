@@ -116,8 +116,7 @@
       </button>
       <input id="fileInput" type="file" multiple hidden />
       <label class="sr-only" for="input">Message Cagentic</label>
-      <span id="composerHint" class="sr-only">Cagentic can make mistakes. Check important information.</span>
-      <textarea id="input" rows="1" placeholder="Ask Cagentic&#8230;" aria-describedby="composerHint"></textarea>
+      <textarea id="input" rows="1" placeholder="Ask Cagentic&#8230;"></textarea>
       <button id="micBtn" class="icon-action" type="button" title="Voice input (Ctrl+M)" aria-label="Voice input">
         <svg class="ico" aria-hidden="true"><use href="#i-mic"/></svg>
       </button>
@@ -135,7 +134,6 @@
       <div id="starterPromptList" class="quick-cards"></div>
     </div>
     <div class="cmd-footer">
-      <span class="composer-note" aria-hidden="true">Cagentic can make mistakes. Check important information.</span>
       <span id="hintText" class="keyboard-hint">Enter to send &bull; Shift+Enter for a new line</span>
       <span id="busyLabel" class="busy-label hidden" role="status" aria-live="polite">Thinking&#8230;</span>
       <span id="tokenStats" class="token-stats hidden"></span>

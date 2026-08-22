@@ -83,20 +83,31 @@ MAGENTA = "\033[35m"
 CYAN = "\033[36m"
 GRAY = "\033[90m"
 
-# Semantic 256-color palette.  The graphite/indigo base is deliberately
-# restrained: color communicates hierarchy and state instead of decorating
-# every line.  The historical names stay public because other modules import
-# them, but each now maps to one semantic role.
-DUSK = "\033[38;5;111m"  # primary blue
-GLOW = "\033[38;5;147m"  # bright indigo; brand and prompt
-PLUM = "\033[38;5;60m"  # structural slate
-GOLD = "\033[38;5;180m"  # focused accent
-SURFACE = "\033[38;5;252m"  # primary text
-MUTED = "\033[38;5;245m"  # secondary text
-SOFT = "\033[38;5;242m"  # tertiary text and rules
-WARN = "\033[38;5;214m"  # warning amber
-ERR = "\033[38;5;203m"  # error red
-OK = "\033[38;5;114m"  # success green
+# Semantic 256-color mapping of the live gateway theme. Terminals control their
+# own background and font, so the CLI carries the website identity through one
+# cool-blue accent, neutral hierarchy, and the same state hues. Historical
+# names remain public aliases because other modules and third-party tools import
+# them directly.
+ACCENT = "\033[38;5;117m"  # closest xterm blue to gateway #7cc4ff
+ACCENT_BRIGHT = "\033[38;5;153m"  # brighter value of the same cool-blue hue
+STRUCTURE = "\033[38;5;67m"  # cool slate for rails and separators
+PRIMARY_TEXT = "\033[38;5;255m"
+SECONDARY_TEXT = "\033[38;5;248m"
+TERTIARY_TEXT = "\033[38;5;245m"
+WARNING = "\033[38;5;179m"
+ERROR = "\033[38;5;174m"
+SUCCESS = "\033[38;5;114m"
+
+DUSK = ACCENT
+GLOW = ACCENT_BRIGHT
+PLUM = STRUCTURE
+GOLD = WARNING
+SURFACE = PRIMARY_TEXT
+MUTED = SECONDARY_TEXT
+SOFT = TERTIARY_TEXT
+WARN = WARNING
+ERR = ERROR
+OK = SUCCESS
 
 
 def _supports_color(stream=None) -> bool:
@@ -327,7 +338,7 @@ def render_markdown(text: str, *, line_start: bool = True) -> str:
         rendered_lines: list[str] = []
         for line in body.splitlines():
             rail = color("│ ", PLUM) if styled else "│ "
-            code = color(line, GOLD) if styled else line
+            code = color(line, SURFACE) if styled else line
             rendered_lines.append(rail + code)
         rendered = "\n".join(rendered_lines)
         placeholders.append(rendered)
@@ -336,7 +347,7 @@ def render_markdown(text: str, *, line_start: bool = True) -> str:
     out = _MD_FENCE_RX.sub(_stash_block, text)
 
     def _stash_inline(m: re.Match) -> str:
-        rendered = color(m.group(1), GOLD + BOLD) if styled else m.group(1)
+        rendered = color(m.group(1), DUSK + BOLD) if styled else m.group(1)
         placeholders.append(rendered)
         return f"\x00INL{len(placeholders) - 1}\x00"
 
@@ -386,7 +397,7 @@ def render_markdown(text: str, *, line_start: bool = True) -> str:
     def _step(m: "re.Match[str]") -> str:
         n, total = m.group(1), m.group(2)
         label = f"Step {n} of {total}" if total else f"Step {n}"
-        rendered = color(label, GOLD + BOLD) if styled else label
+        rendered = color(label, DUSK + BOLD) if styled else label
         return "\n" + rendered + "\n"
 
     out = _MD_STEP_RX.sub(_step, out)
@@ -920,7 +931,7 @@ class Spinner:
     def __init__(
         self,
         label: str = "thinking",
-        color_c: str = GOLD,
+        color_c: str = DUSK,
         escalations: list[tuple[float, str]] | None = None,
     ) -> None:
         """`escalations` is an optional list of (after_seconds, label) pairs
@@ -1242,7 +1253,7 @@ def plan(items: list[str]) -> None:
         prefix = f"  {i:>2}  "
         lines = _wrap_visible(sanitize(step), max(1, width() - _vlen(prefix)))
         for line_index, line in enumerate(lines or [""]):
-            lead = color(prefix, GOLD) if line_index == 0 else " " * _vlen(prefix)
+            lead = color(prefix, DUSK) if line_index == 0 else " " * _vlen(prefix)
             print(lead + color(line, SURFACE))
     print()
 

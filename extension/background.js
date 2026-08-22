@@ -7,7 +7,7 @@
 
 const DEFAULT_PORT = 8765;
 // The brand hue, kept in step with --accent in gateway_assets/app.css.
-const CAG_ACCENT = "#c79bd8";   // dusk mauve
+const CAG_ACCENT = "#7cc4ff";   // gateway blue, for injected dark-page chrome
 let looping = false;
 let authFailing = false;        // bridge is rejecting our token (403)
 let cagGroupId = null;          // id of the "Cagentic" tab group
@@ -454,7 +454,7 @@ async function ensureGroup(tabId) {
     if (cagGroupId == null) {
       cagGroupId = await chrome.tabs.group({ tabIds: [tabId] });
       await chrome.tabGroups.update(cagGroupId, {
-        title: "Cagentic", color: "purple",
+        title: "Cagentic", color: "blue",
       });
       return;
     }

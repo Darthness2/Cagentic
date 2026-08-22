@@ -1,22 +1,22 @@
-/* Shared Cagentic extension tokens. The gateway and terminal mappings live in
-   design-system/cagentic-gateway/MASTER.md. Keep this intentionally small: the
-   popup and side panel remain native to their jobs while sharing one identity. */
+/* Shared Cagentic extension tokens. These mirror the live gateway palette in
+   cagentic/gateway_assets/app.css. Keep this intentionally small: the popup
+   and side panel remain native to their jobs while sharing one identity. */
 :root {
   color-scheme: dark;
-  --cag-bg: #151118;
-  --cag-stage: #120f16;
-  --cag-elev: #1d1822;
+  --cag-bg: #0a0c10;
+  --cag-stage: #06080b;
+  --cag-elev: #10141a;
   --cag-surface: rgba(255, 255, 255, .028);
   --cag-surface-2: rgba(0, 0, 0, .22);
-  --cag-border: #332b38;
-  --cag-border-hover: rgba(199, 155, 216, .35);
-  --cag-text: #f0eaf2;
-  --cag-text-2: #a99fb1;
-  --cag-text-3: #8a8292;
-  --cag-accent: #c79bd8;
-  --cag-accent-layer: rgba(199, 155, 216, .08);
-  --cag-focus: rgba(199, 155, 216, .32);
-  --cag-on-accent: #151118;
+  --cag-border: #27313c;
+  --cag-border-hover: rgba(124, 196, 255, .38);
+  --cag-text: #e7edf4;
+  --cag-text-2: #b9c2ce;
+  --cag-text-3: #8f9baa;
+  --cag-accent: #7cc4ff;
+  --cag-accent-layer: rgba(124, 196, 255, .08);
+  --cag-focus: rgba(124, 196, 255, .32);
+  --cag-on-accent: #06101a;
   --cag-ok: #8ecf95;
   --cag-warn: #d9c069;
   --cag-error: #d98a87;
@@ -33,19 +33,19 @@
 @media (prefers-color-scheme: light) {
   :root {
     color-scheme: light;
-    --cag-bg: #f7f4f9;
-    --cag-stage: #fdfbfe;
+    --cag-bg: #f7f9fb;
+    --cag-stage: #ffffff;
     --cag-elev: #ffffff;
     --cag-surface: rgba(0, 0, 0, .022);
     --cag-surface-2: rgba(0, 0, 0, .045);
-    --cag-border: #ded5e4;
-    --cag-border-hover: rgba(123, 79, 146, .4);
-    --cag-text: #221c27;
-    --cag-text-2: #5d5366;
-    --cag-text-3: #6f6a7c;
-    --cag-accent: #7b4f92;
-    --cag-accent-layer: rgba(123, 79, 146, .07);
-    --cag-focus: rgba(123, 79, 146, .22);
+    --cag-border: #d0d7de;
+    --cag-border-hover: rgba(9, 105, 218, .42);
+    --cag-text: #111820;
+    --cag-text-2: #46515d;
+    --cag-text-3: #596675;
+    --cag-accent: #0969da;
+    --cag-accent-layer: rgba(9, 105, 218, .07);
+    --cag-focus: rgba(9, 105, 218, .24);
     --cag-on-accent: #ffffff;
     --cag-ok: #2f7d43;
     --cag-warn: #8a6d10;

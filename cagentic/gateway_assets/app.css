@@ -1910,7 +1910,6 @@ body {
   position: relative; justify-content: center; max-width: var(--content-w);
   min-height: 18px; margin-top: var(--s-2); text-align: center;
 }
-.composer-note { color: var(--text-dim); }
 .keyboard-hint { position: absolute; right: 0; color: var(--text-dim); }
 .busy-label, .token-stats { position: absolute; left: 0; }
 
@@ -2151,7 +2150,6 @@ body {
 .cmd-footer {
   display: grid; grid-template-columns: minmax(0, 1fr) auto minmax(0, 1fr);
 }
-.composer-note { grid-column: 2; grid-row: 1; }
 .keyboard-hint {
   display: none; position: static; grid-column: 3; grid-row: 1; justify-self: end; white-space: nowrap;
 }
