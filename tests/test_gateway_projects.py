@@ -273,7 +273,10 @@ def test_first_successful_turn_gets_one_ai_generated_title(tmp_path, monkeypatch
         title_requests.append((model, messages))
         return {"content": "Gateway Reliability Fixes"}
 
-    def fake_turn(message):
+    # run_turn calls submit_message(model_message, display_prompt=...); a stub that
+    # only takes the positional arg raises TypeError, which run_turn's broad handler
+    # turns into an "error" event, so the turn never completes and no title is built.
+    def fake_turn(message, **_kwargs):
         gw.engine.messages.extend(
             [
                 {"role": "user", "content": message},
@@ -305,7 +308,10 @@ def test_ai_title_generation_does_not_block_new_chat(tmp_path, monkeypatch):
         assert release_title.wait(2)
         return {"content": "Original Chat Title"}
 
-    def fake_turn(message):
+    # run_turn calls submit_message(model_message, display_prompt=...); a stub that
+    # only takes the positional arg raises TypeError, which run_turn's broad handler
+    # turns into an "error" event, so the turn never completes and no title is built.
+    def fake_turn(message, **_kwargs):
         gw.engine.messages.extend(
             [
                 {"role": "user", "content": message},

@@ -1745,6 +1745,7 @@ class Gateway:
         except _ClientGone:
             raise
         except Exception as e:
+            _log.warning("gateway edit_and_resend turn failed", exc_info=True)
             emit("error", {"text": f"{type(e).__name__}: {e}"})
         finally:
             self._active_emit = None
@@ -1797,6 +1798,11 @@ class Gateway:
         except _ClientGone:
             raise
         except Exception as e:
+            # The emit callback may discard this (a headless caller, a dead SSE
+            # client, a test stub), so log the traceback too. Flattening every
+            # failure into an "error" event once hid a broken submit_message call
+            # signature behind a test that failed on a missing chat title instead.
+            _log.warning("gateway turn failed", exc_info=True)
             emit("error", {"text": f"{type(e).__name__}: {e}"})
         finally:
             self._active_emit = None
