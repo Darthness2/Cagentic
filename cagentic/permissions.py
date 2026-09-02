@@ -96,6 +96,11 @@ READ_ONLY: set[str] = {
     "gh_list_pulls",
     "gh_get_pull",
     "gh_search_code",
+    # Local git reads. Inspecting the work tree is exactly as harmless as
+    # read_file — git_commit is the one that writes, and it is not here.
+    "git_status",
+    "git_diff",
+    "git_log",
 }
 
 
@@ -213,11 +218,17 @@ def _read_rules(blob: object) -> dict[str, list[str]]:
     return out
 
 
-def _project_rules(workspace: Path | None) -> dict[str, list[str]]:
-    """Rules declared by the workspace itself, if any."""
-    merged: dict[str, list[str]] = {"allow": [], "deny": []}
+def project_settings(workspace: Path | None) -> list[tuple[str, dict]]:
+    """[(filename, document)] for each project settings file that exists.
+
+    Kept as a list rather than one merged dict because the two files are not
+    equally trusted: `settings.json` is committed and arrives with `git clone`,
+    `settings.local.json` is the developer's own and gitignored. Callers that
+    honour a setting which can run code must only honour it from the local one.
+    """
+    out: list[tuple[str, dict]] = []
     if workspace is None:
-        return merged
+        return out
     for filename in PROJECT_SETTINGS_FILES:
         path = workspace / PROJECT_SETTINGS_DIR / filename
         try:
@@ -231,12 +242,20 @@ def _project_rules(workspace: Path | None) -> dict[str, list[str]]:
                 data = json.loads(path.read_text(encoding="utf-8"))
             except (OSError, ValueError):
                 # A malformed project settings file must not break the agent;
-                # it just contributes no rules.
+                # it just contributes nothing.
                 _log.warning("ignoring unreadable %s", path)
                 data = {}
             cached = (mtime, data if isinstance(data, dict) else {})
             _PROJECT_CACHE[key] = cached
-        rules = _read_rules((cached[1] or {}).get("permissions"))
+        out.append((filename, cached[1] or {}))
+    return out
+
+
+def _project_rules(workspace: Path | None) -> dict[str, list[str]]:
+    """Rules declared by the workspace itself, if any."""
+    merged: dict[str, list[str]] = {"allow": [], "deny": []}
+    for _filename, data in project_settings(workspace):
+        rules = _read_rules(data.get("permissions"))
         merged["allow"].extend(rules["allow"])
         merged["deny"].extend(rules["deny"])
     return merged
@@ -282,6 +301,48 @@ def _is_workspace_edit(name: str, args: dict, state: AppState) -> bool:
     return True
 
 
+# Named approval modes, for surfaces that want to offer one choice instead of four
+# switches. They are a *view* over the flags below, not a replacement: `dry_run`,
+# deny rules and plan mode all still outrank whatever mode is set, which is what
+# keeps "unrestricted" from being a way to disarm a standing "never run rm -rf".
+#
+#   restricted    the default. Reading is silent; writing, shell and network ask.
+#   ask_all       every tool asks, reading included.
+#   unrestricted  nothing asks.
+CHAT_MODES: dict[str, dict[str, bool]] = {
+    "restricted": {"yolo": False, "ask_all": False},
+    "ask_all": {"yolo": False, "ask_all": True},
+    "unrestricted": {"yolo": True, "ask_all": False},
+}
+DEFAULT_CHAT_MODE = "restricted"
+
+MODE_TITLES: dict[str, str] = {
+    "restricted": "Restricted",
+    "ask_all": "Ask for everything",
+    "unrestricted": "Unrestricted",
+}
+
+
+def normalize_mode(name: str | None) -> str:
+    """The mode a caller asked for, or the default if it is not one we have."""
+    candidate = str(name or "").strip().lower().replace("-", "_").replace(" ", "_")
+    return candidate if candidate in CHAT_MODES else DEFAULT_CHAT_MODE
+
+
+def mode_flags(name: str | None) -> dict[str, bool]:
+    """The state switches a mode stands for."""
+    return dict(CHAT_MODES[normalize_mode(name)])
+
+
+def current_mode(state: AppState) -> str:
+    """Which named mode a state is currently in."""
+    if getattr(state, "yolo", False):
+        return "unrestricted"
+    if getattr(state, "ask_all", False):
+        return "ask_all"
+    return "restricted"
+
+
 def can_use_tool(
     name: str,
     args: dict,
@@ -318,7 +379,12 @@ def can_use_tool(
     ):
         return False, "plan mode active — mutating tools blocked"
 
-    if name in READ_ONLY:
+    # Reading is normally silent — a turn can open a dozen files and prompting for
+    # each would make approval meaningless through sheer volume. "Ask for
+    # everything" is the deliberate opt-out, for watching exactly what a model
+    # touches. It sits above the allow rules so a standing approval cannot quietly
+    # switch it back off, the same way plan mode does.
+    if name in READ_ONLY and not getattr(state, "ask_all", False):
         return True, "read-only tool"
 
     allowed = _matching_rule(rules["allow"], name, args)
@@ -457,6 +523,9 @@ def terminal_resolver(name: str, args: dict, state: AppState) -> str:
     elif name.startswith("gh_") or name == "github_api":
         action = "Change GitHub data"
         detail = args.get("repo") or args.get("repository") or name
+    elif name == "git_commit":
+        action = "Commit to git"
+        detail = str(args.get("message", "")).splitlines()[0][:80]
 
     print()
     ui.heading("Approval required")

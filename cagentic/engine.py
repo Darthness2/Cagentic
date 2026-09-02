@@ -14,7 +14,7 @@ from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Any, Callable, Iterator, Literal
 
-from . import ui
+from . import hooks, ui
 from .background import BackgroundExecutor
 from .config import set_model_capability
 from .ollama_client import OllamaClient, OllamaError, ToolsUnsupportedError
@@ -22,6 +22,7 @@ from .permissions import CONCURRENT_SAFE, Resolver, auto_deny_resolver, can_use_
 from .services.compact import (
     BOUNDARY_MARKER,
     SUMMARY_MARKER,
+    approx_schema_tokens,
     manage_context,
 )
 from .services.compact import (
@@ -30,6 +31,7 @@ from .services.compact import (
 from .services.transcript import record as record_transcript
 from .state import AppState
 from .tasks import TaskGraph, TaskKind, new_id
+from .tool_labels import describe_tool, label_pair
 from .tools import ToolContext, all_tool_schemas, dispatch
 
 _log = logging.getLogger(__name__)
@@ -55,6 +57,9 @@ COMPACT_TOKENS = 32000
 # Leave headroom for the model's reply and the next few tool results rather
 # than compacting the instant the window is nominally full.
 COMPACT_FRACTION = 0.6
+# Above this share of the window, the tool definitions are squeezing the
+# conversation hard enough to be worth saying out loud.
+TOOL_SCHEMA_WARN_FRACTION = 0.5
 # Don't let a tiny configured window produce a threshold so small that every
 # single turn triggers a compact.
 COMPACT_MIN_TOKENS = 4000
@@ -76,6 +81,7 @@ EventKind = Literal[
     "tool_denied",
     "tool_result",
     "info",
+    "context",
     "warn",
     "error",
     "compact",
@@ -89,6 +95,36 @@ class Message:
     data: dict = field(default_factory=dict)
     task_id: str | None = None
 
+
+# A provider that refuses because the prompt is too long reports the only token
+# counts that matter: its own. Ours are an estimate, and when they disagree the
+# tokenizer wins.
+_CONTEXT_OVERFLOW_RX = re.compile(
+    r"exceed(?:s|_)?[ _]?(?:the available )?context[ _]?size", re.IGNORECASE
+)
+_PROMPT_TOKENS_RX = re.compile(r'"?n_prompt_tokens"?\D{0,4}(\d+)')
+_CONTEXT_SIZE_RX = re.compile(r'"?n_ctx"?\D{0,4}(\d+)')
+_TOKEN_PAIR_RX = re.compile(r"\((\d+)\s*tokens?\)[^()]*\((\d+)\s*tokens?\)")
+
+
+def _context_overflow(text: str) -> tuple[int, int] | None:
+    """Return (prompt tokens, context limit) when a refusal is about length."""
+    if not _CONTEXT_OVERFLOW_RX.search(text):
+        return None
+    prompt = _PROMPT_TOKENS_RX.search(text)
+    limit = _CONTEXT_SIZE_RX.search(text)
+    if prompt and limit:
+        return int(prompt.group(1)), int(limit.group(1))
+    # Fall back to the human sentence: "request (11582 tokens) exceeds the
+    # available context size (8192 tokens)".
+    pair = _TOKEN_PAIR_RX.search(text)
+    if pair:
+        return int(pair.group(1)), int(pair.group(2))
+    return None
+
+
+# Tools that only make sense when something renders their output.
+_PANEL_TOOLS = frozenset({"show_widget"})
 
 _TOOL_TAG_RX = re.compile(r"<tool>\s*(\{.*?\})\s*</tool>", re.DOTALL)
 _PLAN_RX = re.compile(r"<plan>(.*?)</plan>", re.DOTALL | re.IGNORECASE)
@@ -335,12 +371,164 @@ def _effort_section(effort: str | None) -> str:
     return f"\n\n=== EFFORT LEVEL: {level.upper()} ===\n{_EFFORT_GUIDANCE[level]}\n"
 
 
+_TOOL_SECTIONS: tuple[tuple[str, str], ...] = (
+    # Knowledge base
+    (
+        "notes",
+        '- **Knowledge base** (note_write, note_get, note_list, note_search, note_delete):\n  use these to REMEMBER things across sessions. When the user mentions a fact\n  worth keeping ("my partner\'s name is X", "I\'m allergic to Y", "my work hours\n  are 9-5"), save it to a sensible note (e.g. note_write name="profile" body="..."\n  append=true). Read notes proactively when context suggests they\'re relevant\n  ("what should I make for dinner?" → note_get "food-preferences"). Whenever\n  you learn something durable about {user_name} or their world, save it —\n  don\'t wait to be asked.',
+    ),
+    # Past conversations
+    (
+        "notes",
+        '- **Past conversations** (chat_search, chat_get): every previous chat with\n  {user_name} is searchable. When they reference something discussed before\n  ("that restaurant we talked about", "the plan from last week"), run\n  chat_search with a likely phrase, then chat_get the matching id for full\n  context. Prefer this over guessing or asking them to repeat themselves.',
+    ),
+    # Reminders
+    (
+        "reminders",
+        '- **Reminders** (reminder_add, reminder_list, reminder_done, reminder_delete,\n  reminder_update): persistent to-dos. Always use reminder_add when the user\n  says "remind me to X" — never let it live only in chat history.',
+    ),
+    # Personal OS
+    (
+        "life",
+        "- **Personal OS** (goal_create, goal_list, goal_update, goal_delete,\n  calendar_event_add, calendar_event_list, calendar_event_update,\n  calendar_event_delete, personal_briefing, calendar_connection_create,\n  calendar_connection_list, calendar_connection_sync, inbox_capture, inbox_list,\n  inbox_update, email_connection_create, email_connection_list,\n  email_connection_sync, routine_create, routine_list, routine_update): maintain the user's goals and\n  schedule as durable structured data. Use these whenever the user sets a\n  goal, reports progress, plans an event, or asks what deserves attention.\n  Check personal_briefing when planning the day and proactively mention real\n  conflicts or urgent deadlines without manufacturing urgency. Calendar\n  connections support iCalendar feeds and CalDAV; never expose stored\n  credentials, and get approval before adding or syncing a connection. The\n  unified inbox stores quick captures and email headers locally; IMAP sync does\n  not download message bodies. Proactive routines run on user-defined local\n  schedules and surface durable notifications.",
+    ),
+    # Web
+    (
+        "web",
+        "- **Web** (web_search, web_fetch): for anything current. Search first, fetch\n  the most promising result. Pass text_only=true to web_fetch when reading\n  articles to strip noise.",
+    ),
+    # MCP
+    (
+        "mcp",
+        "- **MCP** (mcp_list_servers, mcp_list_tools, mcp_call, mcp_list_resources,\n  mcp_read_resource): bridges to Notion, Google Drive, Slack, etc. If a\n  request needs one of those, run mcp_list_servers first to see what's\n  configured, then mcp_list_tools to discover the right call, then mcp_call.",
+    ),
+    # Browser
+    (
+        "browser",
+        "- **Browser** (browser_status, browser_tabs, browser_read, browser_links,\n  browser_open, browser_navigate, browser_click, browser_fill,\n  browser_scroll, browser_screenshot, browser_click_at, browser_download,\n  browser_eval, browser_close): control the user's Chrome browser through\n  the companion extension. Call browser_status FIRST — if not connected,\n  tell the user to run /browser and stop. Then browser_read for plain\n  pages, browser_tabs to list tabs, browser_open / browser_navigate to go\n  places, and browser_click / browser_fill to act.\n  Dynamic / framework-rendered pages (Google Drive, Classroom, React\n  apps): browser_read often returns very little because the content is\n  rendered after page load. Use browser_links to enumerate every\n  clickable thing with its text and href without going through eval.\n  When a click won't land — strict CSP, Shadow DOM, framework swallows\n  .click() — fall back to browser_screenshot then browser_click_at with\n  the (x, y) of the target.\n  When the user asks you to DOWNLOAD or PROCESS a file from a logged-in\n  site, use browser_download with the file's URL — your session cookies\n  are sent, so Google Drive / Docs export URLs work directly:\n    https://docs.google.com/document/d/<ID>/export?format=txt\n    https://docs.google.com/presentation/d/<ID>/export/txt\n    https://docs.google.com/presentation/d/<ID>/export/pdf\n    https://drive.google.com/uc?export=download&id=<ID>\n  Then read_file the saved path to use the contents.",
+    ),
+    # Files
+    (
+        "files",
+        "- **Files** (read_file, write_file, edit_file, list_dir, grep, glob): edit\n  any file on disk. Use absolute paths or set_workspace into the right dir.\n  read_file also pulls the text out of PDF and Word (.docx) documents — so\n  you can read résumés, contracts, letters, and reports directly. Just call\n  read_file on the .pdf / .docx path; don't ask the user to convert it.",
+    ),
+    # Shell
+    (
+        "shell",
+        "- **Shell** (run_bash, powershell): for opening apps, running scripts, etc.\n  Each call asks the user to approve.",
+    ),
+    # Background
+    ("shell", "- **Background** (bash_async, task_status, task_wait): for slow commands."),
+    # Coding
+    (
+        "coding",
+        "- **Coding** (multi_edit, check_syntax, notebook_edit, push_workspace /\n  pop_workspace): for real programming work. Batch several edits to one\n  file atomically with multi_edit; after editing code, run check_syntax on\n  the changed files to confirm they still parse (it never executes them);\n  edit Jupyter notebooks cell-by-cell with notebook_edit; use the worktree\n  stack when a sub-task lives in its own directory.",
+    ),
+    # Git
+    (
+        "git",
+        "- **Git** (git_status, git_diff, git_log, git_commit): review and record your\n  own work. git_status for what changed, git_diff for the actual lines,\n  git_log to match the project's commit style. Before committing, read the\n  diff and write the message from what it does — not from what you set out\n  to do. Push, fetch, reset and rebase are deliberately not here; use\n  run_bash for those so the user sees the exact command.",
+    ),
+    # Sub-agents
+    (
+        "subagent",
+        "- **Sub-agents** (agent_call, agent_call_async): fork a focused helper on a\n  fresh conversation for a self-contained subtask (big searches, summaries)\n  so the main context stays clean. Use the async variant for long research.",
+    ),
+    # Persistent tasks
+    (
+        "tasks",
+        "- **Persistent tasks** (task_create, task_update, task_get, task_list,\n  task_delete, brief): a cross-session task graph for multi-step projects —\n  create tasks with dependencies, mark them done as you go.",
+    ),
+)
+
+
+_CODING_WORKFLOW = """
+
+Working on code:
+- Read a file before you change it. Edit from what is actually there, not from
+  what you remember or expect — and if an edit is refused because the file
+  changed on disk, re-read it rather than forcing the write.
+- Prefer edit_file (or multi_edit for several changes to one file) over
+  write_file. A targeted edit leaves the rest of the file alone; rewriting a
+  whole file to change three lines loses anything you did not think to keep.
+- Match the code around you: its naming, its error handling, its comment
+  density. A change should be hard to pick out of the file it lands in.
+- Verify before you claim. Run the project's own tests or build — look in
+  AGENTS.md, README, or the package manifest for the real command rather than
+  guessing at one — and read the output. "Should work" is not a result.
+- When something fails, read the actual error before changing anything. Fix the
+  cause you found, not the first plausible one.
+- Say what you actually did. If the tests fail, or you skipped part of the task,
+  or you are unsure a change is right, say so plainly.
+"""
+
+
+def _skills_section(workspace: Path) -> str:
+    """Tell the model which skills it can load, and what each one is for.
+
+    The skill tool existed and resolved project-over-user correctly, but nothing
+    ever mentioned skills in the prompt — so the only way the model learned they
+    existed was by calling `tool_search` on a hunch. A named list with summaries
+    is the difference between a feature and a directory nobody reads.
+    """
+    try:
+        from .project_scope import describe_skills
+
+        found = describe_skills(workspace)
+    except Exception:
+        return ""
+    if not found:
+        return ""
+    lines = "\n".join(
+        f"- {name}: {summary}" if summary else f"- {name}" for name, _origin, summary in found
+    )
+    return (
+        '\n\nSkills available (load one with the `skill` tool, op="use", when it fits '
+        "the request — its instructions then apply for the rest of the session):\n" + lines
+    )
+
+
+def _coding_section(groups: set[str]) -> str:
+    """Guidance for editing code, when the model has the tools to do it.
+
+    Nothing in the base prompt used to describe how to write software: across
+    1,300 words it said "code" once and "test" not at all. The tool list
+    explained which tools existed and nothing explained the loop they are for.
+    """
+    return _CODING_WORKFLOW if {"files", "coding"} & groups else ""
+
+
+def _tool_sections(groups: set[str], user_name: str) -> str:
+    """Describe only the tools the model actually has this turn.
+
+    The prompt used to list every tool group unconditionally — roughly a
+    thousand tokens telling the model about a browser bridge, a calendar and a
+    reminder store it had not been given. That is worse than merely wasteful:
+    a model that believes it can call `reminder_add` will try, and spend a turn
+    discovering it cannot. The tool groups are the source of truth, so the
+    prompt follows them.
+    """
+    seen: set[str] = set()
+    out: list[str] = []
+    for group, text in _TOOL_SECTIONS:
+        if group in groups and text not in seen:
+            seen.add(text)
+            out.append(text.format(user_name=user_name))
+    return "\n".join(out)
+
+
 def fetch_system_prompt_parts(state: AppState) -> str:
     """Assemble the personal-assistant system prompt."""
+    from .tools import DEFAULT_GROUPS, resolve_groups
+
     workspace = state.workspace
     home = state.home
     user_name = state.user_name or "the user"
     tools_enabled = state.tools_enabled
+    groups = resolve_groups(state.tool_groups) if state.tool_groups else set(DEFAULT_GROUPS)
+    tool_sections = _tool_sections(groups, user_name)
+    coding_workflow = _coding_section(groups)
+    skills = _skills_section(workspace) if "system" in groups else ""
 
     base = f"""You are Cagentic — {user_name}'s personal assistant, running entirely on their own machine via Ollama. Nothing leaves the device unless {user_name} asks you to reach out.
 
@@ -363,91 +551,11 @@ Tone & style:
 - Don't refuse benign personal tasks; they're exactly what you're for.
 
 Tools you have:
-- **Knowledge base** (note_write, note_get, note_list, note_search, note_delete):
-  use these to REMEMBER things across sessions. When the user mentions a fact
-  worth keeping ("my partner's name is X", "I'm allergic to Y", "my work hours
-  are 9-5"), save it to a sensible note (e.g. note_write name="profile" body="..."
-  append=true). Read notes proactively when context suggests they're relevant
-  ("what should I make for dinner?" → note_get "food-preferences"). Whenever
-  you learn something durable about {user_name} or their world, save it —
-  don't wait to be asked.
-- **Past conversations** (chat_search, chat_get): every previous chat with
-  {user_name} is searchable. When they reference something discussed before
-  ("that restaurant we talked about", "the plan from last week"), run
-  chat_search with a likely phrase, then chat_get the matching id for full
-  context. Prefer this over guessing or asking them to repeat themselves.
-- **Reminders** (reminder_add, reminder_list, reminder_done, reminder_delete,
-  reminder_update): persistent to-dos. Always use reminder_add when the user
-  says "remind me to X" — never let it live only in chat history.
-- **Personal OS** (goal_create, goal_list, goal_update, goal_delete,
-  calendar_event_add, calendar_event_list, calendar_event_update,
-  calendar_event_delete, personal_briefing, calendar_connection_create,
-  calendar_connection_list, calendar_connection_sync, inbox_capture, inbox_list,
-  inbox_update, email_connection_create, email_connection_list,
-  email_connection_sync, routine_create, routine_list, routine_update): maintain the user's goals and
-  schedule as durable structured data. Use these whenever the user sets a
-  goal, reports progress, plans an event, or asks what deserves attention.
-  Check personal_briefing when planning the day and proactively mention real
-  conflicts or urgent deadlines without manufacturing urgency. Calendar
-  connections support iCalendar feeds and CalDAV; never expose stored
-  credentials, and get approval before adding or syncing a connection. The
-  unified inbox stores quick captures and email headers locally; IMAP sync does
-  not download message bodies. Proactive routines run on user-defined local
-  schedules and surface durable notifications.
-- **Web** (web_search, web_fetch): for anything current. Search first, fetch
-  the most promising result. Pass text_only=true to web_fetch when reading
-  articles to strip noise.
-- **MCP** (mcp_list_servers, mcp_list_tools, mcp_call, mcp_list_resources,
-  mcp_read_resource): bridges to Notion, Google Drive, Slack, etc. If a
-  request needs one of those, run mcp_list_servers first to see what's
-  configured, then mcp_list_tools to discover the right call, then mcp_call.
-- **Browser** (browser_status, browser_tabs, browser_read, browser_links,
-  browser_open, browser_navigate, browser_click, browser_fill,
-  browser_scroll, browser_screenshot, browser_click_at, browser_download,
-  browser_eval, browser_close): control the user's Chrome browser through
-  the companion extension. Call browser_status FIRST — if not connected,
-  tell the user to run /browser and stop. Then browser_read for plain
-  pages, browser_tabs to list tabs, browser_open / browser_navigate to go
-  places, and browser_click / browser_fill to act.
-  Dynamic / framework-rendered pages (Google Drive, Classroom, React
-  apps): browser_read often returns very little because the content is
-  rendered after page load. Use browser_links to enumerate every
-  clickable thing with its text and href without going through eval.
-  When a click won't land — strict CSP, Shadow DOM, framework swallows
-  .click() — fall back to browser_screenshot then browser_click_at with
-  the (x, y) of the target.
-  When the user asks you to DOWNLOAD or PROCESS a file from a logged-in
-  site, use browser_download with the file's URL — your session cookies
-  are sent, so Google Drive / Docs export URLs work directly:
-    https://docs.google.com/document/d/<ID>/export?format=txt
-    https://docs.google.com/presentation/d/<ID>/export/txt
-    https://docs.google.com/presentation/d/<ID>/export/pdf
-    https://drive.google.com/uc?export=download&id=<ID>
-  Then read_file the saved path to use the contents.
-- **Files** (read_file, write_file, edit_file, list_dir, grep, glob): edit
-  any file on disk. Use absolute paths or set_workspace into the right dir.
-  read_file also pulls the text out of PDF and Word (.docx) documents — so
-  you can read résumés, contracts, letters, and reports directly. Just call
-  read_file on the .pdf / .docx path; don't ask the user to convert it.
-- **Shell** (run_bash, powershell): for opening apps, running scripts, etc.
-  Each call asks the user to approve.
-- **Background** (bash_async, task_status, task_wait): for slow commands.
-- **Coding** (multi_edit, check_syntax, notebook_edit, enter_worktree /
-  exit_worktree): for real programming work. Batch several edits to one
-  file atomically with multi_edit; after editing code, run check_syntax on
-  the changed files to confirm they still parse (it never executes them);
-  edit Jupyter notebooks cell-by-cell with notebook_edit; use the worktree
-  stack when a sub-task lives in its own directory.
-- **Sub-agents** (agent_call, agent_call_async): fork a focused helper on a
-  fresh conversation for a self-contained subtask (big searches, summaries)
-  so the main context stays clean. Use the async variant for long research.
-- **Persistent tasks** (task_create, task_update, task_get, task_list,
-  task_delete, brief): a cross-session task graph for multi-step projects —
-  create tasks with dependencies, mark them done as you go.
-
+{tool_sections}
+{coding_workflow}{skills}
 Working principles:
-- ACT, don't narrate. If the user says "remind me to call mom at 5", call
-  reminder_add immediately. Don't write paragraphs about how you're going to.
+- ACT, don't narrate. If the user asks for something you have a tool for, call
+  it. Don't write paragraphs about how you're going to.
 - One step at a time: call a tool, look at the result, decide the next move.
 - Wrap private reasoning in <think>...</think>. The user sees it dimmed.
 - For complex multi-step requests, emit a <plan>step\\nstep\\nstep</plan>
@@ -691,6 +799,9 @@ class StreamingToolExecutor:
         self.tasks = tasks
         self.teams = teams
         self.widget_action: Callable[[str, str, dict], str | None] | None = None
+        # Set by a front end that can put a question to somebody and wait for the answer. The
+        # terminal does not need one — it owns stdin — so this stays None there.
+        self.ask_user: Callable[[str, list[str]], str] | None = None
 
     def execute(self, calls):
         if not calls:
@@ -729,6 +840,7 @@ class StreamingToolExecutor:
         name, args, role = call
         tid = new_id(TaskKind.BASH if name == "run_bash" else TaskKind.TOOL)
         summary = _summarize_args(name, args)
+        _labels = label_pair(name)
         yield Message(
             "tool_call",
             {
@@ -737,9 +849,44 @@ class StreamingToolExecutor:
                 "args": args,
                 "role": role,
                 "summary": summary,
+                # Renderers show these instead of the identifier. Sent from here so the
+                # terminal, the web page and the phone cannot drift apart on wording, and
+                # both forms travel so a client can collapse repeats without asking again.
+                "label": _labels[0],
+                "label_plural": _labels[1],
             },
             task_id=tid,
         )
+
+        cfg = getattr(self.engine, "config", None)
+        payload = {
+            "event": "PreToolUse",
+            "tool": name,
+            "args": args,
+            "workspace": str(self.state.workspace),
+        }
+        verdict, note = hooks.decision("PreToolUse", payload, cfg)
+        if verdict == "deny":
+            # Checked before can_use_tool on purpose: a hook that blocks a
+            # command should not first make the user answer an approval prompt
+            # for something that was never going to run.
+            err = f"ERROR: blocked by hook ({note})"
+            yield Message("tool_denied", {"id": tid, "name": name, "reason": note}, task_id=tid)
+            yield Message(
+                "tool_result",
+                {
+                    "id": tid,
+                    "name": name,
+                    "label": _labels[0],
+                    "label_plural": _labels[1],
+                    "result": err,
+                    "ok": False,
+                    "first_line": err,
+                    "role": role,
+                },
+                task_id=tid,
+            )
+            return
 
         allowed, reason = can_use_tool(name, args, self.state, self.resolver)
         if not allowed:
@@ -750,6 +897,8 @@ class StreamingToolExecutor:
                 {
                     "id": tid,
                     "name": name,
+                    "label": _labels[0],
+                    "label_plural": _labels[1],
                     "result": err,
                     "ok": False,
                     "first_line": err,
@@ -768,6 +917,7 @@ class StreamingToolExecutor:
             teams=self.teams,
             read_cache=getattr(self.engine, "_read_cache", None),
             widget_action=self.widget_action,
+            ask_user=self.ask_user,
         )
 
         spin_label = f"{name}  {summary[:60]}" if summary else name
@@ -776,6 +926,24 @@ class StreamingToolExecutor:
                 result = dispatch(name, args, ctx)
             except Exception as e:
                 result = f"ERROR: {type(e).__name__}: {e}"
+
+        # A hook's stdout is context the model asked for by configuring it, so
+        # it rides along with the result rather than being logged where nothing
+        # reads it.
+        if note:
+            label = "hook warning" if verdict == "warn" else "hook"
+            result = f"{result}\n[{label}] {note}"
+        hooks.emit(
+            "PostToolUse",
+            {
+                "event": "PostToolUse",
+                "tool": name,
+                "args": args,
+                "result": result,
+                "workspace": str(self.state.workspace),
+            },
+            cfg,
+        )
 
         ok = not result.startswith("ERROR")
         first_line = result.splitlines()[0] if result else ""
@@ -787,6 +955,8 @@ class StreamingToolExecutor:
             {
                 "id": tid,
                 "name": name,
+                "label": _labels[0],
+                "label_plural": _labels[1],
                 "result": result,
                 "ok": ok,
                 "first_line": first_line,
@@ -911,6 +1081,55 @@ class QueryEngine:
         saved = None if (spent is None or full is None) else max(0.0, full - spent)
         return {"spent": spent, "saved": saved, "model": spec}
 
+    def _tool_schemas(self) -> list[dict]:
+        """The schemas actually offered to the model this turn."""
+        schemas = all_tool_schemas(self.state.tool_groups, compact=self.compact_schemas)
+        if getattr(self.state, "panels_enabled", True):
+            return schemas
+        return [s for s in schemas if ((s.get("function") or {}).get("name")) not in _PANEL_TOOLS]
+
+    def _tool_schema_tokens(self) -> int:
+        """What the enabled tool definitions add to every request.
+
+        Counted separately from the messages because they are not in the message
+        list, yet the provider bills and budgets for them exactly the same.
+        """
+        if not getattr(self.state, "tools_enabled", False):
+            return 0
+        try:
+            schemas = self._tool_schemas()
+        except Exception:
+            _log.debug("could not size tool schemas for the context budget", exc_info=True)
+            return 0
+        return approx_schema_tokens(schemas)
+
+    def _compact_to_provider_limit(self, prompt_tokens: int, limit: int) -> bool:
+        """Compact hard enough that the provider's own count should fit.
+
+        Its tokenizer and our estimate disagree — often by several times over,
+        since the estimate is characters over four — so the provider's numbers
+        are converted into our units rather than used directly: whatever ratio it
+        just reported is applied to the budget we compact against. Returns
+        whether anything was actually freed.
+        """
+        if prompt_tokens <= 0 or limit <= 0:
+            return False
+        estimated = estimate_tokens(self.messages) + self._tool_schema_tokens()
+        if estimated <= 0:
+            return False
+        # Leave the model room to answer, not just to read.
+        target = int(limit * COMPACT_FRACTION)
+        budget = max(COMPACT_MIN_TOKENS // 4, int(estimated * target / prompt_tokens))
+        # The tool schemas cannot be compacted away, so the messages have to fit
+        # in what is left after them.
+        budget = max(256, budget - self._tool_schema_tokens())
+        reports = manage_context(
+            self.messages,
+            max_tokens=budget,
+            keep_recent=max(4, COMPACT_KEEP_RECENT // 3),
+        )
+        return any(r.triggered for r in reports)
+
     def compact_threshold(self) -> int:
         """Token count above which older history gets compacted.
 
@@ -959,7 +1178,34 @@ class QueryEngine:
         else:
             self.messages.insert(0, {"role": "system", "content": prompt})
 
+    def _hook_payload(self, **extra) -> dict:
+        base = {
+            "session_id": self.session_id,
+            "model": self.model,
+            "workspace": str(self.state.workspace),
+        }
+        base.update(extra)
+        return base
+
     def submit_message(
+        self,
+        prompt: str,
+        *,
+        display_prompt: str | None = None,
+    ) -> Iterator[Message]:
+        """Run one user turn, firing the Stop hook however the turn ends.
+
+        The wrapper exists for the `finally`: a turn can end by finishing, by
+        raising, or by the consumer closing the generator (Ctrl-C at the
+        terminal), and "the turn ended" should mean all three. Putting the emit
+        next to each `done` yield would have missed two of them.
+        """
+        try:
+            yield from self._submit_message(prompt, display_prompt=display_prompt)
+        finally:
+            hooks.emit("Stop", self._hook_payload(event="Stop"), self.config)
+
+    def _submit_message(
         self,
         prompt: str,
         *,
@@ -992,6 +1238,29 @@ class QueryEngine:
         _poke_browser(self.state, model=self.model, activity="thinking")
 
         visible_prompt = prompt if display_prompt is None else display_prompt
+        prompt_verdict, prompt_note = hooks.decision(
+            "UserPromptSubmit",
+            self._hook_payload(event="UserPromptSubmit", prompt=visible_prompt),
+            self.config,
+        )
+        if prompt_verdict == "deny":
+            yield Message("user", {"text": visible_prompt})
+            yield Message("error", {"text": f"blocked by hook: {prompt_note}"})
+            yield Message(
+                "done",
+                {
+                    "text": "",
+                    "usage": dict(self._usage),
+                    "turn_usage": self.turn_usage(),
+                    "cost": self.cost_report(self.turn_usage()),
+                    "session_id": self.session_id,
+                },
+            )
+            return
+        if prompt_note:
+            # Allowed, with something to say. It goes in as context the model
+            # reads rather than as chat the user has to scroll past.
+            prompt = f"{prompt}\n\n[hook] {prompt_note}"
         user_msg = process_user_input(prompt, workspace=self.state.workspace, home=self.state.home)
         attachment_count = int(user_msg.pop("_attachment_count", 0))
         if str(user_msg.get("content") or "") != visible_prompt:
@@ -1010,7 +1279,48 @@ class QueryEngine:
         # restore "everything since turn N" as one unit.
         self.state.update(turn_index=int(getattr(self.state, "turn_index", 0)) + 1)
 
-        _pre = estimate_tokens(self.messages)
+        # Tool definitions are sent with every request and cannot be compacted, so when they
+        # crowd out the window there is nothing the conversation can do about it. Say so before
+        # spending two failed round trips discovering it.
+        _schema_tokens = self._tool_schema_tokens()
+        _window = self.context_window()
+        if _window > 0 and _schema_tokens:
+            # The floor is what every request carries however short the chat is: the tool
+            # definitions and the system prompt. Compaction only touches the conversation, so a
+            # floor near the window means turns will fail for reasons no amount of trimming can
+            # fix. This warns rather than refuses — the estimate here is characters over four,
+            # and the model's own tokenizer is the only authority on whether a prompt fits.
+            _tool_count = len(self._tool_schemas())
+            _system_tokens = estimate_tokens(
+                [m for m in self.messages if m.get("role") == "system"]
+            )
+            _floor = _schema_tokens + _system_tokens
+            if _floor >= _window:
+                yield Message(
+                    "warn",
+                    {
+                        "text": (
+                            f"little fits in {self.model}'s {_window:,}-token context: the "
+                            f"{_tool_count} enabled tools need ~{_schema_tokens:,} tokens and the "
+                            f"system prompt ~{_system_tokens:,}, before any conversation. Raise "
+                            "the model's context size, or turn off tool groups with /groups."
+                        )
+                    },
+                )
+            elif _schema_tokens > _window * TOOL_SCHEMA_WARN_FRACTION:
+                yield Message(
+                    "warn",
+                    {
+                        "text": (
+                            f"the {_tool_count} enabled tools take ~{_schema_tokens:,} of "
+                            f"{self.model}'s {_window:,}-token context, leaving little room for "
+                            "the conversation. Raise the context size or turn off tool groups "
+                            "with /groups if replies start failing."
+                        )
+                    },
+                )
+
+        _pre = estimate_tokens(self.messages) + _schema_tokens
         _budget = self.compact_threshold()
         will_compact = _pre > _budget
         if will_compact:
@@ -1051,20 +1361,22 @@ class QueryEngine:
                     "warn",
                     {"text": f"background {note['id']} {note['status']} — injected"},
                 )
-            est_tokens = estimate_tokens(self.messages)
-            if est_tokens >= 4000:
-                tool_count = (
-                    len(all_tool_schemas(self.state.tool_groups)) if self.state.tools_enabled else 0
-                )
-                yield Message(
-                    "info",
-                    {
-                        "text": (
-                            f"sending ~{est_tokens:,} tokens to {self.model}"
-                            + (f" · {tool_count} tools" if tool_count else "")
-                        ),
-                    },
-                )
+            # How full the window is, as data rather than prose. This used to be an `info`
+            # message reading "sending ~N tokens to <model>", which every front end then had to
+            # recognise by its wording and hide — the terminal printed it, the web page and the
+            # phone both pattern-matched the string to keep it out of the transcript. A number a
+            # meter can draw is what was wanted in the first place.
+            est_tokens = estimate_tokens(self.messages) + self._tool_schema_tokens()
+            limit = self.context_window()
+            yield Message(
+                "context",
+                {
+                    "used": int(est_tokens),
+                    "limit": int(limit),
+                    "model": self.model,
+                    "tools": len(self._tool_schemas()) if self.state.tools_enabled else 0,
+                },
+            )
             try:
                 msg, usage = self._chat_once(yield_deltas=self.stream)
                 if isinstance(msg, _StreamGen):
@@ -1095,15 +1407,49 @@ class QueryEngine:
                     except OllamaError as e:
                         spinner.stop()
                         watchdog.stop()
-                        yield Message(
-                            "warn",
-                            {
-                                "text": f"streaming connection broke ({e}); retrying without streaming."
-                            },
-                        )
-                        msg = self._chat_nonstream()
+                        overflow = _context_overflow(str(e))
+                        if overflow is None:
+                            yield Message(
+                                "warn",
+                                {
+                                    "text": f"streaming connection broke ({e}); retrying without streaming."
+                                },
+                            )
+                            msg = self._chat_nonstream()
+                        else:
+                            # Retrying an oversized prompt unchanged fails in exactly the same
+                            # way, and reports itself as a broken connection. Shrink it first,
+                            # trusting the provider's own token count over our estimate of it.
+                            prompt_tokens, limit = overflow
+                            yield Message(
+                                "warn",
+                                {
+                                    "text": (
+                                        f"the conversation needs ~{prompt_tokens:,} tokens but "
+                                        f"{self.model} allows {limit:,}; compacting and retrying."
+                                    )
+                                },
+                            )
+                            msg = (
+                                self._chat_nonstream()
+                                if self._compact_to_provider_limit(prompt_tokens, limit)
+                                else None
+                            )
                         if msg is None:
-                            yield Message("error", {"text": "non-streaming retry also failed"})
+                            if overflow is None:
+                                yield Message("error", {"text": "non-streaming retry also failed"})
+                            else:
+                                yield Message(
+                                    "error",
+                                    {
+                                        "text": (
+                                            f"this conversation is too long for {self.model}: "
+                                            f"~{overflow[0]:,} tokens against a {overflow[1]:,}-"
+                                            "token limit, and compacting could not free enough. "
+                                            "Start a new chat, or raise the model's context size."
+                                        )
+                                    },
+                                )
                             return
                         # Pop rather than drop: the retry still reports tokens,
                         # and taking it off the message keeps what lands in
@@ -1246,11 +1592,7 @@ class QueryEngine:
 
     def _chat_once(self, *, yield_deltas: bool):
         api_messages = normalize_messages_for_api(self.messages)
-        tools = (
-            all_tool_schemas(self.state.tool_groups, compact=self.compact_schemas)
-            if self.state.tools_enabled
-            else None
-        )
+        tools = self._tool_schemas() if self.state.tools_enabled else None
 
         if yield_deltas and hasattr(self.client, "chat_stream_assembled"):
             gen = self.client.chat_stream_assembled(
@@ -1276,11 +1618,7 @@ class QueryEngine:
 
     def _chat_nonstream(self) -> dict | None:
         api_messages = normalize_messages_for_api(self.messages)
-        tools = (
-            all_tool_schemas(self.state.tool_groups, compact=self.compact_schemas)
-            if self.state.tools_enabled
-            else None
-        )
+        tools = self._tool_schemas() if self.state.tools_enabled else None
         try:
             with ui.Spinner("retrying (no stream)"):
                 return self.client.chat(
