@@ -54,7 +54,13 @@ cagentic = "cagentic.cli:main"
 include = ["cagentic*"]
 
 [tool.setuptools.package-data]
-cagentic = ["gateway_assets/*.html", "gateway_assets/*.css", "gateway_assets/*.js"]
+cagentic = [
+    "gateway_assets/*.html",
+    "gateway_assets/*.css",
+    "gateway_assets/*.js",
+    "gateway_assets/*.svg",
+    "gateway_assets/fonts/*.woff2",
+]
 
 [tool.ruff]
 target-version = "py39"
