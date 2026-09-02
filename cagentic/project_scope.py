@@ -23,6 +23,7 @@ returns plain data, so it can't participate in an import cycle.
 from __future__ import annotations
 
 import logging
+import os
 import re
 from pathlib import Path
 
@@ -118,6 +119,47 @@ def render_command(body: str, arguments: str) -> str:
     return text
 
 
+# name -> summary, keyed by a cheap signature of the commands directory.
+_SUMMARY_CACHE: dict[str, tuple[tuple, dict[str, str]]] = {}
+
+
+def _dir_signature(directory: Path) -> tuple:
+    """(name, mtime, size) per file — catches adds, removes and edits.
+
+    Cheaper than reading the bodies, which is what discover_commands does and
+    what the completion popup must not do on every keystroke.
+    """
+    try:
+        return tuple(
+            sorted(
+                (e.name, int(e.stat().st_mtime_ns), e.stat().st_size)
+                for e in os.scandir(directory)
+                if e.is_file() and e.name.endswith(".md")
+            )
+        )
+    except OSError:
+        return ()
+
+
+def command_summaries(workspace: Path) -> dict[str, str]:
+    """Project command names and their one-line summaries, for the popup.
+
+    Separate from discover_commands because the popup wants labels on every
+    keystroke and the dispatcher wants a body once per invocation. The cache is
+    invalidated by the directory's own contents rather than a timer, so a
+    command file added mid-session shows up as soon as it exists.
+    """
+    directory = project_dir(workspace) / "commands"
+    key = str(directory)
+    signature = _dir_signature(directory)
+    cached = _SUMMARY_CACHE.get(key)
+    if cached is not None and cached[0] == signature:
+        return cached[1]
+    summaries = {name: command_summary(body) for name, body in discover_commands(workspace).items()}
+    _SUMMARY_CACHE[key] = (signature, summaries)
+    return summaries
+
+
 def find_skill(workspace: Path, name: str) -> Path | None:
     """Locate a skill, preferring the project's copy over the user's.
 
@@ -142,9 +184,20 @@ def find_skill(workspace: Path, name: str) -> Path | None:
 
 def list_skills(workspace: Path) -> list[tuple[str, str]]:
     """(name, origin) for every reachable skill, project first."""
+    return [(name, origin) for name, origin, _summary in describe_skills(workspace)]
+
+
+def describe_skills(workspace: Path) -> list[tuple[str, str, str]]:
+    """(name, origin, summary) for every reachable skill, project first.
+
+    The summary is what makes skills usable at all. Without it the model saw a
+    bare list of filenames and had to guess from the name whether `review` meant
+    a code review, a performance review, or a restaurant one — so in practice it
+    guessed "not relevant" and never called them.
+    """
     from .config import config_dir
 
-    seen: dict[str, str] = {}
+    seen: dict[str, tuple[str, str]] = {}
     for origin, base in (
         ("project", project_dir(workspace) / "skills"),
         ("user", config_dir() / "skills"),
@@ -157,6 +210,72 @@ def list_skills(workspace: Path) -> list[tuple[str, str]]:
             if not path.is_file():
                 continue
             name = path.stem.lower()
-            # First writer wins: the project's copy shadows the user's.
-            seen.setdefault(name, origin)
-    return sorted(seen.items())
+            if name in seen:
+                # First writer wins: the project's copy shadows the user's.
+                continue
+            summary = ""
+            try:
+                if path.stat().st_size <= MAX_BODY_BYTES:
+                    summary = command_summary(path.read_text(encoding="utf-8", errors="replace"))
+            except OSError:
+                summary = ""
+            seen[name] = (origin, summary)
+    return sorted((name, origin, summary) for name, (origin, summary) in seen.items())
+
+
+def apply_project_settings(state, cfg: dict | None = None) -> list[str]:
+    """Apply the workspace's own `.cagentic/settings.*.json` to live state.
+
+    Returns one human-readable line per setting applied, so the caller can say
+    what a directory did rather than changing behaviour silently.
+
+    Only a deliberately small surface is honoured, and the two files are not
+    equally trusted:
+
+    * `tool_groups` and `model` come from either file. Neither can run
+      anything: the tool groups only decide which schemas the model is offered,
+      and every one of those tools still passes the permission gate.
+    * `mcp.servers` is honoured **only** from `settings.local.json`. An MCP
+      server is a command line Cagentic spawns, so accepting one from a
+      committed file would mean `git clone` could execute arbitrary code the
+      first time you opened the directory. That is not a trade worth making for
+      the convenience, so the shared file cannot do it and says so in the log.
+    """
+    from .permissions import project_settings
+
+    applied: list[str] = []
+    workspace = getattr(state, "workspace", None)
+    for filename, data in project_settings(workspace):
+        local = filename.endswith(".local.json")
+
+        groups = data.get("tool_groups")
+        if isinstance(groups, list):
+            from .tools import TOOL_GROUPS, resolve_groups
+
+            wanted = resolve_groups(g for g in groups if isinstance(g, str))
+            known = {g for g in wanted if g in TOOL_GROUPS}
+            if known:
+                state.update(tool_groups=known)
+                applied.append(f"tool groups: {', '.join(sorted(known))}")
+
+        model = data.get("model")
+        if isinstance(model, str) and model.strip() and cfg is not None:
+            cfg["model"] = model.strip()
+            applied.append(f"model: {model.strip()}")
+
+        servers = (
+            (data.get("mcp") or {}).get("servers") if isinstance(data.get("mcp"), dict) else None
+        )
+        if isinstance(servers, dict) and servers:
+            if not local:
+                _log.warning(
+                    "ignoring mcp.servers in %s: an MCP server is a command this would "
+                    "spawn, so it is only honoured from settings.local.json",
+                    filename,
+                )
+                applied.append(f"ignored mcp.servers in {filename} (committed file)")
+            elif cfg is not None:
+                existing = cfg.setdefault("mcp", {}).setdefault("servers", {})
+                existing.update(servers)
+                applied.append(f"mcp servers: {', '.join(sorted(servers))}")
+    return applied

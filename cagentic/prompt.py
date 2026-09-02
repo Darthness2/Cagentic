@@ -81,6 +81,7 @@ COMMAND_GROUPS: list[tuple[str, list[tuple[str, str, str]]]] = [
             ("/mcp", "[server]", "MCP servers, or one server's tools"),
             ("/browser", "", "Chrome extension status + setup"),
             ("/gateway", "[on|off]", "start or stop the web UI"),
+            ("/token", "[off]", "pair a phone with this computer"),
             ("/login", "<service>", "save a key using a hidden prompt"),
             ("/logout", "<service>", "remove a saved key"),
             ("/whoami", "", "show the authenticated GitHub user"),
@@ -95,6 +96,8 @@ COMMAND_GROUPS: list[tuple[str, list[tuple[str, str, str]]]] = [
             ("/stream", "[on|off]", "toggle live token streaming"),
             ("/config", "", "show current config (tokens redacted)"),
             ("/set", "<key> <value>", "set a config value"),
+            ("/skill", "[name]", "list project and user skills, or load one"),
+            ("/hooks", "", "lifecycle hooks configured for this install"),
             ("/diag", "", "model / workspace / tools / data status"),
             ("/help", "", "show this list"),
             ("/quit", "", "leave Cagentic"),
@@ -316,6 +319,18 @@ def _build_pt_session(
 
     from .config import config_dir
 
+    def _project_commands() -> dict[str, str]:
+        """Slash commands this repo defines, name -> summary. Never raises."""
+        try:
+            from .project_scope import command_summaries
+
+            workspace = workspace_provider() if workspace_provider else Path.cwd()
+            return command_summaries(workspace)
+        except Exception:
+            # The popup repaints on every keystroke; a broken .cagentic/ must
+            # degrade to "no project commands", never to a traceback mid-typing.
+            return {}
+
     class InputCompleter(Completer):
         def get_completions(self, document, complete_event):
             text = document.text_before_cursor
@@ -328,6 +343,22 @@ def _build_pt_session(
                             display=name,
                             display_meta=hint,
                         )
+                # A repo's own commands were reachable and listed in /help, but
+                # absent from the one place people look for what they can type.
+                # Built-ins are offered first and cannot be shadowed — the
+                # dispatcher checks them first too — so a project name that
+                # collides is simply not reachable, and not offered either.
+                builtin = {name for name, _hint in SLASH_COMMANDS}
+                for name, summary in _project_commands().items():
+                    slash = f"/{name}"
+                    if slash in builtin or not slash.startswith(text):
+                        continue
+                    yield Completion(
+                        slash,
+                        start_position=-len(text),
+                        display=slash,
+                        display_meta=f"{summary}  (this project)" if summary else "(this project)",
+                    )
                 return
             try:
                 workspace = workspace_provider() if workspace_provider else Path.cwd()

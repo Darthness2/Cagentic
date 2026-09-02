@@ -253,7 +253,10 @@ class TestSurfacesAreWired(unittest.TestCase):
 
         from cagentic import engine as engine_mod
 
-        source = inspect.getsource(engine_mod.QueryEngine.submit_message)
+        # The whole class, not submit_message: the done events are built in
+        # whichever internal method the turn loop currently lives in, and
+        # this check is about the payload, not about where it is assembled.
+        source = inspect.getsource(engine_mod.QueryEngine)
         self.assertIn('"turn_usage"', source)
         self.assertIn('"cost"', source)
 

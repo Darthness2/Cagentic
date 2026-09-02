@@ -8,6 +8,7 @@ import io
 import json
 import logging
 import os
+import secrets
 import sys
 import textwrap
 import time
@@ -288,7 +289,7 @@ def _pick_model_interactive(client: OllamaClient) -> str | None:
         prompt = "Model number or name"
     else:
         ui.warn("No models installed locally.")
-        ui.warn("Suggested for general assistant use: llama3.1:8b, qwen2.5:7b, mistral-nemo")
+        ui.warn("Suggested: qwen3-coder:30b (~18 GB) · qwen3:14b (~9 GB) · qwen3:8b (~5 GB)")
         prompt = "Model name"
 
     try:
@@ -777,6 +778,17 @@ def _settle_in(agent: Agent) -> None:
         bits.append(f"{notes_n} note{'s' if notes_n != 1 else ''} I remember")
     if bits:
         ui.info("I've got " + " and ".join(bits) + ".")
+        # The assistant tool groups are off by default because their schemas cost
+        # roughly three quarters of the context floor. Someone who already has
+        # notes and reminders saved came here for them, so say plainly that the
+        # data is still there but the model cannot reach it yet — otherwise this
+        # line reads as a promise the next turn quietly fails to keep.
+        from .tools import ASSISTANT_GROUPS, DEFAULT_GROUPS
+
+        active = agent.state.tool_groups or DEFAULT_GROUPS
+        missing = sorted(ASSISTANT_GROUPS - set(active))
+        if missing:
+            ui.meta(f"ask me to use them with /groups enable {' '.join(missing)}")
     else:
         opener = f"I'm here, {name}." if name else "I'm here."
         ui.info(opener + " Tell me what you need — or ask me to remember something.")
@@ -991,6 +1003,7 @@ def repl(
                 "cost",
                 "diag",
                 "help",
+                "hooks",
                 "models",
                 "notes",
                 "quit",
@@ -1153,8 +1166,18 @@ def repl(
                     ui.error(f"not a directory: {workspace_target}")
                     continue
                 agent.state.update(workspace=workspace_target)
+                # A project can carry its own tool groups and model. Say what it
+                # changed — a directory that quietly reconfigures the agent is
+                # worse than one that cannot.
+                from .project_scope import apply_project_settings
+
+                project_applied = apply_project_settings(agent.state, cfg)
                 _refresh_live_prompts()
                 ui.info(f"workspace → {workspace_target}")
+                for line in project_applied:
+                    ui.meta(f"  project settings · {line}")
+                if project_applied:
+                    agent.engine.refresh_system_prompt()
                 continue
 
             # ---- notes ----
@@ -1405,6 +1428,107 @@ def repl(
                     ui.error(f"gateway couldn't start: {gw.error}")
                 continue
 
+            if cmd == "token":
+                from .gateway import Gateway
+
+                gw = gateway_holder.get("server")
+                if arg1.lower() in ("off", "cancel", "stop"):
+                    if gw is not None and gw.running:
+                        gw.cancel_pairing()
+                    ui.info("pairing cancelled.")
+                    continue
+
+                # Pairing needs a gateway a phone can actually reach, so this
+                # walks the two settings that used to be a hand-edit of
+                # config.json — with consent, because LAN binding widens who can
+                # talk to the assistant.
+                needs_restart = False
+                if not command_utils.boolean_value(config.get_value(cfg, "gateway.lan"), False):
+                    ui.info(
+                        "Right now the gateway only listens on this computer, so a phone "
+                        "can't reach it."
+                    )
+                    answer = ui.input_prompt(
+                        "Let devices on your Wi-Fi connect to this computer?", "y/N"
+                    )
+                    if answer.strip().lower() not in ("y", "yes"):
+                        ui.info("left the gateway on this computer only.")
+                        continue
+                    config.set_value(cfg, "gateway.lan", True)
+                    needs_restart = True
+                if not str(config.get_value(cfg, "gateway.token") or "").strip():
+                    # Without a pinned token the gateway mints a new one on every
+                    # restart, and every paired device breaks each time.
+                    config.set_value(cfg, "gateway.token", secrets.token_urlsafe(32))
+                    needs_restart = needs_restart or (gw is not None and gw.running)
+                try:
+                    config.save(cfg)
+                except (OSError, TypeError, ValueError) as exc:
+                    ui.error(f"could not save the gateway settings: {exc}")
+                    continue
+
+                if gw is not None and gw.running and needs_restart:
+                    gw.stop()
+                    gateway_holder["server"] = None
+                    gw = None
+
+                # The gateway usually runs as a background service in its own
+                # process. Starting a second one here would advertise a different
+                # port with a different token, and the phone could end up paired
+                # to an instance that dies with this terminal — so talk to the one
+                # that is already listening instead.
+                if gw is None:
+                    configured_port = _configured_port(cfg, "gateway", 8700)
+                    pinned = str(config.get_value(cfg, "gateway.token") or "")
+                    remote, failure = Gateway.open_pairing_on_running_gateway(
+                        configured_port, pinned
+                    )
+                    if remote is not None:
+                        minutes = max(1, int(remote.get("expires_in", 120)) // 60)
+                        ui.info(f"pairing code:  {remote.get('code', '')}")
+                        ui.info(
+                            f"good for {minutes} minute(s) · this computer is "
+                            f'"{remote.get("name", "")}"'
+                        )
+                        ui.info(
+                            "On the phone: add a Cagentic gateway and pick this computer "
+                            "from the list, then enter the code."
+                        )
+                        if remote.get("address"):
+                            ui.info(f"not listed? enter {remote['address']} by hand.")
+                        continue
+                    if failure == "stale-token":
+                        ui.warn(
+                            "a gateway is already running with an older access token, so it "
+                            "cannot be paired with yet."
+                        )
+                        ui.info(
+                            "restart it to pick up the token just saved — if it runs at login, "
+                            "`cagentic --uninstall-service && cagentic --install-service` — "
+                            "then run /token again."
+                        )
+                        continue
+
+                if gw is None or not gw.running:
+                    gw = Gateway(agent, cfg, port=_configured_port(cfg, "gateway", 8700))
+                    if not gw.start():
+                        ui.error(f"gateway couldn't start: {gw.error}")
+                        continue
+                    gateway_holder["server"] = gw
+                    if gw.start_notice:
+                        ui.warn(gw.start_notice)
+
+                pairing = gw.begin_pairing()
+                minutes = max(1, pairing["expires_in"] // 60)
+                ui.info(f"pairing code:  {pairing['code']}")
+                ui.info(f'good for {minutes} minute(s) · this computer is "{pairing["name"]}"')
+                ui.info(
+                    "On the phone: add a Cagentic gateway and pick this computer from the "
+                    "list, then enter the code."
+                )
+                ui.info(f"not listed? enter {pairing['address']} by hand.")
+                continue
+
             if cmd == "plan":
                 plan_enabled = command_utils.switch_value(arg1, agent.state.plan_mode)
                 if plan_enabled is None:
@@ -1482,6 +1606,51 @@ def repl(
                     ui.info("cleared todos")
                     continue
                 ui.warn("usage: /todo  |  /todo add <text>  |  /todo done <n>  |  /todo clear")
+                continue
+            if cmd == "skill":
+                from .config import config_dir
+                from .project_scope import describe_skills, project_dir
+
+                skill_rows = describe_skills(agent.state.workspace)
+                if not full_arg:
+                    if not skill_rows:
+                        ui.info("no skills installed.")
+                        ui.meta(f"project: {project_dir(agent.state.workspace) / 'skills'}")
+                        ui.meta(f"yours:   {config_dir() / 'skills'}")
+                        continue
+                    ui.heading("Skills")
+                    for skill_name, origin, summary in skill_rows:
+                        ui.field(f"{skill_name} ({origin})", summary or "—")
+                    continue
+                # Loading one is the model's job — the tool appends it to the
+                # system prompt and the engine owns that.
+                from .tools import ToolContext, dispatch
+
+                tool_ctx = ToolContext(
+                    **agent.state.to_tool_ctx_kwargs(),
+                    state=agent.state,
+                    engine=agent.engine,
+                )
+                out = dispatch("skill", {"op": "use", "name": full_arg}, tool_ctx)
+                (ui.warn if out.startswith("ERROR") else ui.info)(out)
+                continue
+            if cmd == "hooks":
+                from . import hooks as _hooks
+
+                hook_rows = _hooks.describe(cfg)
+                configured = sum(count for _event, count in hook_rows)
+                ui.heading("Lifecycle hooks")
+                for hook_event, count in hook_rows:
+                    gate = " (can block)" if hook_event in _hooks.GATING_EVENTS else ""
+                    detail = f"{count} handler{'s' if count != 1 else ''}{gate}"
+                    ui.field(hook_event, detail if count else f"—{gate}")
+                if not configured:
+                    print()
+                    ui.meta('none configured. Add them under "hooks" in config.json:')
+                    ui.code_block(
+                        '"hooks": {"PreToolUse": [{"command": "./check.sh", "timeout": 10}]}'
+                    )
+                    ui.meta("exit 0 allow · 1 allow with a note · 2 block")
                 continue
             if cmd == "diag":
                 from .tools import DEFAULT_GROUPS
@@ -2563,15 +2732,40 @@ def _run_runtime(args: RuntimeOptions) -> int:
     _apply_automation_options(agent, args)
     resumed_session = _resume_session(agent, args)
 
+    from . import hooks as _hooks
+
+    _hooks.emit(
+        "SessionStart",
+        {
+            "event": "SessionStart",
+            "model": active_model_spec,
+            "workspace": str(agent.state.workspace),
+            "resumed": bool(resumed_session),
+        },
+        cfg,
+    )
+
     saved_groups = config.get_value(cfg, "tool_groups", None)
     if isinstance(saved_groups, list):
         # Ignore group names that no longer exist rather than silently sending
         # the model an empty toolset from a stale config.
-        from .tools import TOOL_GROUPS
+        from .tools import TOOL_GROUPS, resolve_groups
 
-        known = {g for g in saved_groups if isinstance(g, str) and g in TOOL_GROUPS}
+        # Through resolve_groups first: a config that pinned a since-renamed
+        # group ("worktree" -> "workspace") would otherwise fail the membership
+        # test here and be dropped silently, which is the failure mode the alias
+        # exists to prevent.
+        resolved = resolve_groups(g for g in saved_groups if isinstance(g, str))
+        known = {g for g in resolved if g in TOOL_GROUPS}
         if known or not saved_groups:
             agent.state.update(tool_groups=known)
+
+    # After the user's own config, so a repo that declares what it needs wins
+    # for the directory you are actually in.
+    from .project_scope import apply_project_settings
+
+    for _line in apply_project_settings(agent.state, cfg):
+        logging.getLogger(__name__).info("project settings: %s", _line)
 
     # Wire MCP manager onto state, but lazy-start servers
     if command_utils.mcp_server_config(cfg):

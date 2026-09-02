@@ -19,9 +19,25 @@ Cagentic **remembers things about you** across sessions, keeps a persistent remi
 - **Personal OS data** — goals, calendar events, deadlines, a unified inbox and scheduled AI routines are stored locally and available to the assistant as tools (the `life` group). Ask for them in chat; there is no separate dashboard to keep in sync.
 - **Conversations persist** — sessions auto-save to `~/.config/cagentic/sessions/`. `/resume` to come back to one.
 - **Background jobs** — slow shell commands run in the background; their output gets injected back into the conversation when they finish.
+- **Git** — `git_status`, `git_diff`, `git_log` and `git_commit` for reviewing and
+  recording your own work. Reading the repo never prompts; committing goes through
+  the approval gate. Push, fetch, reset and rebase are deliberately left to
+  `run_bash`, so reaching a remote is always an explicit, visible decision.
 - **GitHub integration** (optional) — list repos, read files, browse issues/PRs with a personal access token.
-- **Full coding agent** (absorbed from Collama) — atomic `multi_edit` batches, parser-only `check_syntax` for 12+ languages, Jupyter `notebook_edit`, a worktree stack for sub-projects, PowerShell support, sub-agents (`agent_call` / `agent_call_async`), a persistent cross-session task graph, and an `/effort low|medium|high` dial for how hard the model works.
+- **Full coding agent** (absorbed from Collama) — atomic `multi_edit` batches, parser-only `check_syntax` for 12+ languages, Jupyter `notebook_edit`, a workspace directory stack for sub-projects, PowerShell support, sub-agents (`agent_call` / `agent_call_async`), a persistent cross-session task graph, and an `/effort low|medium|high` dial for how hard the model works.
 - **Agent teams** (optional, `/groups enable teams`) — long-lived teammate personas with mailboxes; a coordinator processes each teammate's mail by forking sub-agents and can auto-claim matching tasks from the task graph.
+- **Lifecycle hooks** — deterministic scripts that run on agent events, declared
+  under `"hooks"` in `config.json`. A `PreToolUse` handler exiting 2 blocks the
+  call outright (it beats `/yolo`); exit 1 allows it with a note; exit 0 allows,
+  and anything the handler prints on stdout reaches the model as context. A hook
+  that crashes, hangs or is missing fails open — it can never be the reason the
+  agent stops working. `/hooks` shows what's configured.
+- **Project settings** — a repo can check in `.cagentic/settings.json` with its
+  own `permissions`, `tool_groups` and `model`; `.cagentic/commands/*.md` become
+  slash commands and `.cagentic/skills/*.md` become skills, both shadowing your
+  personal copies. MCP servers are honoured only from the gitignored
+  `settings.local.json`, never the committed file — an MCP server is a command
+  Cagentic spawns, and `git clone` should not be able to choose it.
 - **Multi-provider** — use Ollama locally, or connect OpenAI and Anthropic for cloud models when you need more power.
 - **LAN access** — to reach the web UI from another machine, set `"gateway": {"lan": true, "token": "<secret>"}` in `~/.config/cagentic/config.json` (LAN exposure is off by default; the token is required on every request).
 
@@ -29,15 +45,27 @@ Cagentic **remembers things about you** across sessions, keeps a persistent remi
 
 - Python 3.9+
 - [Ollama](https://ollama.com) running locally (`ollama serve`)
-- A model with native tool calling — good defaults:
-  - `llama3.2` — lightest of the four, ~2 GB (what `install.sh` pulls)
-  - `llama3.1:8b` — good general-purpose, ~5 GB
-  - `qwen2.5:7b` — solid all-rounder, ~5 GB
-  - `mistral-nemo` — friendly chat style, ~7 GB
+- A model with native tool calling. This matters more than raw quality: Cagentic
+  is a tool-calling loop, and a model that emits a malformed call is a model that
+  cannot do the work. Roughly, bigger is the difference between "helps" and
+  "fights you":
+  - `qwen3-coder:30b` — **recommended**, ~18 GB VRAM. Reliable tool calls and
+    genuinely useful on code.
+  - `qwen3:14b` — ~9 GB. The best of the small options.
+  - `qwen3:8b` / `llama3.1:8b` — ~5 GB. Fine for chat; expect dropped and
+    malformed tool calls on longer agentic runs.
+  - `llama3.2` — ~2 GB. Chat only. Cagentic will fall back to its text tool
+    protocol and the experience will be poor.
 
 ```bash
-ollama pull llama3.1:8b
+ollama pull qwen3-coder:30b
 ```
+
+Cagentic ships a 32k context window (`ollama.num_ctx`). It needs it: the tool
+definitions and system prompt are a fixed cost on every request that no amount
+of compaction can shrink. Run `cagentic --doctor` — the `context_floor` check
+reports exactly what that costs against your model's window and fails if the two
+are mismatched.
 
 ## Install
 
@@ -67,7 +95,7 @@ pip install cagentic
 cagentic                                           # interactive REPL
 cagentic -p "remind me to call mom tonight"        # one-shot
 cagentic --name Sam                                # save your name
-cagentic -m qwen2.5:7b                             # pick a model for this session
+cagentic -m qwen3:14b                              # pick a model for this session
 cagentic --no-yolo                                 # require tool approval
 ```
 
@@ -216,7 +244,7 @@ Cagentic launches each server as a subprocess on first use and keeps a long-live
 | | |
 |---|---|
 | `/tools` | list every tool the model can call |
-| `/groups [enable\|disable <name>]` | manage which tool groups are sent (default: files, web, notes, reminders, life, mcp, browser, shell, tasks, interaction, planning, system, coding, worktree, subagent, widgets; opt-in: teams, github) |
+| `/groups [enable\|disable <name>]` | manage which tool groups are sent (default: files, web, mcp, shell, tasks, interaction, planning, system, coding, workspace, git, subagent, widgets; opt-in: life, browser, notes, reminders, teams, github) |
 | `/plan on\|off` | read-only mode |
 | `/effort low\|medium\|high` | how hard the model works per turn |
 | `/todo [add <text>\|done <n>\|clear]` | manage the per-session todo list |
