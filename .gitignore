@@ -9,6 +9,15 @@ build/
 dist/
 .pytest_cache/
 
+# Tool caches. Both write a self-ignoring .gitignore inside themselves, but
+# that only helps once the tool has run; name them here so a fresh clone is
+# clean either way.
+.mypy_cache/
+.ruff_cache/
+
+# Scratch git worktrees created for background agent sessions.
+.claude/worktrees/
+
 # Runtime output from `cagentic --serve`
 *.log
 keepalive.in

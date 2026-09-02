@@ -20,7 +20,10 @@ REPO_ROOT = Path(__file__).resolve().parent
 def main() -> int:
     # Re-use the same bootstrap deps-check as run.py.
     try:
-        for pkg in ("requests", "prompt_toolkit", "pypdf"):
+        # Keep this tuple in step with run.py's: click is what cagentic.cli
+        # imports at module scope, so leaving it out turned a missing dep into
+        # an ImportError traceback instead of the install hint below.
+        for pkg in ("click", "requests", "prompt_toolkit", "pypdf"):
             __import__(pkg)
     except ImportError:
         print("Some dependencies are missing. Run: python run.py --install")
