@@ -15,6 +15,9 @@ from cagentic import command_utils
 from cagentic.config import _DEFAULTS, set_model_capability
 from cagentic.engine import COMPACT_FRACTION, COMPACT_MIN_TOKENS
 from cagentic.providers import context_window_for
+from cagentic.tools import TOOL_GROUPS
+
+_ALL_GROUPS = set(TOOL_GROUPS)
 
 
 def _cfg(**over):
@@ -122,6 +125,78 @@ class TestCompactThreshold(unittest.TestCase):
         cfg["ollama"]["num_ctx"] = 512
         engine = self._engine("llama3:8b", cfg)
         self.assertEqual(engine.compact_threshold(), COMPACT_MIN_TOKENS)
+
+
+class ShippedDefaultsLeaveRoomToWork(unittest.TestCase):
+    """The floor every request carries has to fit the window we ship.
+
+    Tool definitions and the system prompt are sent on every call and no
+    compaction strategy touches either, so if the two together approach the
+    context window there is nothing the agent can do at runtime — turns simply
+    start failing. The shipped defaults were once *past 100%* of the configured
+    window: 99 tool schemas (~7.6k tokens) plus a ~2.7k-token system prompt
+    against `num_ctx` 8192. A fresh install could not hold a conversation.
+
+    These tests pin the relationship, not the numbers, so retuning either side
+    stays free as long as the floor keeps its room.
+    """
+
+    def _floor(self, groups=None) -> int:
+        from pathlib import Path
+
+        from cagentic.engine import fetch_system_prompt_parts
+        from cagentic.services.compact import approx_schema_tokens, approx_tokens
+        from cagentic.state import AppState
+        from cagentic.tools import all_tool_schemas
+
+        state = AppState(workspace=Path.cwd(), home=Path.home())
+        system = fetch_system_prompt_parts(state)
+        return approx_schema_tokens(all_tool_schemas(groups)) + approx_tokens(
+            [{"role": "system", "content": system}]
+        )
+
+    def test_the_default_floor_fits_the_default_window(self) -> None:
+        from cagentic.tools import DEFAULT_GROUPS
+
+        window = _DEFAULTS["ollama"]["num_ctx"]
+        floor = self._floor(DEFAULT_GROUPS)
+        self.assertLess(
+            floor / window,
+            0.35,
+            f"fixed floor is {floor:,} tokens of a {window:,}-token window — "
+            "a fresh install has no room left to work in",
+        )
+
+    def test_enabling_the_assistant_groups_still_leaves_room(self) -> None:
+        from cagentic.tools import ASSISTANT_GROUPS, DEFAULT_GROUPS
+
+        window = _DEFAULTS["ollama"]["num_ctx"]
+        floor = self._floor(set(DEFAULT_GROUPS) | set(ASSISTANT_GROUPS))
+        self.assertLess(
+            floor / window,
+            0.55,
+            "`/groups enable life browser notes reminders` must stay usable",
+        )
+
+    def test_doctor_reports_a_floor_that_does_not_fit(self) -> None:
+        from cagentic import diagnostics
+
+        report = diagnostics.run(
+            {
+                "model": "ollama:llama3.2",
+                "ollama": {"num_ctx": 2048},
+                "tool_groups": sorted(_ALL_GROUPS),
+            }
+        )
+        check = next(c for c in report["checks"] if c["name"] == "context_floor")
+        self.assertFalse(check["ok"], "an unusable floor must be a failing check")
+
+    def test_doctor_passes_on_the_shipped_defaults(self) -> None:
+        from cagentic import diagnostics
+
+        report = diagnostics.run({"model": "ollama:llama3.2", "ollama": dict(_DEFAULTS["ollama"])})
+        check = next(c for c in report["checks"] if c["name"] == "context_floor")
+        self.assertTrue(check["ok"], check["detail"])
 
 
 if __name__ == "__main__":

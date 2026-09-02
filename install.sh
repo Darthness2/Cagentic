@@ -25,7 +25,11 @@ echo -e "${BLD}  Cagentic — your local personal AI assistant${NC}"
 hr
 
 # ── Argument parsing ──────────────────────────────────────────────────────────
-DEFAULT_MODEL="llama3.2"
+# qwen3:14b rather than a 2 GB model: Cagentic is a tool-calling loop, and the
+# small llamas drop and malform tool calls often enough that a fresh install
+# looks broken. This is the smallest model that reliably works; a machine with
+# the VRAM should use --model qwen3-coder:30b.
+DEFAULT_MODEL="qwen3:14b"
 INSTALL_OLLAMA=true
 MODEL="$DEFAULT_MODEL"
 
@@ -36,7 +40,7 @@ while [[ $# -gt 0 ]]; do
     --cloud-only)  INSTALL_OLLAMA=false; MODEL=""; shift;;
     --help|-h)
       echo "Usage: $0 [--model <name>] [--no-ollama] [--cloud-only]"
-      echo "  --model <name>   Ollama model to pull after install (default: llama3.2)"
+      echo "  --model <name>   Ollama model to pull after install (default: qwen3:14b)"
       echo "  --no-ollama      Skip Ollama installation"
       echo "  --cloud-only     Skip Ollama entirely (use OpenAI/Anthropic instead)"
       exit 0;;

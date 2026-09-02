@@ -46,8 +46,23 @@ def fork_subagent(
         yolo=parent.state.yolo,
         insecure_ssl=parent.state.insecure_ssl,
         tools_enabled=parent.state.tools_enabled,
+        # Every restriction the parent is under has to come across too. This
+        # used to copy `yolo` and nothing else, so the one permissive flag
+        # propagated while `dry_run`, the deny rules, plan mode and the enabled
+        # tool groups all silently reset to their permissive defaults — a
+        # sub-agent forked from a `--dry-run` or plan-mode session could write
+        # files, and a project `deny` rule did not apply inside one. dry_run in
+        # particular is documented as a gate that yolo cannot open.
+        dry_run=parent.state.dry_run,
+        plan_mode=parent.state.plan_mode,
+        approval_mode=parent.state.approval_mode,
+        ask_all=parent.state.ask_all,
+        permission_rules=dict(parent.state.permission_rules),
+        tool_groups=set(parent.state.tool_groups) if parent.state.tool_groups else None,
         # Fresh permission cache — a black-box sub-agent must not inherit or
-        # mutate the parent's approvals.
+        # mutate the parent's approvals. Unlike the fields above this one is a
+        # record of answers already given, not a restriction, so starting empty
+        # is the conservative choice.
         permissions={},
     )
     sub = QueryEngine(

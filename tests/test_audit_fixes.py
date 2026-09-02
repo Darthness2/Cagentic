@@ -5,7 +5,7 @@ from types import SimpleNamespace
 from cagentic import projects, reminders, sessions
 from cagentic.background import BackgroundExecutor
 from cagentic.browser import BrowserBridge
-from cagentic.coding_tools import t_enter_worktree
+from cagentic.coding_tools import t_push_workspace
 from cagentic.coordinator import tick
 from cagentic.tasks import TaskGraph
 from cagentic.teams import TeamRegistry
@@ -72,7 +72,7 @@ def test_pinned_boundary_blocks_workspace_and_worktree_escape(tmp_path):
     outside.mkdir()
     ctx = ToolContext(root=project, workspace_boundary=project, yolo=True)
     assert t_set_workspace({"path": str(outside)}, ctx).startswith("ERROR: pinned")
-    assert t_enter_worktree({"path": str(outside)}, ctx).startswith("ERROR: pinned")
+    assert t_push_workspace({"path": str(outside)}, ctx).startswith("ERROR: pinned")
     child = project / "child"
     assert t_set_workspace({"path": str(child), "create": True}, ctx).startswith("OK")
     assert ctx.root == child.resolve()

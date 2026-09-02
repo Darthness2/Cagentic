@@ -15,10 +15,10 @@ import pytest
 from cagentic.coding_tools import (
     t_brief,
     t_check_syntax,
-    t_enter_worktree,
-    t_exit_worktree,
     t_multi_edit,
     t_notebook_edit,
+    t_pop_workspace,
+    t_push_workspace,
     t_task_create,
     t_task_delete,
     t_task_update,
@@ -85,14 +85,14 @@ def test_config_get_model_reports_the_active_runtime_model(tmp_path):
 
 
 def test_collama_coding_groups_are_default_enabled():
-    assert {"coding", "worktree", "subagent"} <= DEFAULT_GROUPS
+    assert {"coding", "workspace", "subagent"} <= DEFAULT_GROUPS
     default_names = {s["function"]["name"] for s in all_tool_schemas()}
     for name in (
         "check_syntax",
         "multi_edit",
         "notebook_edit",
-        "enter_worktree",
-        "exit_worktree",
+        "push_workspace",
+        "pop_workspace",
         "agent_call",
         "task_create",
         "task_update",
@@ -190,20 +190,39 @@ def test_notebook_replace_preserves_cell_type_by_default(ctx, tmp_path):
     assert notebook["cells"][0]["cell_type"] == "markdown"
 
 
-# ---------------------------------------------------------------- worktree --
+# --------------------------------------------------------- workspace stack --
 
 
-def test_worktree_push_pop(ctx, tmp_path):
-    out = t_enter_worktree({"path": "sub", "create": True}, ctx)
-    assert out.startswith("OK: entered")
+def test_workspace_push_pop(ctx, tmp_path):
+    out = t_push_workspace({"path": "sub", "create": True}, ctx)
+    assert out.startswith("OK: workspace now")
     assert ctx.root == (tmp_path / "sub").resolve()
-    out = t_exit_worktree({}, ctx)
-    assert out.startswith("OK: exited")
+    out = t_pop_workspace({}, ctx)
+    assert out.startswith("OK: workspace restored")
     assert ctx.root == tmp_path
 
 
-def test_exit_worktree_on_empty_stack(ctx):
-    assert t_exit_worktree({}, ctx).startswith("ERROR")
+def test_the_old_worktree_names_still_dispatch(ctx, tmp_path):
+    """These shipped as enter_worktree / exit_worktree.
+
+    The rename was to stop the name promising a git worktree it never created,
+    but a saved session or a user's muscle memory may still say the old thing.
+    """
+    from cagentic.tools import TOOL_ALIASES
+
+    assert TOOL_ALIASES["enter_worktree"] == "push_workspace"
+    assert TOOL_ALIASES["exit_worktree"] == "pop_workspace"
+
+
+def test_a_config_pinning_the_old_group_name_still_gets_the_tools():
+    from cagentic.tools import all_tool_schemas
+
+    names = {s["function"]["name"] for s in all_tool_schemas({"worktree"})}
+    assert names == {"push_workspace", "pop_workspace"}
+
+
+def test_pop_workspace_on_empty_stack(ctx):
+    assert t_pop_workspace({}, ctx).startswith("ERROR")
 
 
 # -------------------------------------------------------------- task graph --

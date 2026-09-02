@@ -27,6 +27,7 @@ from .tools import (
     _record_edit,
     _resolve,
     _resolve_contained,
+    _stale_file_error,
     _truncate,
     _write_text_raw,
 )
@@ -394,6 +395,9 @@ def t_multi_edit(args: dict, ctx: ToolContext) -> str:
         return f"ERROR: {exc}"
     if not p.exists():
         return f"ERROR: file not found: {path}"
+    stale = _stale_file_error(ctx, p, path)
+    if stale:
+        return stale
     raw = _read_text_robust(p)
 
     text, error, notes = plan_multi_edit(raw, edits)
@@ -412,7 +416,9 @@ def t_multi_edit(args: dict, ctx: ToolContext) -> str:
     adds, dels = _diff.stats(raw, text)
     recovered = sum(1 for n in notes if not n.endswith(":exact"))
     tail = f"  ({recovered} fuzzy-matched)" if recovered else ""
-    return f"OK: applied {len(edits)} edits to {path} +{adds} -{dels}{tail}"
+    return f"OK: applied {len(edits)} edits to {path} +{adds} -{dels}{tail}" + syntax_warning_for(
+        p, text
+    )
 
 
 # ============================================================================
@@ -546,11 +552,16 @@ def t_notebook_edit(args: dict, ctx: ToolContext) -> str:
 
 
 # ============================================================================
-# enter_worktree / exit_worktree — push/pop the workspace stack
+# push_workspace / pop_workspace — push/pop the workspace stack
+#
+# These were called enter_worktree / exit_worktree, which was a straight
+# lie: nothing here runs `git worktree add`, creates a branch, or cleans
+# anything up. It is a directory stack. The old name led the model to plan
+# around a git isolation it was never getting.
 # ============================================================================
 
 
-def t_enter_worktree(args: dict, ctx: ToolContext) -> str:
+def t_push_workspace(args: dict, ctx: ToolContext) -> str:
     path = args["path"]
     create = bool(args.get("create", False))
     p = _resolve(path, ctx.root)
@@ -561,7 +572,7 @@ def t_enter_worktree(args: dict, ctx: ToolContext) -> str:
             return f"ERROR: pinned project boundary: {e}"
     if not p.exists():
         if not create:
-            return f"ERROR: worktree dir not found: {p}. Pass create=true to mkdir it."
+            return f"ERROR: directory not found: {p}. Pass create=true to mkdir it."
         p.mkdir(parents=True, exist_ok=True)
     elif not p.is_dir():
         return f"ERROR: not a directory: {p}"
@@ -573,10 +584,10 @@ def t_enter_worktree(args: dict, ctx: ToolContext) -> str:
     stack.append(str(ctx.root))
     state.update(worktree_stack=stack, workspace=p.resolve())
     ctx.root = p.resolve()
-    return f"OK: entered worktree {p}  (stack depth {len(stack)})"
+    return f"OK: workspace now {p}  (stack depth {len(stack)})"
 
 
-def t_exit_worktree(args: dict, ctx: ToolContext) -> str:
+def t_pop_workspace(args: dict, ctx: ToolContext) -> str:
     from pathlib import Path
 
     state = getattr(ctx, "state", None)
@@ -584,11 +595,11 @@ def t_exit_worktree(args: dict, ctx: ToolContext) -> str:
         return "ERROR: worktree stack not available"
     stack = list(getattr(state, "worktree_stack", []) or [])
     if not stack:
-        return "ERROR: worktree stack is empty (no enter_worktree to pop)"
+        return "ERROR: worktree stack is empty (no push_workspace to pop)"
     prev = stack.pop()
     state.update(worktree_stack=stack, workspace=Path(prev))
     ctx.root = Path(prev)
-    return f"OK: exited worktree, back to {prev}"
+    return f"OK: workspace restored to {prev}"
 
 
 # ============================================================================
@@ -903,8 +914,8 @@ CODING_TOOLS = {
     "check_syntax": t_check_syntax,
     "multi_edit": t_multi_edit,
     "notebook_edit": t_notebook_edit,
-    "enter_worktree": t_enter_worktree,
-    "exit_worktree": t_exit_worktree,
+    "push_workspace": t_push_workspace,
+    "pop_workspace": t_pop_workspace,
     "powershell": t_powershell,
     "agent_call": t_agent_call,
     "agent_call_async": t_agent_call_async,
@@ -1014,8 +1025,8 @@ CODING_TOOL_SCHEMAS = [
     {
         "type": "function",
         "function": {
-            "name": "enter_worktree",
-            "description": "Push the current workspace onto a stack and switch to `path`. Use when working on a sub-task in its own directory. Pair with exit_worktree.",
+            "name": "push_workspace",
+            "description": "Push the current workspace onto a stack and switch to `path`. Changes the working directory only — this is not a git worktree and creates no branch. Pair with pop_workspace.",
             "parameters": {
                 "type": "object",
                 "properties": {
@@ -1029,8 +1040,8 @@ CODING_TOOL_SCHEMAS = [
     {
         "type": "function",
         "function": {
-            "name": "exit_worktree",
-            "description": "Pop the worktree stack and restore the previous workspace.",
+            "name": "pop_workspace",
+            "description": "Pop the workspace stack and restore the previous working directory.",
             "parameters": {"type": "object", "properties": {}},
         },
     },
@@ -1308,3 +1319,35 @@ CODING_TOOL_SCHEMAS = [
         },
     },
 ]
+
+
+# Languages whose checker runs in-process. The rest — javascript, typescript,
+# bash, go, rust — shell out to node/tsc/bash/gofmt/rustc, and spawning `tsc`
+# on every edit to a .ts file would make editing unusable. Those stay available
+# through check_syntax, which the model calls when it wants them.
+_IN_PROCESS_SYNTAX_LANGS = frozenset({"python", "json", "yaml", "toml", "html", "xml", "css"})
+
+
+def syntax_warning_for(path, text: str) -> str:
+    """One line naming a syntax error this edit introduced, or "".
+
+    An edit that leaves a file unparseable used to be silent: the tool reported
+    `OK: edited foo.py +3 -1` and the model moved on, discovering the breakage
+    later — or not at all, if it never ran the tests. check_syntax could already
+    answer this; nothing asked it. Cheap enough to run on every edit because it
+    is a parse, in this process, of a string already in memory.
+    """
+    try:
+        lang = _SYNTAX_EXT_LANG.get(str(getattr(path, "suffix", "")).lower())
+        if lang not in _IN_PROCESS_SYNTAX_LANGS:
+            return ""
+        checker = _SYNTAX_CHECKERS.get(lang)
+        if checker is None:
+            return ""
+        ok, message = checker(text, getattr(path, "name", str(path)))
+    except Exception:
+        # A diagnostic must never be the reason an edit reports failure.
+        return ""
+    if ok:
+        return ""
+    return f"\nWARNING: this edit leaves the file unparseable — {message}"

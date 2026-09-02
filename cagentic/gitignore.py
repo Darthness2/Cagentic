@@ -36,6 +36,12 @@ _log = logging.getLogger(__name__)
 # and contains nothing the model wants.
 ALWAYS_SKIP = frozenset({".git", ".hg", ".svn"})
 
+# Bounds on the hunt for nested .gitignore files. Both are needed: the file count
+# caps how many rule sets we merge, and the directory count caps how long we are
+# willing to look for them in a tree that simply does not have that many.
+MAX_IGNORE_FILES = 50
+MAX_IGNORE_SCAN_DIRS = 2000
+
 
 class _Rule:
     __slots__ = ("pattern", "negated", "dir_only", "anchored", "base")
@@ -93,13 +99,20 @@ class IgnoreMatcher:
         # Root .gitignore plus any nested ones, which is where monorepos put
         # most of their real rules.
         candidates: list[Path] = []
+        visited = 0
         try:
             for dirpath, dirnames, filenames in os.walk(self.root):
                 dirnames[:] = [d for d in dirnames if d not in ALWAYS_SKIP]
                 if ".gitignore" in filenames:
                     candidates.append(Path(dirpath) / ".gitignore")
-                # Don't descend forever looking for ignore files.
-                if len(candidates) > 50:
+                # Two separate bounds, because the candidate count alone does not
+                # bound the *walk*. A root with fewer than 50 .gitignore files
+                # anywhere in it — a home directory, say — kept descending
+                # forever looking for the 51st: 59 seconds for a tree the raw
+                # walk crosses in 0.3. And this runs before any rule is known, so
+                # it cannot prune on the ignore file it is still looking for.
+                visited += 1
+                if len(candidates) > MAX_IGNORE_FILES or visited > MAX_IGNORE_SCAN_DIRS:
                     break
         except OSError:
             return
@@ -124,15 +137,33 @@ class IgnoreMatcher:
             rel = str(Path(path).resolve().relative_to(self.root)).replace(os.sep, "/")
         except (ValueError, OSError):
             return False
+        try:
+            is_dir = Path(path).is_dir()
+        except OSError:
+            is_dir = False
+        return self.is_ignored_rel(rel, is_dir)
+
+    def is_ignored_rel(self, rel: str, is_dir: bool, *, ancestors_clear: bool = False) -> bool:
+        """Same decision, for a caller that already knows the answers.
+
+        `is_ignored` spends two syscalls per candidate — a `resolve()` and an
+        `is_dir()` — which is most of its cost and all of it wasted on a caller
+        walking the tree with `os.walk`: the walk already yields paths under the
+        resolved root and already separates directories from files.
+
+        `ancestors_clear` is the other half. Normally every rule is tested against
+        the path *and each of its ancestors*, because a file inside an ignored
+        directory is itself ignored — O(rules x depth) fnmatch calls per path. A
+        caller that prunes ignored directories as it walks has already proved
+        every ancestor clean, so that whole loop is redundant work. Profiling a
+        glob over a home directory: 23k paths cost 31.8M rule evaluations and
+        135M fnmatch calls, nearly all of them re-deciding ancestors.
+        """
         if not rel or rel == ".":
             return False
         parts = rel.split("/")
         if any(part in ALWAYS_SKIP for part in parts):
             return True
-        try:
-            is_dir = Path(path).is_dir()
-        except OSError:
-            is_dir = False
 
         ignored = False
         for rule in self._rules:
@@ -143,15 +174,18 @@ class IgnoreMatcher:
                 target = rel[len(rule.base) + 1 :]
             else:
                 target = rel
-            # A file inside an ignored directory is ignored, so test each
-            # ancestor too rather than only the full path.
-            probe = target
             hit = False
-            while probe:
-                if rule.matches(probe, is_dir or probe != target):
-                    hit = True
-                    break
-                probe = probe.rpartition("/")[0]
+            if ancestors_clear:
+                hit = rule.matches(target, is_dir)
+            else:
+                # A file inside an ignored directory is ignored, so test each
+                # ancestor too rather than only the full path.
+                probe = target
+                while probe:
+                    if rule.matches(probe, is_dir or probe != target):
+                        hit = True
+                        break
+                    probe = probe.rpartition("/")[0]
             if hit:
                 # Last matching rule wins — that's how negation works.
                 ignored = not rule.negated

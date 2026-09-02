@@ -41,7 +41,14 @@ _DEFAULTS: dict[str, Any] = {
     "user_name": None,  # how the assistant addresses you
     "tool_groups": None,  # None = cagentic.tools.DEFAULT_GROUPS
     "ollama": {
-        "num_ctx": 8192,
+        # Was 8192, which was wired for 2024-era models and is no longer a
+        # workable default: the tool schemas plus the system prompt are a fixed
+        # ~10k tokens that every request carries and no amount of compaction can
+        # shrink, so an 8k window left *negative* room for the conversation and
+        # tripped the engine's own "little fits in this context" warning on the
+        # very first turn. 32k clears the floor with room to work and is well
+        # within what current local coding models handle.
+        "num_ctx": 32768,
         "keep_alive": "30m",
         "stream": True,
     },
@@ -106,6 +113,10 @@ _DEFAULTS: dict[str, Any] = {
         "interval": 60,
         "desktop_notifications": True,
     },
+    # Lifecycle hooks: {event: [{"command": "...", "timeout": 10}, ...]}.
+    # Declared here so `/config` shows the key exists rather than leaving it
+    # an undocumented thing you had to read the source to discover.
+    "hooks": {},
 }
 
 

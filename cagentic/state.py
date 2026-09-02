@@ -36,6 +36,15 @@ class AppState:
     yolo: bool = False  # auto-approve all tool calls
     insecure_ssl: bool = False  # turn off TLS verify (school MITM)
     tools_enabled: bool = True  # native ollama tool calls vs text-protocol
+    # Whether the model may draw charts and tables into the page. Only the web UI
+    # renders them, so when it is off the tool is withheld rather than offered and
+    # ignored — which also keeps its schema out of the context budget.
+    #
+    # Off by default because the default front end is the terminal, which draws
+    # nothing: the gateway is the one surface that can, and it says so explicitly
+    # (Gateway._rebuild_suffix / _chat_settings_applied). Defaulting this on meant
+    # every REPL session paid for a tool whose output it could not render.
+    panels_enabled: bool = False
     dry_run: bool = False  # hard safety gate: external mutations are blocked
 
     # Effort dial — how much effort/thoroughness the model applies. One of
@@ -53,6 +62,13 @@ class AppState:
     # yolo stays a separate switch because it means "approve literally
     # everything", including shell commands, and several call sites read it.
     approval_mode: str = "ask"
+
+    # Ask before *every* tool, including the read-only ones that normally go
+    # through silently. Its own switch rather than a third `approval_mode` value
+    # for the same reason yolo is: it sits at a different point in the ordering —
+    # above the read-only allowance rather than below it — and reads as a mode of
+    # its own to anyone looking at the toolbar.
+    ask_all: bool = False
 
     # Pattern permission rules, {"allow": [...], "deny": [...]}, merged from
     # user config and the workspace's .cagentic/settings*.json. Empty means
@@ -95,6 +111,12 @@ class AppState:
 
     # Per-turn set of absolute paths the model has already read this turn.
     files_read: set[str] = field(default_factory=set)
+
+    # {absolute_path: "mtime_ns:size"} as of the last time we read or wrote it.
+    # Deliberately NOT reset per turn: the point is to notice that a file changed
+    # underneath a long session — someone editing in their editor while a turn
+    # runs — before an edit writes the whole file back and discards their work.
+    file_versions: dict[str, str] = field(default_factory=dict)
 
     # per-model facts learned at runtime (e.g. tools_supported)
     models: dict[str, dict] = field(default_factory=dict)

@@ -7,8 +7,14 @@ import shutil
 from pathlib import Path
 
 from . import command_utils, config, sessions
-from .providers import build_client, parse_model
+from .providers import build_client, context_window_for, parse_model
 from .storage import database_path
+
+# How much of the window the uncompactable floor may take before this is a
+# finding rather than a note. Above roughly a third, compaction is fighting for
+# what little is left and long turns start failing for reasons no amount of
+# trimming can fix.
+_FLOOR_LIMIT = 0.35
 
 
 def run(cfg: dict) -> dict:
@@ -38,6 +44,38 @@ def run(cfg: dict) -> dict:
             add("provider", False, f"{provider}: {exc}")
     else:
         add("provider", False, "no model configured")
+
+    # What every request costs before a single word of conversation: the tool
+    # definitions plus the system prompt. Neither can be compacted away, so when
+    # this floor approaches the model's window there is nothing the agent can do
+    # at runtime to recover — turns just start failing. The shipped defaults were
+    # once past 100% of the configured window, which is the kind of thing that
+    # should be a line in `--doctor` rather than a mystery.
+    if model_spec:
+        try:
+            from .engine import fetch_system_prompt_parts
+            from .services.compact import approx_schema_tokens, approx_tokens
+            from .state import AppState
+            from .tools import all_tool_schemas
+
+            groups_raw = cfg.get("tool_groups")
+            groups = set(groups_raw) if isinstance(groups_raw, list) else None
+            schemas = all_tool_schemas(groups)
+            probe_state = AppState(workspace=Path.cwd(), home=Path.home())
+            floor = approx_schema_tokens(schemas) + approx_tokens(
+                [{"role": "system", "content": fetch_system_prompt_parts(probe_state)}]
+            )
+            window = context_window_for(model_spec, cfg)
+            share = (floor / window) if window else 0.0
+            detail = (
+                f"~{floor:,} tokens before any conversation "
+                f"({len(schemas)} tools + system prompt) of a {window:,}-token window"
+            )
+            if share >= _FLOOR_LIMIT:
+                detail += f" — {share:.0%}. Raise the context size or turn off tool groups."
+            add("context_floor", share < _FLOOR_LIMIT, detail)
+        except Exception as exc:  # a diagnostic must never be the thing that breaks
+            add("context_floor", True, f"not measured ({type(exc).__name__}: {exc})")
 
     roots = os.environ.get("CAGENTIC_WORKSPACE_ROOTS") or str(Path.cwd())
     add("workspace_roots", True, roots)

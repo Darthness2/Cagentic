@@ -152,6 +152,9 @@ class ToolContext:
     teams: object | None = None
     read_cache: dict | None = None
     widget_action: Callable[[str, str, dict], str | None] | None = None
+    # Put a question to whoever is watching and block for the answer. Present only on front ends
+    # that can prompt without stdin — the gateway supplies it; the terminal reads the tty instead.
+    ask_user: Callable[[str, list[str]], str] | None = None
     # A tool that produces an image (e.g. browser_screenshot) appends raw
     # base64 PNG data here; the engine attaches it to the tool result
     # message so vision-capable models actually see the picture.
@@ -241,10 +244,58 @@ def t_read_file(args: dict, ctx: ToolContext) -> str:
         files_read = set(getattr(state, "files_read", set()) or set())
         files_read.add(range_key)
         state.update(files_read=files_read)
+    _note_file_version(ctx, p)
     return out
 
 
 MAX_EDIT_HISTORY = 50
+
+
+def _fingerprint(p: Path) -> str | None:
+    """Cheap identity for a file's current contents, or None if it isn't there."""
+    try:
+        st = p.stat()
+    except OSError:
+        return None
+    return f"{st.st_mtime_ns}:{st.st_size}"
+
+
+def _note_file_version(ctx: ToolContext, p: Path) -> None:
+    """Remember the file as it stands now, because we just read or wrote it."""
+    state = getattr(ctx, "state", None)
+    if state is None:
+        return
+    fp = _fingerprint(p)
+    if fp is None:
+        return
+    versions = dict(getattr(state, "file_versions", {}) or {})
+    versions[str(p.resolve())] = fp
+    state.update(file_versions=versions)
+
+
+def _stale_file_error(ctx: ToolContext, p: Path, path: str) -> str | None:
+    """Refuse to edit a file that changed underneath us since we last saw it.
+
+    Without this the agent happily overwrote work somebody did in their editor
+    while a turn was running: it had the old contents in context, and every edit
+    path writes the whole file back. The check is deliberately one-directional —
+    a file we have never read has no recorded version and is not blocked, so
+    this adds a guard rather than a new precondition.
+    """
+    state = getattr(ctx, "state", None)
+    if state is None:
+        return None
+    known = (getattr(state, "file_versions", {}) or {}).get(str(p.resolve()))
+    if known is None:
+        return None
+    current = _fingerprint(p)
+    if current is None or current == known:
+        return None
+    return (
+        f"ERROR: {path} changed on disk since you last read it — someone else "
+        f"has edited it. Read it again before writing, or your edit will "
+        f"discard their change."
+    )
 
 
 def _record_edit(ctx: ToolContext, path: Path, before: str, after: str, op: str) -> None:
@@ -284,6 +335,20 @@ def _record_edit(ctx: ToolContext, path: Path, before: str, after: str, op: str)
         remaining = {k for k in files_read if not _stale(k)}
         if remaining != files_read:
             state.update(files_read=remaining)
+    # We wrote it, so we know what it says now: re-baseline rather than
+    # leaving the pre-edit fingerprint to trip the staleness guard on our
+    # own next write.
+    _note_file_version(ctx, path)
+
+
+def _syntax_note(p: Path, text: str) -> str:
+    """Flag an edit that left the file unparseable. Never raises."""
+    try:
+        from .coding_tools import syntax_warning_for
+
+        return syntax_warning_for(p, text)
+    except Exception:
+        return ""
 
 
 def t_write_file(args: dict, ctx: ToolContext) -> str:
@@ -300,6 +365,9 @@ def t_write_file(args: dict, ctx: ToolContext) -> str:
     existed = p.is_file()
     if p.exists() and not existed:
         return f"ERROR: not a file: {path}"
+    stale = _stale_file_error(ctx, p, path) if existed else None
+    if stale:
+        return stale
     # Read verbatim so the undo snapshot restores the original bytes, line
     # endings included.
     old_text = _read_text_robust(p) if existed else ""
@@ -319,7 +387,7 @@ def t_write_file(args: dict, ctx: ToolContext) -> str:
     _write_text_raw(p, content)
     _record_edit(ctx, p, old_text, content, "write" if existed else "create")
     adds, dels = _diff.stats(old_text, content)
-    return f"OK: wrote {path} +{adds} -{dels}"
+    return f"OK: wrote {path} +{adds} -{dels}" + _syntax_note(p, content)
 
 
 def _norm_eol(s: str) -> str:
@@ -509,6 +577,9 @@ def t_edit_file(args: dict, ctx: ToolContext) -> str:
         return f"ERROR: {e}"
     if not p.exists():
         return f"ERROR: file not found: {path}"
+    stale = _stale_file_error(ctx, p, path)
+    if stale:
+        return stale
     raw = _read_text_robust(p)
 
     new_text, label, error = _plan_edit(raw, old, new, replace_all)
@@ -548,7 +619,7 @@ def t_edit_file(args: dict, ctx: ToolContext) -> str:
     _write_text_raw(p, new_text)
     _record_edit(ctx, p, raw, new_text, "edit")
     adds, dels = _diff.stats(raw, new_text)
-    return f"OK: edited {path} +{adds} -{dels}"
+    return f"OK: edited {path} +{adds} -{dels}" + _syntax_note(p, new_text)
 
 
 def _plan_replace_lines(
@@ -599,6 +670,9 @@ def t_replace_lines(args: dict, ctx: ToolContext) -> str:
         return f"ERROR: {exc}"
     if not p.exists():
         return f"ERROR: file not found: {path}"
+    stale = _stale_file_error(ctx, p, path)
+    if stale:
+        return stale
     raw = _read_text_robust(p)
     new_text, s, e, error = _plan_replace_lines(raw, int(start), int(end), new_content)
     if error:
@@ -611,7 +685,7 @@ def t_replace_lines(args: dict, ctx: ToolContext) -> str:
     _write_text_raw(p, new_text)
     _record_edit(ctx, p, raw, new_text, "replace_lines")
     adds, dels = _diff.stats(raw, new_text)
-    return f"OK: replaced {path}:{s + 1}-{e} +{adds} -{dels}"
+    return f"OK: replaced {path}:{s + 1}-{e} +{adds} -{dels}" + _syntax_note(p, new_text)
 
 
 def preview_change(name: str, args: dict, root: Path) -> tuple[str, str, str] | None:
@@ -700,12 +774,37 @@ def t_list_dir(args: dict, ctx: ToolContext) -> str:
     return _truncate(f"{header}\n{body}")
 
 
+def _grep_options(args: dict) -> tuple[int, int, str, str]:
+    """(before, after, file_glob, mode) from the caller's arguments."""
+
+    def count(*keys: str) -> int:
+        for key in keys:
+            if args.get(key) is not None:
+                try:
+                    return max(0, min(int(args[key]), 20))
+                except (TypeError, ValueError):
+                    return 0
+        return 0
+
+    both = count("context", "C")
+    before = count("before", "B") or both
+    after = count("after", "A") or both
+    file_glob = str(args.get("glob") or args.get("file_pattern") or "")
+    mode = str(args.get("mode") or "content").lower()
+    if mode not in ("content", "files_with_matches", "count"):
+        mode = "content"
+    return before, after, file_glob, mode
+
+
 def t_grep(args: dict, ctx: ToolContext) -> str:
+    import fnmatch
+
     pattern = args.get("pattern") or args.get("query") or args.get("regex")
     if not pattern:
         return "ERROR: missing argument 'pattern'"
     path = args.get("path", ".")
     case_insensitive = bool(args.get("case_insensitive", False))
+    before, after, file_glob, mode = _grep_options(args)
     try:
         p = _resolve_contained(path, ctx.root)
     except PathEscapeError as exc:
@@ -727,6 +826,17 @@ def t_grep(args: dict, ctx: ToolContext) -> str:
         cmd = [rg, "-n", "--no-heading", "--color=never", "--no-require-git", "-m", "200"]
         if case_insensitive:
             cmd.append("-i")
+        if file_glob:
+            cmd += ["--glob", file_glob]
+        if mode == "files_with_matches":
+            cmd.append("-l")
+        elif mode == "count":
+            cmd.append("-c")
+        else:
+            if before:
+                cmd += ["-B", str(before)]
+            if after:
+                cmd += ["-A", str(after)]
         cmd.extend(["--", pattern, str(p)])
         try:
             proc = subprocess.run(cmd, capture_output=True, text=True, timeout=30)
@@ -743,13 +853,16 @@ def t_grep(args: dict, ctx: ToolContext) -> str:
         return f"ERROR: bad regex: {e}"
     # ripgrep (the branch above) skips gitignored files for free. Without the
     # same filter here the SAME search returns different results depending on
-    # whether `rg` happens to be installed.
+    # whether `rg` happens to be installed. The same goes for every option
+    # above: an answer that changes with what is installed is worse than either
+    # answer alone.
     from .gitignore import matcher_for
 
     ignores = matcher_for(ctx.root)
     matches: list[str] = []
     targets = [p] if p.is_file() else list(p.rglob("*")) if p.is_dir() else []
     scanned = 0
+    total = 0
     MAX_SCAN = 2000
     for f in targets:
         if not f.is_file():
@@ -758,21 +871,54 @@ def t_grep(args: dict, ctx: ToolContext) -> str:
             continue
         if any(s in f.parts for s in (".cache", "site-packages", ".tox", ".pytest_cache")):
             continue
+        if file_glob and not (
+            fnmatch.fnmatch(f.name, file_glob) or fnmatch.fnmatch(str(f), file_glob)
+        ):
+            continue
         scanned += 1
         if scanned > MAX_SCAN:
             matches.append(f"…[scanned {MAX_SCAN}+ files, stopping]")
             return _truncate("\n".join(matches))
+        rel = f.relative_to(ctx.root) if f.is_relative_to(ctx.root) else f
         try:
             with f.open("r", errors="replace") as fp:
-                for i, line in enumerate(fp, 1):
-                    if rx.search(line):
-                        rel = f.relative_to(ctx.root) if f.is_relative_to(ctx.root) else f
-                        matches.append(f"{rel}:{i}: {line.rstrip()}")
-                        if len(matches) >= 200:
-                            matches.append("…[200 match cap]")
-                            return _truncate("\n".join(matches))
+                lines = fp.read().splitlines()
         except (OSError, UnicodeDecodeError):
             continue
+
+        hits = [i for i, line in enumerate(lines) if rx.search(line)]
+        if not hits:
+            continue
+        if mode == "files_with_matches":
+            matches.append(str(rel))
+            if len(matches) >= 200:
+                matches.append("…[200 file cap]")
+                break
+            continue
+        if mode == "count":
+            matches.append(f"{rel}:{len(hits)}")
+            if len(matches) >= 200:
+                matches.append("…[200 file cap]")
+                break
+            continue
+
+        emitted: set[int] = set()
+        for i in hits:
+            lo = max(0, i - before)
+            hi = min(len(lines), i + after + 1)
+            for j in range(lo, hi):
+                if j in emitted:
+                    continue
+                emitted.add(j)
+                # ':' both sides for a match, '-' both sides for context —
+                # grep's convention, and ripgrep's, so output reads the same
+                # whichever branch above produced it.
+                sep = ":" if rx.search(lines[j]) else "-"
+                matches.append(f"{rel}{sep}{j + 1}{sep} {lines[j].rstrip()}")
+            total += 1
+            if total >= 200:
+                matches.append("…[200 match cap]")
+                return _truncate("\n".join(matches))
     return _truncate("\n".join(matches) if matches else "(no matches)")
 
 
@@ -791,19 +937,76 @@ def t_glob(args: dict, ctx: ToolContext) -> str:
     ignores = matcher_for(ctx.root)
     matches: list[str] = []
     if "**" in pattern or "/" in pattern:
-        for p in base.rglob("*"):
-            if ignores.is_ignored(p):
-                continue
-            rel = p.relative_to(base)
-            if fnmatch.fnmatch(str(rel), pattern):
-                matches.append(str(rel))
+        # `**/x` has to match `x` at the top level too. fnmatch has no idea what
+        # `**` means — it is just "any characters" to it — so `**/pyproject.toml`
+        # requires a literal slash and silently misses the file in the root of the
+        # very directory being searched. That is the most natural pattern a model
+        # writes, and getting "(no matches)" for a file it can see sends it into a
+        # retry loop. Match the zero-directory form as well.
+        patterns = [pattern]
+        if pattern.startswith("**/"):
+            patterns.append(pattern[3:])
+        # Prune ignored directories during the walk instead of enumerating the
+        # whole tree and filtering afterwards. rglob("*") descends into .venv,
+        # .git and node_modules in full before the ignore test throws every one
+        # of those paths away, which is most of the cost of a glob in any real
+        # checkout — and an agent that globs several times a turn pays it again
+        # each time.
+        # Bounded like grep's MAX_SCAN, and for the same reason. The workspace
+        # can legitimately be somewhere enormous — it defaults to $HOME when
+        # Cagentic is launched from its own install directory — and an unbounded
+        # `**/x` there walks the user's entire home directory. That is not a
+        # hypothetical: it burned twenty minutes of a turn before this cap.
+        MAX_SCAN = 20000
+        scanned = 0
+        truncated = False
+        base_str = str(base)
+        for dirpath, dirnames, filenames in os.walk(base):
+            # Relative prefix for this directory, computed once per directory
+            # rather than per entry, and without a syscall — see is_ignored_rel.
+            prefix = dirpath[len(base_str) :].lstrip(os.sep).replace(os.sep, "/")
+            dirnames[:] = [
+                d
+                for d in dirnames
+                if not ignores.is_ignored_rel(
+                    f"{prefix}/{d}" if prefix else d, True, ancestors_clear=True
+                )
+            ]
+            for name, is_dir in [(d, True) for d in dirnames] + [(f, False) for f in filenames]:
+                scanned += 1
+                if scanned > MAX_SCAN:
+                    truncated = True
+                    break
+                rel = f"{prefix}/{name}" if prefix else name
+                if ignores.is_ignored_rel(rel, is_dir, ancestors_clear=True):
+                    continue
+                if any(fnmatch.fnmatch(rel, pat) for pat in patterns):
+                    matches.append(rel)
+            if truncated:
+                break
+        if truncated:
+            matches.append(
+                f"…[scanned {MAX_SCAN:,}+ paths under {base}, stopping. "
+                "Narrow the pattern or pass a more specific path=.]"
+            )
     else:
         for p in base.iterdir():
             if ignores.is_ignored(p):
                 continue
             if fnmatch.fnmatch(p.name, pattern):
                 matches.append(p.name)
-    matches.sort()
+    if str(args.get("sort", "name")).lower() == "mtime":
+        # Newest first. Alphabetical order cannot answer "what did I touch
+        # recently", which is most of why an agent globs a directory at all.
+        def _mtime(rel: str) -> float:
+            try:
+                return (base / rel).stat().st_mtime
+            except OSError:
+                return 0.0
+
+        matches.sort(key=_mtime, reverse=True)
+    else:
+        matches.sort()
     return _truncate("\n".join(matches[:500]) if matches else "(no matches)")
 
 
@@ -2712,6 +2915,13 @@ def t_ask_user_question(args: dict, ctx: ToolContext) -> str:
         from .permissions import terminal_resolver
 
         if getattr(engine, "permission_resolver", None) is not terminal_resolver:
+            # Not the engine that owns the tty. A front end that can prompt some other way says
+            # so by supplying `ask_user`; it blocks this turn until somebody answers, exactly as
+            # an approval prompt does.
+            asker = getattr(ctx, "ask_user", None)
+            if asker is not None:
+                answer = str(asker(str(question), [str(o) for o in options])).strip()
+                return answer or "(empty)"
             opts = ("  Options: " + " / ".join(str(o) for o in options)) if options else ""
             return (
                 "ERROR: no terminal to prompt on. Ask the user directly in your "
@@ -2795,13 +3005,14 @@ def t_todo_write(args: dict, ctx: ToolContext) -> str:
 
 def t_tool_search(args: dict, ctx: ToolContext) -> str:
     from .coding_tools import CODING_TOOL_SCHEMAS
+    from .git_tools import GIT_TOOL_SCHEMAS
     from .github import GITHUB_TOOL_SCHEMAS
 
     q = (args.get("query") or "").lower().strip()
     # Search every schema — searching only this module made optional coding and
     # GitHub tools undiscoverable through the very tool meant to find them.
     out: list[str] = []
-    for s in TOOL_SCHEMAS + CODING_TOOL_SCHEMAS + GITHUB_TOOL_SCHEMAS:
+    for s in TOOL_SCHEMAS + CODING_TOOL_SCHEMAS + GIT_TOOL_SCHEMAS + GITHUB_TOOL_SCHEMAS:
         fn = s.get("function") or {}
         name = fn.get("name", "")
         desc = fn.get("description", "")
@@ -2898,7 +3109,7 @@ def t_skill(args: dict, ctx: ToolContext) -> str:
     to have installed globally.
     """
     from .config import config_dir
-    from .project_scope import find_skill, list_skills, project_dir
+    from .project_scope import describe_skills, find_skill, project_dir
 
     op = args.get("op", "use")
     name = args.get("name", "")
@@ -2906,7 +3117,7 @@ def t_skill(args: dict, ctx: ToolContext) -> str:
     skills_dir.mkdir(parents=True, exist_ok=True)
 
     if op == "list":
-        found = list_skills(ctx.root)
+        found = describe_skills(ctx.root)
         if not found:
             return (
                 "(no skills installed; drop *.md files in "
@@ -2915,7 +3126,10 @@ def t_skill(args: dict, ctx: ToolContext) -> str:
                 + str(skills_dir)
                 + " for every project)"
             )
-        return "\n".join(f"- {skill_name}  ({origin})" for skill_name, origin in found)
+        return "\n".join(
+            f"- {skill_name}  ({origin})" + (f" — {summary}" if summary else "")
+            for skill_name, origin, summary in found
+        )
 
     if not name:
         return "ERROR: skill name required"
@@ -3195,13 +3409,27 @@ TOOL_SCHEMAS: list[dict[str, Any]] = [
         "type": "function",
         "function": {
             "name": "grep",
-            "description": "Recursive regex search. Skips .git, node_modules, build dirs.",
+            "description": (
+                "Recursive regex search. Skips .git, node_modules and gitignored files. "
+                "context=N surrounds each hit with N lines either side (or before=/after= "
+                "separately); glob='*.py' restricts which files are searched; "
+                "mode='files_with_matches' lists just the filenames and mode='count' "
+                "the per-file totals, both far cheaper than reading every hit."
+            ),
             "parameters": {
                 "type": "object",
                 "properties": {
                     "pattern": {"type": "string"},
                     "path": {"type": "string"},
                     "case_insensitive": {"type": "boolean"},
+                    "context": {"type": "integer"},
+                    "before": {"type": "integer"},
+                    "after": {"type": "integer"},
+                    "glob": {"type": "string"},
+                    "mode": {
+                        "type": "string",
+                        "enum": ["content", "files_with_matches", "count"],
+                    },
                 },
                 "required": ["pattern"],
             },
@@ -3211,12 +3439,17 @@ TOOL_SCHEMAS: list[dict[str, Any]] = [
         "type": "function",
         "function": {
             "name": "glob",
-            "description": "File pattern matching (supports ** for recursive globs).",
+            "description": (
+                "File pattern matching; ** matches at any depth including the top "
+                "level. sort='mtime' returns most-recently-modified first, which is "
+                "what you want for 'what changed lately'."
+            ),
             "parameters": {
                 "type": "object",
                 "properties": {
                     "pattern": {"type": "string"},
                     "path": {"type": "string"},
+                    "sort": {"type": "string", "enum": ["name", "mtime"]},
                 },
                 "required": ["pattern"],
             },
@@ -4360,9 +4593,10 @@ TOOL_SCHEMAS: list[dict[str, Any]] = [
 
 def _all_tools() -> dict[str, ToolFn]:
     from .coding_tools import CODING_TOOLS
+    from .git_tools import GIT_TOOLS
     from .github import GITHUB_TOOLS
 
-    return {**TOOLS, **CODING_TOOLS, **GITHUB_TOOLS}
+    return {**TOOLS, **CODING_TOOLS, **GIT_TOOLS, **GITHUB_TOOLS}
 
 
 # Tool groups — bundle related tools so the user can keep the prompt lean.
@@ -4465,7 +4699,8 @@ TOOL_GROUPS: dict[str, list[str]] = {
     "system": ["config_get", "config_set", "sleep", "skill", "tool_search"],
     # Coding-agent tools absorbed from Collama.
     "coding": ["check_syntax", "multi_edit", "notebook_edit"],
-    "worktree": ["enter_worktree", "exit_worktree"],
+    "workspace": ["push_workspace", "pop_workspace"],
+    "git": ["git_status", "git_diff", "git_log", "git_commit"],
     "subagent": ["agent_call", "agent_call_async"],
     # Rich cards — charts, tables, stat blocks — rendered straight into the
     # gateway web UI by app.js.
@@ -4497,26 +4732,43 @@ TOOL_GROUPS: dict[str, list[str]] = {
     ],
 }
 
-# Personal-assistant defaults. Shell uses run_bash's per-call confirm;
-# browser tools gate their mutating actions the same way.
+# What ships enabled. Shell uses run_bash's per-call confirm; browser tools gate
+# their mutating actions the same way.
+#
+# This list used to be everything except `teams` and `github` — 99 schemas,
+# ~7,600 tokens of definitions on every single request. That is affordable on a
+# 200k cloud window and ruinous on a local one: together with the system prompt
+# it put the uncompactable floor at ~10k tokens, more than the whole context of
+# the model the README told people to install.
+#
+# The big absentees (`life`, `browser`, `notes`, `reminders`, `widgets`) are the
+# assistant surface, and they are worth roughly three quarters of that cost
+# while being irrelevant to most turns. They are not gone: `tool_search` lets
+# the model find and ask for tools outside its schema set, and `/groups enable
+# life browser` turns them back on wholesale for anyone who came for them.
 DEFAULT_GROUPS: set[str] = {
     "files",
     "web",
-    "notes",
-    "reminders",
-    "life",
     "mcp",
-    "browser",
     "shell",
     "tasks",
     "interaction",
     "planning",
     "system",
     "coding",
-    "worktree",
+    "workspace",
+    "git",
     "subagent",
+    # Stays enabled, but costs nothing here: `show_widget` is withheld unless
+    # something is actually able to draw the result (see AppState.panels_enabled
+    # and QueryEngine._tool_schemas), which in practice means the web UI.
     "widgets",
 }
+
+# The assistant surface, off by default and switched back on wholesale with
+# `/groups enable life browser notes reminders`. Named rather than re-listed so
+# `/groups` and the docs have one thing to point at.
+ASSISTANT_GROUPS: frozenset[str] = frozenset({"life", "browser", "notes", "reminders"})
 
 
 def _compact_schema(schema: dict) -> dict:
@@ -4542,23 +4794,38 @@ def all_tool_schemas(
     enabled_groups: set[str] | None = None,
     compact: bool = True,
 ) -> list[dict]:
-    groups = DEFAULT_GROUPS if enabled_groups is None else set(enabled_groups)
+    groups = DEFAULT_GROUPS if enabled_groups is None else resolve_groups(enabled_groups)
     return list(_cached_tool_schemas(frozenset(groups), compact))
+
+
+# Group names that have been renamed. `TOOL_GROUPS.get(g, ())` yields nothing
+# for an unknown key, so without this a config that pinned the old name would
+# silently lose the group rather than fail loudly.
+GROUP_ALIASES: dict[str, str] = {"worktree": "workspace"}
+
+
+def resolve_groups(groups) -> set[str]:
+    """Map any retired group names onto their current ones."""
+    return {GROUP_ALIASES.get(g, g) for g in groups}
 
 
 @lru_cache(maxsize=32)
 def _cached_tool_schemas(groups: frozenset[str], compact: bool) -> tuple[dict, ...]:
     from .coding_tools import CODING_TOOL_SCHEMAS
+    from .git_tools import GIT_TOOL_SCHEMAS
     from .github import GITHUB_TOOL_SCHEMAS
 
     allowed = {n for g in groups for n in TOOL_GROUPS.get(g, ())}
-    schemas = TOOL_SCHEMAS + CODING_TOOL_SCHEMAS + GITHUB_TOOL_SCHEMAS
+    schemas = TOOL_SCHEMAS + CODING_TOOL_SCHEMAS + GIT_TOOL_SCHEMAS + GITHUB_TOOL_SCHEMAS
     filtered = [s for s in schemas if s.get("function", {}).get("name") in allowed]
     result = [_compact_schema(s) for s in filtered] if compact else filtered
     return tuple(result)
 
 
 TOOL_ALIASES: dict[str, str] = {
+    # Renamed because the old names claimed a git worktree they never made.
+    "enter_worktree": "push_workspace",
+    "exit_worktree": "pop_workspace",
     "read": "read_file",
     "open": "read_file",
     "view": "read_file",
