@@ -314,6 +314,49 @@ _MD_LINK_RX = re.compile(r"\[([^\]\n]+)\]\(([^)\s]+)\)")
 _SGR_RX = re.compile(r"\x1b\[[0-9;]*m")
 
 
+# Syntax highlighting is optional: pygments lives in the `.[code]` extra, the
+# same way tiktoken lives in `.[performance]`. The core install stays at four
+# runtime dependencies, and a machine without it gets exactly the plain rail
+# this always rendered rather than an error.
+_LEXER_CACHE: dict[str, object] = {}
+_PYGMENTS_MISSING = False
+
+
+def _highlight_code(body: str, lang: str) -> list[str] | None:
+    """Syntax-highlighted lines for a fenced block, or None to render plain."""
+    global _PYGMENTS_MISSING
+    if _PYGMENTS_MISSING or not lang or not _supports_color():
+        return None
+    try:
+        from pygments import highlight
+        from pygments.formatters import Terminal256Formatter
+        from pygments.lexers import get_lexer_by_name
+        from pygments.util import ClassNotFound
+    except ImportError:
+        # Remember, so a long reply does not retry the import per block.
+        _PYGMENTS_MISSING = True
+        return None
+    key = lang.lower()
+    lexer = _LEXER_CACHE.get(key)
+    if lexer is None:
+        try:
+            lexer = get_lexer_by_name(key, stripnl=False, ensurenl=False)
+        except ClassNotFound:
+            # An unknown or made-up fence language is not an error; the block
+            # just renders unhighlighted.
+            _LEXER_CACHE[key] = False
+            return None
+        _LEXER_CACHE[key] = lexer
+    if lexer is False:
+        return None
+    try:
+        rendered = highlight(body, lexer, Terminal256Formatter(style="native"))
+    except Exception:
+        # A lexer that chokes on a half-streamed block must not lose the block.
+        return None
+    return rendered.rstrip("\n").splitlines()
+
+
 def render_markdown(text: str, *, line_start: bool = True) -> str:
     """Render a readable CommonMark subset with or without terminal color.
 
@@ -334,11 +377,17 @@ def render_markdown(text: str, *, line_start: bool = True) -> str:
     placeholders: list[str] = []
 
     def _stash_block(m: re.Match) -> str:
+        lang = (m.group(1) or "").strip()
         body = m.group(2)
+        highlighted = _highlight_code(body, lang)
         rendered_lines: list[str] = []
-        for line in body.splitlines():
+        raw_lines = body.splitlines()
+        for i, line in enumerate(raw_lines):
             rail = color("│ ", PLUM) if styled else "│ "
-            code = color(line, SURFACE) if styled else line
+            if highlighted is not None and i < len(highlighted):
+                code = highlighted[i]
+            else:
+                code = color(line, SURFACE) if styled else line
             rendered_lines.append(rail + code)
         rendered = "\n".join(rendered_lines)
         placeholders.append(rendered)

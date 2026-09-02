@@ -124,7 +124,6 @@ def auto_deny_resolver(name: str, args: dict, state: AppState) -> str:
 # things the model needs to organize its thinking without touching the world.
 PLAN_MODE_EXTRAS = {
     "enter_plan_mode",
-    "exit_plan_mode",
     "ask_user_question",
     "todo_write",
     "tool_search",
@@ -372,12 +371,13 @@ def can_use_tool(
     # Plan-mode gate: only read-only tools are allowed. Above the allow rules
     # deliberately — plan mode is an explicit "not right now" and a standing
     # project approval must not quietly override it.
-    if (
-        getattr(state, "plan_mode", False)
-        and name not in READ_ONLY
-        and name not in PLAN_MODE_EXTRAS
-    ):
-        return False, "plan mode active — mutating tools blocked"
+    if getattr(state, "plan_mode", False) and name != "exit_plan_mode":
+        if name not in READ_ONLY and name not in PLAN_MODE_EXTRAS:
+            return False, "plan mode active — mutating tools blocked"
+    # exit_plan_mode deliberately falls through to the resolver rather than
+    # being waved past here. Leaving plan mode is the moment the agent stops
+    # proposing and starts changing things, so it is the one decision that
+    # should be the user's — the plan itself is rendered at the prompt.
 
     # Reading is normally silent — a turn can open a dozen files and prompting for
     # each would make approval meaningless through sheer volume. "Ask for
@@ -526,6 +526,9 @@ def terminal_resolver(name: str, args: dict, state: AppState) -> str:
     elif name == "git_commit":
         action = "Commit to git"
         detail = str(args.get("message", "")).splitlines()[0][:80]
+    elif name == "exit_plan_mode":
+        action = "Approve this plan and start making changes"
+        detail = ""
 
     print()
     ui.heading("Approval required")
@@ -540,6 +543,14 @@ def terminal_resolver(name: str, args: dict, state: AppState) -> str:
     if patch:
         print()
         print(patch)
+    if name == "exit_plan_mode":
+        # The plan is the thing being approved, so it goes on screen the same
+        # way a patch does — approving a plan you cannot see is the same trust
+        # gap that put the diff here.
+        plan_text = str(args.get("plan") or "").strip()
+        if plan_text:
+            print()
+            print(ui.render_markdown(plan_text))
     if detail:
         ui.field("target", detail)
     ui.field("workspace", ui._short_path(str(state.workspace)))

@@ -132,20 +132,19 @@ A few special names get auto-loaded into the system prompt:
 Example:
 
 ```
-❯ I'm vegetarian and allergic to peanuts. Save that to my profile.
-  ▸ note_write  profile
-    ✓ wrote profile (52 chars)
+› I'm vegetarian and allergic to peanuts. Save that to my profile.
+  → Saved note  profile  ✓ wrote profile (52 chars)
 
-❯ /new
-❯ what's a good lunch recipe?
+› /new
+› what's a good lunch recipe?
   (Cagentic already knows you're vegetarian with a peanut allergy)
 ```
 
 Persistent reminders work the same way but live in `~/.config/cagentic/reminders.json`:
 
 ```
-❯ remind me to renew my passport in 2 weeks
-  ▸ reminder_add  renew my passport @ in 2 weeks
+› remind me to renew my passport in 2 weeks
+  → Added reminder  renew my passport @ in 2 weeks
     ✓ added: [ ] r1a2b3c4d  renew my passport  (in 14d)
 ```
 
@@ -185,11 +184,11 @@ When you launch Cagentic, overdue reminders are surfaced in the greeting so they
 Then in the REPL:
 
 ```
-❯ /mcp                          # list configured servers
-❯ /mcp notion                   # list the tools notion exposes
-❯ summarize the last 5 docs I touched in google drive
-  ▸ mcp_list_tools  gdrive
-  ▸ mcp_call        gdrive/search …
+› /mcp                          # list configured servers
+› /mcp notion                   # list the tools notion exposes
+› summarize the last 5 docs I touched in google drive
+  → Listed MCP tools  gdrive
+  → Called a connected service  gdrive/search …
 ```
 
 Cagentic launches each server as a subprocess on first use and keeps a long-lived JSON-RPC connection going. Tokens in `env` are redacted when `/config` prints them.
@@ -312,9 +311,9 @@ Browser tools include `browser_status`, `browser_tabs`, `browser_read`, `browser
 `/gateway` starts a local web app — the full Cagentic assistant in a browser tab instead of the terminal. Everything works: tools, notes, reminders, MCP, browser control. It streams responses token-by-token, and when a tool needs approval an **Approve / Always / Deny** prompt appears right in the page.
 
 ```
-❯ /gateway
+› /gateway
   · gateway is live — open http://localhost:8700 in your browser.
-❯ /gateway off       # stop it
+› /gateway off       # stop it
 ```
 
 It runs its own conversation (separate from the terminal session) but shares your notes, reminders, and connected services. The port is `gateway.port` in config (default `8700`). Like everything else, it's bound to localhost only.

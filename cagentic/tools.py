@@ -2968,9 +2968,23 @@ def t_enter_plan_mode(args: dict, ctx: ToolContext) -> str:
 
 
 def t_exit_plan_mode(args: dict, ctx: ToolContext) -> str:
+    """Ask to leave plan mode, presenting the plan that earns it.
+
+    This used to take no argument and gate on nothing: the model called it and
+    plan mode was simply off, which made "plan mode" a note to the model rather
+    than a promise to the user. It now goes through the permission gate like any
+    other change, so the answer is the user's and a refusal leaves plan mode on.
+    """
     state = getattr(ctx, "state", None)
     if state is None:
         return "ERROR: state not available"
+    plan = str(args.get("plan") or "").strip()
+    if not plan:
+        return (
+            "ERROR: missing argument 'plan'. Summarise what you intend to do "
+            "and call exit_plan_mode again — the user approves the plan, not "
+            "the exit."
+        )
     state.update(plan_mode=False)
     engine = getattr(ctx, "engine", None)
     if engine is not None:
@@ -4492,8 +4506,16 @@ TOOL_SCHEMAS: list[dict[str, Any]] = [
         "type": "function",
         "function": {
             "name": "exit_plan_mode",
-            "description": "Leave plan mode.",
-            "parameters": {"type": "object", "properties": {}},
+            "description": (
+                "Ask to leave plan mode and begin making changes. Pass `plan`: "
+                "what you intend to do, in a few lines. The user approves the "
+                "plan; if they decline, plan mode stays on and you keep planning."
+            ),
+            "parameters": {
+                "type": "object",
+                "properties": {"plan": {"type": "string"}},
+                "required": ["plan"],
+            },
         },
     },
     {

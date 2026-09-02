@@ -805,6 +805,12 @@ def _settle_in(agent: Agent) -> None:
             ui.meta(f"{len(overdue) - 5} more · use /remind to see all")
 
 
+# How long a first Ctrl-C stays "armed" at the prompt. Long enough to be a
+# deliberate second press, short enough that an accidental one earlier in the
+# session cannot quit you much later.
+_QUIT_CONFIRM_SECONDS = 2.0
+
+
 def repl(
     agent: Agent,
     cfg: dict,
@@ -933,6 +939,9 @@ def repl(
     # type-ahead-queued turns that run first, and cleared once a prompt has
     # actually pre-filled with it.
     carried: str = ""
+    # When the last unconfirmed Ctrl-C arrived at the prompt, so a second press
+    # within the window exits and a stray one does not.
+    interrupted_at: float = 0.0
     while True:
         if queued is not None:
             # Submitted mid-turn via type-ahead — run it straight away rather
@@ -948,9 +957,21 @@ def repl(
             print()
             try:
                 line = prompt.ask(ui.prompt_prefix(), default=carried).strip()
-            except (EOFError, KeyboardInterrupt):
+                interrupted_at = 0.0
+            except EOFError:
+                # Ctrl-D is "end of input" and means it. Only Ctrl-C, which is
+                # far easier to hit by accident, has to be confirmed.
                 print()
                 return 0
+            except KeyboardInterrupt:
+                print()
+                now = time.monotonic()
+                if now - interrupted_at <= _QUIT_CONFIRM_SECONDS:
+                    return 0
+                interrupted_at = now
+                ui.meta("press Ctrl-C again to exit, or /quit")
+                carried = ""
+                continue
             finally:
                 # Consumed either way: on Ctrl-C the user is discarding it, and
                 # re-offering it at the next prompt would be a resurrection.

@@ -169,6 +169,11 @@ class Agent:
                     if callable(close):
                         close()
                     ui.stop_all_spinners()
+                    # Say so. The Windows path below prints this; here the turn
+                    # simply stopped, so an interrupt with an empty type-ahead
+                    # buffer looked exactly like the model going quiet.
+                    print()
+                    ui.warn("turn interrupted — back to prompt")
                     rs.failed = True
                     break
         except KeyboardInterrupt:
@@ -223,7 +228,7 @@ class _RenderState:
     streamed_any: bool = False
     streamed_visible: bool = False
     md: ui.StreamMarkdown | None = None
-    pending_tool_call: tuple[str, str] | None = None
+    pending_tool_call: tuple[str, str, tuple[str, str]] | None = None
     run: _ToolRun | None = None
     failed: bool = False
     completed: bool = False
@@ -263,10 +268,39 @@ def _extract_meta(first_line: str, summary: str) -> str:
     return s[:80]
 
 
-def _print_tool_line(name: str, summary: str, meta: str, *, ok: bool, count: int) -> None:
+def _tool_heading(name: str, labels: tuple[str, str] | None, count: int) -> str:
+    """What to call this tool on screen.
+
+    The engine ships `label`/`label_plural` on every tool event precisely so the
+    terminal, the web page and the phone cannot drift on wording — and then only
+    the gateway read them, so the terminal said `read_file` where the page said
+    "Read file". The plural form carries its own {n} slot, so a collapsed run
+    reads "Read 5 files" rather than "Read file  x 5". Falls back to the raw
+    identifier for anything that arrives without labels.
+    """
+    one, many = labels or ("", "")
+    if count > 1:
+        if many:
+            try:
+                return many.format(n=count)
+            except (KeyError, IndexError, ValueError):
+                pass
+        return f"{one or name}  × {count}"
+    return one or name
+
+
+def _print_tool_line(
+    name: str,
+    summary: str,
+    meta: str,
+    *,
+    ok: bool,
+    count: int,
+    labels: tuple[str, str] | None = None,
+) -> None:
     """Render a tool call as a single line. Successful runs of the same
     name update in place ('× N'); failures paint the whole line red."""
-    name_label = ui.single_line(name) + (f"  × {count}" if count > 1 else "")
+    name_label = ui.single_line(_tool_heading(name, labels, count))
     summary = ui.single_line(summary)
     meta = ui.single_line(meta)
     if ok:
@@ -348,7 +382,11 @@ def render_event(event: Message, rs: _RenderState) -> None:
         # The line isn't printed yet — defer until the result arrives so we
         # know if it should be suppressed (CACHED), collapsed into a run,
         # or painted red on failure.
-        rs.pending_tool_call = (d["name"], d["summary"])
+        rs.pending_tool_call = (
+            d["name"],
+            d["summary"],
+            (d.get("label") or "", d.get("label_plural") or ""),
+        )
     elif k == "tool_result":
         name = d.get("name") or ""
         result = d.get("result") or ""
@@ -359,9 +397,13 @@ def render_event(event: Message, rs: _RenderState) -> None:
             return
 
         summary = ""
+        labels = (d.get("label") or "", d.get("label_plural") or "")
         if rs.pending_tool_call is not None:
-            _, summary = rs.pending_tool_call
+            _, summary, pending_labels = rs.pending_tool_call
             rs.pending_tool_call = None
+            # The result carries the labels too, but the call event is where
+            # they were first seen; prefer it so both halves agree.
+            labels = pending_labels or labels
 
         # Special case: write_file / edit_file keeps the diff-style line.
         if ok and name in ("write_file", "edit_file"):
@@ -393,10 +435,10 @@ def render_event(event: Message, rs: _RenderState) -> None:
             # of printing a new one, so "read_file × 5" shows in place.
             rs.run.count += 1
             ui.sync_write("\r\033[1A\033[2K")
-            _print_tool_line(name, short_summary, meta, ok=True, count=rs.run.count)
+            _print_tool_line(name, short_summary, meta, ok=True, count=rs.run.count, labels=labels)
         else:
             rs.run = _ToolRun(name=name) if ok else None
-            _print_tool_line(name, short_summary, meta, ok=ok, count=1)
+            _print_tool_line(name, short_summary, meta, ok=ok, count=1, labels=labels)
     elif k == "info":
         ui.info(d["text"])
     elif k == "context":
@@ -414,9 +456,9 @@ def render_event(event: Message, rs: _RenderState) -> None:
         ui.info(f"context {strategy}: {d['before']} → {d['after']} approx tokens")
     elif k == "tool_denied":
         if rs.pending_tool_call is not None:
-            pname, psummary = rs.pending_tool_call
+            pname, psummary, plabels = rs.pending_tool_call
             rs.pending_tool_call = None
-            _print_tool_line(pname, _short_path(psummary), "", ok=False, count=1)
+            _print_tool_line(pname, _short_path(psummary), "", ok=False, count=1, labels=plabels)
         ui.warn(f"permission denied: {d['name']} ({d['reason']})")
         rs.run = None
     elif k == "done":

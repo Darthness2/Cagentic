@@ -40,6 +40,9 @@ dev = [
     "types-requests>=2.31",
 ]
 performance = ["tiktoken>=0.7"]
+# Syntax highlighting for fenced code blocks in the terminal. Optional on
+# purpose: without it those blocks render exactly as they always did.
+code = ["pygments>=2.17"]
 
 [project.urls]
 Homepage = "https://github.com/Darthness2/Cagentic"

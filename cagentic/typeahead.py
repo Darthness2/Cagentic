@@ -397,7 +397,7 @@ class TypeAhead:
     def _paint(self) -> None:
         if not self._active or not sys.stdout.isatty():
             return
-        prefix = ui.prompt_prefix()  # "│ ✦ " — matches the framed input rail
+        prefix = ui.prompt_prefix()  # "› " — the same prefix the real prompt uses
         avail = ui.width() - ui._vlen(prefix)
         if avail < 1:
             return
