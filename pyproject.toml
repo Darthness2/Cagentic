@@ -4,7 +4,7 @@ build-backend = "setuptools.build_meta"
 
 [project]
 name = "cagentic"
-version = "0.1.0"
+dynamic = ["version"]
 description = "Your local personal AI assistant, powered by Ollama."
 readme = "README.md"
 requires-python = ">=3.9"
@@ -52,6 +52,12 @@ Issues = "https://github.com/Darthness2/Cagentic/issues"
 
 [project.scripts]
 cagentic = "cagentic.cli:main"
+
+# One source of truth for the version: cagentic/__init__.py. It was written
+# out three times (here, there, and mcp_client's CLIENT_INFO), which is two
+# too many to keep in step by hand.
+[tool.setuptools.dynamic]
+version = { attr = "cagentic.__version__" }
 
 [tool.setuptools.packages.find]
 include = ["cagentic*"]

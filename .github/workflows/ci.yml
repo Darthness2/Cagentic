@@ -5,7 +5,10 @@ on:
   pull_request:
 
 jobs:
-  validate:
+  # Lint and types are platform- and version-independent, so they run once
+  # rather than once per matrix cell. mypy is pinned to python_version 3.10 in
+  # pyproject regardless of the interpreter running it.
+  lint:
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v4
@@ -17,4 +20,65 @@ jobs:
       - run: python -m ruff format --check cagentic tests
       - run: python -m ruff check cagentic tests
       - run: python -m mypy cagentic
+
+  # The suite runs across the versions and platforms the package actually
+  # claims. It used to be ubuntu + 3.12 alone, while pyproject advertised 3.9+
+  # and the code carries real branches CI never reached: the Windows POSIX-shell
+  # hunt and taskkill fallback (tools.py, mcp_client.py), the sandbox backends
+  # (sandbox.py: Seatbelt on macOS, bubblewrap on Linux), the persistent shell
+  # pool that is POSIX-only (shell_session.py), and the launchd/systemd split in
+  # service.py. Those are exactly the places a regression hides.
+  test:
+    name: ${{ matrix.os }} · py${{ matrix.python }}
+    runs-on: ${{ matrix.os }}
+    strategy:
+      fail-fast: false
+      matrix:
+        os: [ubuntu-latest, macos-latest, windows-latest]
+        python: ["3.9", "3.12", "3.13"]
+        exclude:
+          # The oldest interpreter is covered on Linux; the other two platforms
+          # are here for their platform branches, not their Python versions, so
+          # this trims six cells without losing coverage of either dimension.
+          - os: macos-latest
+            python: "3.9"
+          - os: windows-latest
+            python: "3.9"
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: ${{ matrix.python }}
+          cache: pip
+      - run: python -m pip install -e '.[dev]'
       - run: python -m pytest -q
+
+  # Publishing is gated on a v* tag and on the whole matrix being green, so a
+  # tag can never ship something the tests have not seen. Uses PyPI's trusted
+  # publishing, which needs the id-token permission and no stored secret.
+  publish:
+    if: startsWith(github.ref, 'refs/tags/v')
+    needs: [lint, test]
+    runs-on: ubuntu-latest
+    environment: pypi
+    permissions:
+      id-token: write
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+      - run: python -m pip install build
+      - run: python -m build
+      # The tag is the release; the version lives in cagentic/__init__.py.
+      # Publishing a wheel whose version disagrees with the tag it came from is
+      # the kind of thing nobody notices until an install pulls the wrong code.
+      - name: Check the tag matches the package version
+        run: |
+          tag="${GITHUB_REF_NAME#v}"
+          pkg=$(python -c "import re,pathlib;print(re.search(r'__version__ = \"([^\"]+)\"',pathlib.Path('cagentic/__init__.py').read_text()).group(1))")
+          if [ "$tag" != "$pkg" ]; then
+            echo "tag $tag != cagentic.__version__ $pkg" >&2
+            exit 1
+          fi
+      - uses: pypa/gh-action-pypi-publish@release/v1

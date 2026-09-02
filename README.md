@@ -83,11 +83,18 @@ cd ~/cagentic
 pip install -e .
 ```
 
-### From PyPI (coming soon)
+### From PyPI
 
 ```bash
 pip install cagentic
 ```
+
+Not published yet — the release workflow is wired up and publishes on a `v*`
+tag once the CI matrix is green, so the first tag is the first release.
+
+Optional extras: `cagentic[code]` adds syntax highlighting for code blocks,
+`cagentic[performance]` sharpens token counting with tiktoken. Neither
+changes what Cagentic can do — the core stays at four runtime dependencies.
 
 ## Quickstart
 

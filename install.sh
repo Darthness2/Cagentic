@@ -54,9 +54,9 @@ info "Checking Python..."
 PYTHON=""
 for cmd in python3 python; do
   if command -v "$cmd" &>/dev/null; then
-    ver=$("$cmd" -c "import sys; print('%d.%d' % sys.version_info[:2])" 2>/dev/null || echo "0.0")
-    major=${ver%%.*}; minor=${ver##*.}
-    if [[ $major -ge 3 && $minor -ge 9 ]]; then
+    # Ask Python, rather than comparing the halves of its version string:
+    # `major -ge 3 && minor -ge 9` rejects a future Python 4.0, whose minor is 0.
+    if "$cmd" -c "import sys; sys.exit(0 if sys.version_info >= (3, 9) else 1)" 2>/dev/null; then
       PYTHON="$cmd"
       break
     fi

@@ -47,11 +47,13 @@ import time
 from dataclasses import dataclass, field
 from typing import Any
 
+from . import __version__
+
 logger = logging.getLogger(__name__)
 
 
 PROTOCOL_VERSION = "2024-11-05"  # mcp protocol revision string
-CLIENT_INFO = {"name": "cagentic", "version": "0.1.0"}
+CLIENT_INFO = {"name": "cagentic", "version": __version__}
 
 
 class MCPError(RuntimeError):
