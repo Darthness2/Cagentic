@@ -22,7 +22,8 @@ looking like a security console, a game HUD, or a generic purple SaaS dashboard.
 ### Name and mark
 
 - Product name: **Cagentic** (sentence case; never all caps or letter-spaced).
-- Mark: the four-point spark used by the gateway's `i-spark` symbol.
+- Mark: the broken ring used by the gateway's `i-mark` symbol, generated for every
+  surface by `design-system/brand/make-icons.py`.
 - Web and extension surfaces use the same 1.6-1.8px outline SVG.
 - The CLI may use the monochrome `✦` text equivalent where SVG is impossible.
 - Pair the mark with the wordmark in primary product chrome. Do not put the mark
@@ -61,11 +62,27 @@ Rules:
 
 ## Typography
 
-- UI: `-apple-system, BlinkMacSystemFont, "Inter", "Segoe UI", Roboto, sans-serif`.
-  Do not fetch web fonts; the gateway is local and buildless.
-- Code: `ui-monospace, "SF Mono", "Cascadia Code", Consolas, monospace`.
-- Base web reading copy is 16px with a 1.6-1.7 line height and a maximum 72ch measure.
-- Product chrome uses 12/13/14/16/18/22/28px roles. Avoid text below 12px.
+Three faces, split by what the text *is* rather than where it sits — the same split the iOS app
+makes, set in the same files. This is the single thing that made the app and the page read as
+different products while they already shared a palette and a spacing scale.
+
+- UI (`--ui`): **Space Grotesk**. Chrome — navigation, labels, buttons, the composer.
+- Reading (`--reading`): **Plus Jakarta Sans**. Anything the user wrote or the assistant said,
+  including the headings and lists inside an answer.
+- Code (`--code`): **JetBrains Mono**. Code blocks, command output, payloads.
+
+The faces are bundled and served from the gateway itself (`/fonts/*.woff2`) rather than fetched
+from a CDN — the gateway is local, and a page that needs the internet to look right is not.
+They are generated from the app's own TTFs by `design-system/brand/make-icons.py`, so the two
+surfaces cannot drift onto differently-cut copies of the same family name.
+
+Static weights rather than one variable file per family: a browser only fetches a `@font-face`
+source when a glyph actually needs it, so ten small files cost less than three large ones.
+
+- Reading copy is 17px (the app's `.body`) at a 1.5 line height, with a maximum 72ch measure.
+- Code is 16px (the app's `.callout`).
+- Product chrome uses 12/13/17/20/22/28px roles, matching the app's text styles. Avoid text
+  below 12px.
 - Use weight and spacing for hierarchy. Avoid uppercase transforms, decorative
   letter spacing, text shadows, and overly bold body copy.
 - CLI headings keep the caller's sentence case and use indentation plus color for

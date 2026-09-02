@@ -39,23 +39,60 @@ struct MarkdownText: View {
         if let renderedDocument,
            source.hasPrefix(renderedDocument.source)
         {
+            let split = Self.streamingSplit(source: source, parsed: renderedDocument)
             VStack(alignment: .leading, spacing: CagenticTheme.Spacing.sm) {
-                ForEach(renderedDocument.document.blocks) { block in
+                ForEach(split.settled) { block in
                     MarkdownBlockView(block: block)
                 }
-
-                let tail = String(source.dropFirst(renderedDocument.source.count))
-                if !tail.isEmpty {
-                    Text(tail)
-                        .font(CagenticTheme.FontStyle.body)
-                        .foregroundStyle(CagenticTheme.textPrimary)
-                        .lineSpacing(4)
-                        .fixedSize(horizontal: false, vertical: true)
+                // A second ForEach rather than one merged list: these blocks are re-derived on
+                // every repaint, and keeping them in their own identity space stops a settled
+                // block's view being torn down each time the tail is re-parsed.
+                ForEach(split.pending) { block in
+                    MarkdownBlockView(block: block)
                 }
             }
         } else {
             plainText
         }
+    }
+
+    /// The blocks that cannot change any more, and the ones still being written.
+    ///
+    /// Markdown is parsed off the main actor, so the view always holds a slightly stale document
+    /// plus whatever has streamed in since. Rendering that remainder as loose text underneath is
+    /// what made every new word appear below the message and then jump into place — and the block
+    /// winking in and out changed the message's height several times a second, bouncing the whole
+    /// pinned transcript.
+    ///
+    /// The remainder is re-parsed instead, starting from the *beginning of the last block* rather
+    /// than from where the stale parse stopped. That is the part that matters: from the end of the
+    /// parse, "| 3 | 4 |" is a paragraph and a line of code is prose, because the context that
+    /// makes them a table row and a code line is behind them. From the start of the block, they
+    /// render exactly as they will once the real parse catches up, so nothing moves when it does.
+    fileprivate struct StreamingSplit {
+        var settled: [MarkdownBlock] = []
+        var pending: [MarkdownBlock] = []
+    }
+
+    fileprivate static func streamingSplit(
+        source: String,
+        parsed: RenderedMarkdownDocument
+    ) -> StreamingSplit {
+        let blocks = parsed.document.blocks
+        // Nothing has arrived since the parse, so every block is final.
+        guard source.count > parsed.source.count, let last = blocks.last else {
+            return StreamingSplit(settled: blocks)
+        }
+        let lines = MarkdownDocument.lines(of: source)
+        guard last.startLine < lines.count else {
+            return StreamingSplit(settled: blocks)
+        }
+        // `source` begins with `parsed.source`, so a line index from one is valid in the other.
+        let region = lines[last.startLine...].joined(separator: "\n")
+        return StreamingSplit(
+            settled: Array(blocks.dropLast()),
+            pending: MarkdownDocument.parse(region).blocks
+        )
     }
 
     private func enqueueForRendering(_ newSource: String) {
@@ -88,7 +125,7 @@ struct MarkdownText: View {
 
     private var plainText: some View {
         Text(source)
-            .font(CagenticTheme.FontStyle.body)
+            .font(CagenticTheme.FontStyle.Message.body)
             .foregroundStyle(CagenticTheme.textPrimary)
             .tint(CagenticTheme.accent)
             .lineSpacing(4)
@@ -107,7 +144,7 @@ private struct MarkdownBlockView: View {
     var body: some View {
         switch block.content {
         case let .paragraph(text):
-            InlineMarkdownText(text, font: CagenticTheme.FontStyle.body)
+            InlineMarkdownText(text, font: CagenticTheme.FontStyle.Message.body)
                 .lineSpacing(4)
 
         case let .heading(level, text):
@@ -135,7 +172,7 @@ private struct MarkdownBlockView: View {
                     .frame(width: 3)
                     .accessibilityHidden(true)
 
-                InlineMarkdownText(text, font: .inter(.body, italic: true))
+                InlineMarkdownText(text, font: CagenticTheme.FontStyle.Message.bodyItalic)
                     .foregroundStyle(CagenticTheme.textSecondary)
                     .lineSpacing(4)
             }
@@ -150,11 +187,11 @@ private struct MarkdownBlockView: View {
     private func headingFont(for level: Int) -> Font {
         switch level {
         case 1:
-            CagenticTheme.FontStyle.title2
+            CagenticTheme.FontStyle.Message.heading1
         case 2:
-            CagenticTheme.FontStyle.heading
+            CagenticTheme.FontStyle.Message.heading2
         default:
-            CagenticTheme.FontStyle.headline
+            CagenticTheme.FontStyle.Message.heading3
         }
     }
 }
@@ -190,7 +227,7 @@ private struct InlineMarkdownText: View {
         }
 
         for range in codeRanges {
-            attributed[range].font = .system(.body, design: .monospaced)
+            attributed[range].font = CagenticTheme.FontStyle.Code.inline
             attributed[range].foregroundColor = CagenticTheme.textPrimary
             attributed[range].backgroundColor = CagenticTheme.surfaceRaised
         }
@@ -336,12 +373,12 @@ private struct MarkdownListRow: View {
     var body: some View {
         HStack(alignment: .firstTextBaseline, spacing: CagenticTheme.Spacing.xs) {
             Text(item.marker)
-                .font(CagenticTheme.FontStyle.body.monospacedDigit())
+                .font(CagenticTheme.FontStyle.Message.body.monospacedDigit())
                 .foregroundStyle(CagenticTheme.textSecondary)
                 .frame(minWidth: 20, alignment: .trailing)
                 .accessibilityHidden(true)
 
-            InlineMarkdownText(item.text, font: CagenticTheme.FontStyle.body)
+            InlineMarkdownText(item.text, font: CagenticTheme.FontStyle.Message.body)
                 .lineSpacing(4)
         }
         .padding(.leading, CGFloat(item.depth) * CagenticTheme.Spacing.md)
@@ -353,6 +390,8 @@ private struct MarkdownListRow: View {
 }
 
 private struct MarkdownTableView: View {
+    @Environment(\.displayScale) private var displayScale
+
     let table: MarkdownTable
 
     var body: some View {
@@ -380,8 +419,8 @@ private struct MarkdownTableView: View {
                 InlineMarkdownText(
                     cell.text,
                     font: isHeader
-                        ? CagenticTheme.FontStyle.captionMedium
-                        : CagenticTheme.FontStyle.callout
+                        ? CagenticTheme.FontStyle.Message.captionMedium
+                        : CagenticTheme.FontStyle.Message.callout
                 )
                 .frame(
                     minWidth: 96,
@@ -391,14 +430,31 @@ private struct MarkdownTableView: View {
                 )
                 .padding(.horizontal, CagenticTheme.Spacing.sm)
                 .background(isHeader ? CagenticTheme.surfaceRaised : CagenticTheme.surface)
-                .overlay(alignment: .trailing) {
-                    Divider().overlay(CagenticTheme.border.opacity(0.7))
-                }
-                .overlay(alignment: .bottom) {
-                    Divider().overlay(CagenticTheme.border.opacity(0.7))
-                }
+                // `Divider()` picks its axis from the layout it is in, and an
+                // overlay is not a stack — both of these drew a *horizontal*
+                // rule, and the column separator landed vertically centred,
+                // striking through the text in every cell. Explicit geometry
+                // cannot be re-interpreted by context.
+                .overlay(alignment: .trailing) { rule(vertical: true) }
+                .overlay(alignment: .bottom) { rule(vertical: false) }
             }
         }
+    }
+
+    /// A hairline at the device's real pixel width, matching what `Divider`
+    /// would have drawn had it been given the right axis.
+    private func rule(vertical: Bool) -> some View {
+        let thickness = 1 / max(displayScale, 1)
+        return Rectangle()
+            .fill(CagenticTheme.border.opacity(0.7))
+            .frame(
+                width: vertical ? thickness : nil,
+                height: vertical ? nil : thickness
+            )
+            .frame(
+                maxWidth: vertical ? nil : .infinity,
+                maxHeight: vertical ? .infinity : nil
+            )
     }
 }
 
@@ -408,7 +464,7 @@ private struct MarkdownMathBlock: View {
     var body: some View {
         ScrollView(.horizontal) {
             Text(InlineMarkdown.normalizedMath(equation))
-                .font(.system(.body, design: .serif).italic())
+                .font(CagenticTheme.FontStyle.Message.bodyItalic)
                 .foregroundStyle(CagenticTheme.textPrimary)
                 .textSelection(.enabled)
                 .padding(CagenticTheme.Spacing.md)
@@ -466,7 +522,7 @@ private struct MarkdownCodeBlock: View {
 
             ScrollView(.horizontal) {
                 Text(code.isEmpty ? " " : code)
-                    .font(.system(.callout, design: .monospaced))
+                    .font(CagenticTheme.FontStyle.Code.block)
                     .foregroundStyle(CagenticTheme.textPrimary)
                     .textSelection(.enabled)
                     .padding(CagenticTheme.Spacing.sm)
@@ -514,18 +570,24 @@ private nonisolated struct MarkdownDocument: Equatable, Sendable {
         parse(source)
     }
 
-    static func parse(_ source: String) -> MarkdownDocument {
-        let normalized = source
+    static func lines(of source: String) -> [String] {
+        source
             .replacingOccurrences(of: "\r\n", with: "\n")
             .replacingOccurrences(of: "\r", with: "\n")
-        let lines = normalized
             .split(separator: "\n", omittingEmptySubsequences: false)
             .map(String.init)
+    }
+
+    static func parse(_ source: String) -> MarkdownDocument {
+        let lines = lines(of: source)
         var blocks: [MarkdownBlock] = []
         var index = 0
+        var blockStart = 0
 
         func append(_ content: MarkdownBlock.Content) {
-            blocks.append(MarkdownBlock(id: blocks.count, content: content))
+            blocks.append(
+                MarkdownBlock(id: blocks.count, startLine: blockStart, content: content)
+            )
         }
 
         while index < lines.count {
@@ -534,6 +596,8 @@ private nonisolated struct MarkdownDocument: Equatable, Sendable {
                 index += 1
                 continue
             }
+            // Captured by `append`, which runs after `index` has moved past the block's body.
+            blockStart = index
 
             if let fence = fenceInfo(in: line) {
                 var codeLines: [String] = []
@@ -787,6 +851,10 @@ private nonisolated struct MarkdownBlock: Identifiable, Equatable, Sendable {
     }
 
     let id: Int
+    /// The line of the source this block started on. It is what lets the view re-parse the tail of
+    /// a streaming reply *with its context* — the open fence, the table's header row, the sentence
+    /// still being added to — instead of rendering it as loose text underneath.
+    let startLine: Int
     let content: Content
 }
 

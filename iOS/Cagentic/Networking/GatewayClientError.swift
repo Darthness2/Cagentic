@@ -13,6 +13,7 @@ public nonisolated enum GatewayClientError: Error, Equatable, LocalizedError, Se
     case unsupportedBasePath(String)
     case invalidPort(Int?)
     case missingToken
+    case pairingUnavailable
     case insecureTokenTransport(host: String)
     case requestEncoding(reason: String)
     case invalidResponse
@@ -63,6 +64,8 @@ public nonisolated enum GatewayClientError: Error, Equatable, LocalizedError, Se
             }
         case .missingToken:
             "The Cagentic gateway requires an access token."
+        case .pairingUnavailable:
+            "That computer is not waiting to be paired right now."
         case let .insecureTokenTransport(host):
             "The gateway token cannot be sent to \(host) over an unencrypted connection."
         case let .requestEncoding(reason):
@@ -115,7 +118,9 @@ public nonisolated enum GatewayClientError: Error, Equatable, LocalizedError, Se
         case .invalidPort:
             "Use a port from 1 through 65535. The gateway's default is 8700."
         case .missingToken:
-            "Set gateway.token in ~/.config/cagentic/config.json on the computer, then enter the same value here."
+            "Run /token on the computer and enter the six digits it shows."
+        case .pairingUnavailable:
+            "Run /token on the computer for a fresh code — each one lasts a couple of minutes."
         case .insecureTokenTransport:
             "Connect to the gateway on your private network, or put it behind an https:// reverse proxy."
         case .requestEncoding:
@@ -129,7 +134,10 @@ public nonisolated enum GatewayClientError: Error, Equatable, LocalizedError, Se
             case 401, 403:
                 "Check the access token configured for this connection."
             case 404:
-                "Check the address and port, and confirm the computer is running a Cagentic gateway."
+                // Reaching *something* that is not the gateway is the common shape of this: an
+                // address that goes through a proxy — `tailscale serve`, or any reverse proxy —
+                // answers on 443 with whatever it fronts, which may be another program entirely.
+                "Something answered, but it was not the gateway. Use the computer's own gateway port, for example studio.tailnet.ts.net:8700, rather than an address that goes through a proxy."
             default:
                 "Confirm the gateway is running, then try again."
             }

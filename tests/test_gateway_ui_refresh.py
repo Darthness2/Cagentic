@@ -40,9 +40,19 @@ def test_connection_and_settings_failures_are_visible() -> None:
     assert "Settings could not be saved" in _JS
 
 
-def test_streaming_markdown_is_painted_at_most_once_per_frame() -> None:
-    assert "requestAnimationFrame(paintLiveBody)" in _JS
-    assert "cancelAnimationFrame(_liveRenderFrame)" in _JS
+def test_streaming_markdown_is_painted_on_a_timer_not_per_delta() -> None:
+    """Repainting per delta re-parses the whole answer for every token.
+
+    This used to coalesce onto an animation frame, which still meant a full
+    re-parse and re-insert 60 times a second; on a long reply the frames overran
+    their budget and the text advanced in lurches. It is now paced instead, so
+    what matters is that the schedule is still coalesced and still cancellable.
+    """
+    assert "const LIVE_PAINT_MS=" in _JS
+    assert "if(_liveRenderFrame) return;" in _JS
+    assert "clearTimeout(_liveRenderFrame)" in _JS
+    # A delta must never paint synchronously.
+    assert "scheduleLiveBody();" in _JS
 
 
 def test_voice_input_never_sends_without_review() -> None:
@@ -141,11 +151,28 @@ def test_assistant_actions_follow_the_per_turn_usage_line() -> None:
     assert ".msg-row.assistant .done-stats { padding-left: 0; }" in _CSS
 
 
-def test_internal_token_routing_note_is_not_added_to_the_transcript() -> None:
+def test_context_usage_is_a_meter_rather_than_a_transcript_note() -> None:
+    """It used to arrive as an `info` line reading "sending ~N tokens to <model>".
+
+    Every front end then had to recognise that wording to keep it out of the conversation — the
+    terminal printed it, and the web page and the phone each pattern-matched the string. It is a
+    measurement now, and what it feeds is the context meter.
+    """
     handler = _JS[_JS.index("function handle(ev)") : _JS.index("function removeOptimisticTurn")]
-    assert "const internalTokenNote=k==='info'" in handler
-    assert "if(!internalTokenNote){ addNote(d.text,false)" in handler
-    assert "if(m) live.tokensIn=" in handler
+    assert "k==='context'" in handler
+    assert "showContextMeter(" in handler
+    # The matching that went with the prose form is gone. (The wording still appears in a
+    # comment explaining what this replaced, which is why this looks for the pattern rather
+    # than the words.)
+    assert "/^sending ~" not in _JS
+    assert "internalTokenNote" not in _JS
+
+
+def test_the_context_meter_only_colours_when_it_matters() -> None:
+    # A permanently amber meter stops meaning anything.
+    assert "ctx-warn" in _CSS and "ctx-hot" in _CSS
+    assert "share>=0.75" in _JS
+    assert "share>=0.9" in _JS
 
 
 def test_touch_layouts_keep_controls_at_least_44_pixels() -> None:

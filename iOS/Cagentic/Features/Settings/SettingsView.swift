@@ -15,9 +15,9 @@ struct SettingsView: View {
             Form {
                 connectionSection
                 modelSection
-                generationSection
-                personalizationSection
+                customizeSection
                 appearanceSection
+                chatsSection
                 privacySection
             }
             .scrollContentBackground(.hidden)
@@ -100,66 +100,20 @@ struct SettingsView: View {
         draft.selectedModel.replacingOccurrences(of: ":latest", with: "")
     }
 
-    private var generationSection: some View {
+    private var customizeSection: some View {
         Section {
-            VStack(alignment: .leading, spacing: CagenticTheme.Spacing.xs) {
-                LabeledContent("Temperature") {
-                    Text(draft.generation.temperature, format: .number.precision(.fractionLength(1)))
-                        .monospacedDigit()
-                }
-                Slider(value: $draft.generation.temperature, in: 0 ... 2, step: 0.1)
-                    .accessibilityLabel("Temperature")
-                    .accessibilityValue(draft.generation.temperature.formatted(.number.precision(.fractionLength(1))))
-            }
-
-            VStack(alignment: .leading, spacing: CagenticTheme.Spacing.xs) {
-                LabeledContent("Top P") {
-                    Text(draft.generation.topP, format: .number.precision(.fractionLength(2)))
-                        .monospacedDigit()
-                }
-                Slider(value: $draft.generation.topP, in: 0.05 ... 1, step: 0.05)
-                    .accessibilityLabel("Top P")
-                    .accessibilityValue(draft.generation.topP.formatted(.number.precision(.fractionLength(2))))
-            }
-
-            Stepper(value: $draft.generation.contextLength, in: 1_024 ... 131_072, step: 1_024) {
-                LabeledContent("Context window") {
-                    Text(draft.generation.contextLength, format: .number)
-                        .monospacedDigit()
-                }
-            }
-
-            Toggle("Show model thinking", isOn: $draft.generation.enableThinking)
-
-            LabeledContent("Keep alive") {
-                TextField("Server default", text: $draft.generation.keepAlive)
-                    .multilineTextAlignment(.trailing)
-                    .textInputAutocapitalization(.never)
-                    .autocorrectionDisabled()
-                    .accessibilityLabel("Keep alive duration")
-                    .accessibilityHint(
-                        "Enter a duration such as 5m or 1h, or leave blank to use the server default."
-                    )
+            NavigationLink {
+                CustomizeView(model: model, draft: $draft)
+            } label: {
+                Label("Customize", systemImage: "slider.horizontal.3")
             }
         } header: {
-            Text("Generation").textCase(nil)
+            Text("Model").textCase(nil)
         } footer: {
-            Text(
-                "Larger context windows use more memory. Thinking is shown only when the "
-                    + "selected model provides it. Use a keep-alive duration such as 5m or 1h."
-            )
-        }
-    }
-
-    private var personalizationSection: some View {
-        Section {
-            TextEditor(text: $draft.systemPrompt)
-                .frame(minHeight: 112)
-                .accessibilityLabel("System prompt")
-        } header: {
-            Text("System prompt").textCase(nil)
-        } footer: {
-            Text("This instruction is sent with each new turn and stays on your devices.")
+            // These used to be loose controls here, which read as global settings. They are per
+            // profile now, because that is what makes more than one of them possible — and on a
+            // gateway connection several of them never applied at all.
+            Text("Instructions, temperature, and the rest, kept as profiles you can switch between.")
         }
     }
 
@@ -173,6 +127,22 @@ struct SettingsView: View {
             Toggle("Haptic feedback", isOn: $draft.hapticsEnabled)
         } header: {
             Text("Experience").textCase(nil)
+        }
+    }
+
+    private var chatsSection: some View {
+        Section {
+            NavigationLink {
+                ConversationManagerView(model: model)
+            } label: {
+                Label("Manage chats", systemImage: "checklist")
+            }
+        } header: {
+            Text("Chats").textCase(nil)
+        } footer: {
+            // The only way back to an archived chat, so it says so rather than leaving someone to
+            // wonder where a chat they swiped away went.
+            Text("Archive, restore, or delete chats in bulk. Archived chats live here.")
         }
     }
 

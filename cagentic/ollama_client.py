@@ -131,6 +131,22 @@ def _explain_connection_error(host: str, exc: Exception) -> str:
     return f"could not reach Ollama at {host}: {exc}"
 
 
+class _ThinkingUnsupported(Exception):
+    """This model has no reasoning to give. Internal: the caller retries without asking."""
+
+
+def _chain(first, rest):
+    """The first chunk, then the remainder — the stream has to be started early to learn
+    whether the model accepts `think` at all, and a started iterator cannot be rewound."""
+    yield first
+    yield from rest
+
+
+def _looks_like_think_error(body: str) -> bool:
+    lowered = (body or "").lower()
+    return "think" in lowered and ("support" in lowered or "does not" in lowered)
+
+
 def _looks_like_tools_error(body: str) -> bool:
     b = body.lower()
     return (
@@ -192,6 +208,9 @@ class OllamaClient:
         self.keep_alive = keep_alive
         self.num_ctx = num_ctx
         self.num_predict = num_predict
+        # Models that answered a `think` request with a 400. Asking again every turn would be a
+        # wasted round trip, so a refusal is remembered for the life of the client.
+        self._no_thinking: set[str] = set()
 
     @property
     def host(self) -> str:
@@ -341,6 +360,7 @@ class OllamaClient:
         messages: list[dict],
         tools: list[dict] | None = None,
         options: dict | None = None,
+        think: bool | None = None,
     ) -> Iterator[dict]:
         """Streaming chat. Yields raw chunks (each has a 'message' delta)."""
         payload: dict[str, Any] = {
@@ -352,6 +372,13 @@ class OllamaClient:
             payload["tools"] = tools
         if options:
             payload["options"] = options
+        # Reasoning is asked for by default and withdrawn per model once one refuses. Ollama
+        # rejects `think` outright for a model that has no reasoning to give, so asking is the
+        # only way to find out — and asking twice per session would be a wasted round trip on
+        # every turn.
+        wants_thinking = think is not False and model not in self._no_thinking
+        if wants_thinking:
+            payload["think"] = True
         self._apply_keep_alive(payload)
         try:
             with requests.post(
@@ -367,6 +394,10 @@ class OllamaClient:
                     body = r.text[:500]
                     if r.status_code == 400 and tools and _looks_like_tools_error(body):
                         raise ToolsUnsupportedError(body)
+                    if r.status_code == 400 and wants_thinking and _looks_like_think_error(body):
+                        # Remember, then let the caller retry without it.
+                        self._no_thinking.add(model)
+                        raise _ThinkingUnsupported(body)
                     raise OllamaError(_explain_http_error(r.status_code, body))
                 for line in r.iter_lines(decode_unicode=True):
                     if not line:
@@ -384,6 +415,7 @@ class OllamaClient:
         messages: list[dict],
         tools: list[dict] | None = None,
         options: dict | None = None,
+        think: bool | None = None,
     ) -> Iterator[tuple[str, Any]]:
         """Higher-level streaming: yields ('delta', text) events as content
         arrives, then a single ('done', payload) with the fully assembled
@@ -402,18 +434,44 @@ class OllamaClient:
         # the done chunk silently drops calls and the turn renders nothing.
         tool_calls: list[dict] = []
         role = "assistant"
-        for chunk in self.chat_stream(model, messages, tools, options):
+        # Ollama returns reasoning in its own `thinking` field rather than inline. Wrapping it in
+        # <think> tags puts it on the path every consumer already has: the engine extracts it, the
+        # terminal renders it, and the web page and phone both split it out of the answer. Without
+        # this the field was simply dropped, which is why reasoning was invisible on the gateway.
+        thinking_open = False
+        try:
+            stream = self.chat_stream(model, messages, tools, options, think=think)
+            first = next(stream, None)
+        except _ThinkingUnsupported:
+            stream = self.chat_stream(model, messages, tools, options, think=False)
+            first = next(stream, None)
+        chunks = iter(()) if first is None else _chain(first, stream)
+        for chunk in chunks:
             msg = chunk.get("message") or {}
             if msg.get("role"):
                 role = msg["role"]
+            reasoning = msg.get("thinking") or ""
+            if reasoning:
+                piece = ("<think>" if not thinking_open else "") + reasoning
+                thinking_open = True
+                full += piece
+                yield ("delta", piece)
             delta = msg.get("content") or ""
             if delta:
+                if thinking_open:
+                    delta = "</think>" + delta
+                    thinking_open = False
                 full += delta
                 yield ("delta", delta)
             tc = msg.get("tool_calls")
             if tc:
                 tool_calls.extend(tc)
             if chunk.get("done"):
+                # A model that reasoned but then said nothing would leave the tag open.
+                if thinking_open:
+                    full += "</think>"
+                    yield ("delta", "</think>")
+                    thinking_open = False
                 yield (
                     "done",
                     {

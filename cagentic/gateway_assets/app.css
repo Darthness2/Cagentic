@@ -1,3 +1,85 @@
+/* The three faces the product is set in, shared byte-for-byte with the iOS app — they are
+   generated from the same files by design-system/brand/make-icons.py. Matching colours and
+   spacing count for nothing while the type is somebody else's, and this is the single thing that
+   made the app and the page read as different products.
+
+   Static weights rather than one variable file per family: a browser only fetches a source when
+   a glyph actually needs it, so ten small files cost less than three large ones downloaded
+   whether or not the page ever renders semibold.
+
+   `font-display: swap` — a local gateway serves these in milliseconds, and blocking first paint
+   on a font when the page is already on screen would be the wrong trade. */
+@font-face {
+  font-family: 'Space Grotesk';
+  src: url('/fonts/SpaceGrotesk-Regular.woff2') format('woff2');
+  font-weight: 400;
+  font-style: normal;
+  font-display: swap;
+}
+@font-face {
+  font-family: 'Space Grotesk';
+  src: url('/fonts/SpaceGrotesk-Medium.woff2') format('woff2');
+  font-weight: 500;
+  font-style: normal;
+  font-display: swap;
+}
+@font-face {
+  font-family: 'Space Grotesk';
+  src: url('/fonts/SpaceGrotesk-SemiBold.woff2') format('woff2');
+  font-weight: 600;
+  font-style: normal;
+  font-display: swap;
+}
+@font-face {
+  font-family: 'Space Grotesk';
+  src: url('/fonts/SpaceGrotesk-Bold.woff2') format('woff2');
+  font-weight: 700;
+  font-style: normal;
+  font-display: swap;
+}
+@font-face {
+  font-family: 'Plus Jakarta Sans';
+  src: url('/fonts/PlusJakartaSans-Regular.woff2') format('woff2');
+  font-weight: 400;
+  font-style: normal;
+  font-display: swap;
+}
+@font-face {
+  font-family: 'Plus Jakarta Sans';
+  src: url('/fonts/PlusJakartaSans-Medium.woff2') format('woff2');
+  font-weight: 500;
+  font-style: normal;
+  font-display: swap;
+}
+@font-face {
+  font-family: 'Plus Jakarta Sans';
+  src: url('/fonts/PlusJakartaSans-SemiBold.woff2') format('woff2');
+  font-weight: 600;
+  font-style: normal;
+  font-display: swap;
+}
+@font-face {
+  font-family: 'Plus Jakarta Sans';
+  src: url('/fonts/PlusJakartaSans-Bold.woff2') format('woff2');
+  font-weight: 700;
+  font-style: normal;
+  font-display: swap;
+}
+@font-face {
+  font-family: 'Plus Jakarta Sans';
+  src: url('/fonts/PlusJakartaSans-Italic.woff2') format('woff2');
+  font-weight: 400;
+  font-style: italic;
+  font-display: swap;
+}
+@font-face {
+  font-family: 'JetBrains Mono';
+  src: url('/fonts/JetBrainsMono-Regular.woff2') format('woff2');
+  font-weight: 400;
+  font-style: normal;
+  font-display: swap;
+}
+
 
 /* ===== Cagentic — terminal theme =================================
    One cool-blue brand hue; semantic colors carry state only.
@@ -24,12 +106,15 @@
   --surface-2:rgba(0,0,0,.22);
   --header-bg:var(--elev-2);
   --shadow-lg: 0 18px 50px rgba(0,0,0,.5);
-  --sans: -apple-system, BlinkMacSystemFont, "Inter", "Segoe UI", Roboto, sans-serif;
+  /* Three faces split by what the text *is*, matching the iOS app exactly:
+     --ui for chrome, --reading for what was said, --code for payloads. */
+  --sans: "Space Grotesk", -apple-system, BlinkMacSystemFont, "Segoe UI", sans-serif;
+  --reading: "Plus Jakarta Sans", -apple-system, BlinkMacSystemFont, "Segoe UI", sans-serif;
   /* --mono is the historical name for the UI face, kept so older rules keep
      resolving while they migrate to --ui. Real monospace is --code. */
   --ui:   var(--sans);
   --mono: var(--sans);
-  --code: ui-monospace, "SF Mono", "Cascadia Code", Consolas, monospace;
+  --code: "JetBrains Mono", ui-monospace, "SF Mono", Consolas, monospace;
   --ease: cubic-bezier(.22,.61,.36,1);
   --ease-out: cubic-bezier(.16,1,.3,1);
 
@@ -41,12 +126,15 @@
      (12px) should appear outside deliberate metadata. */
   --fs-xs:   12px;
   --fs-sm:   13px;
-  --fs-base: 16px;   /* message body */
-  --fs-lg:   18px;
+  --fs-base: 17px;   /* message body — the app's `.body`, so a reply is the same size on both */
+  --fs-lg:   20px;   /* the app's `.title3` */
   --fs-xl:   22px;
   --fs-2xl:  28px;
+  --fs-code: 16px;   /* the app's `.callout`, which is what it sets code blocks in */
   --lh-tight: 1.35;
-  --lh-body:  1.7;
+  /* Plus Jakarta Sans sets about 1.26x its size, and the app adds 4pt between lines on a 17pt
+     body — 25.4/17. Matched here so a paragraph has the same colour on the page as in the app. */
+  --lh-body:  1.5;
   /* Reading measure. Long lines are the other half of readability; the
      transcript was previously free to run the full window width. */
   --measure: 72ch;
@@ -304,7 +392,7 @@ body {
 .center-stack { flex: 1; display: flex; flex-direction: column; min-height: 0; min-width: 0; }
 
 /* ---- CHAT LOG -------------------------------------------------------------- */
-.chat-log { flex: 1; overflow-y: auto; padding: 16px 0; min-height: 0; }
+.chat-log { flex: 1; overflow-y: auto; padding: 16px 0; min-height: 0; overflow-anchor: none; }
 .j-thread { max-width: 820px; margin: 0 auto; padding: 0 24px; }
 .j-empty {
   max-width: var(--measure); margin: 0 auto;
@@ -404,15 +492,18 @@ body {
 .msg-row.assistant .msg-actions.reply { padding-left: 0; }
 .msg-row.assistant.tool-only .msg-actions.reply,
 .msg-row.assistant.tool-only .msg-body:empty { display: none; }
+/* The mark on its own, the way the app draws it beside a reply — it used to sit in a bordered,
+   shadowed chip that nothing on iOS has, which made the same mark read as a different element. */
 .j-avatar {
   width: 26px; height: 26px; flex-shrink: 0; margin-top: 1px;
-  border: 1px solid var(--accent); display: flex; align-items: center;
-  justify-content: center; color: var(--accent); font-size: var(--fs-sm);
-  box-shadow: var(--e-1); background: var(--surface);
-  font-weight: bold; animation: avatarGlow 4s ease-in-out infinite;
+  display: flex; align-items: center; justify-content: center;
+  color: var(--accent);
 }
 @keyframes avatarGlow { 0%,100% { box-shadow: var(--e-1); } 50% { box-shadow: var(--e-1); } }
-.msg-body { flex: 1; min-width: 0; font-size: var(--fs-base); color: var(--text); line-height: var(--lh-body); max-width: var(--measure); }
+/* What was said is set in the reading face; the chrome around it stays in --ui. Same split the
+   app makes, for the same reason: a face drawn for labels reads badly at paragraph length. */
+.msg-body { flex: 1; min-width: 0; font-family: var(--reading); font-size: var(--fs-base); color: var(--text); line-height: var(--lh-body); max-width: var(--measure); }
+.msg-row.user .bubble { font-family: var(--reading); }
 .msg-body p { margin: 0 0 9px; }
 .msg-body p:last-child { margin: 0; }
 .msg-body h3 { font-size: var(--fs-sm); color: var(--text-hi); margin: 12px 0 5px; }
@@ -421,16 +512,40 @@ body {
 .msg-body a { color: var(--accent); text-decoration: none; }
 .msg-body a:hover { text-decoration: underline; }
 .msg-body ul { padding-left: 18px; margin: 6px 0; }
-.msg-body li::marker { color: var(--accent); }
-.cursor::after { content: '\2588'; color: var(--accent); animation: blink .9s steps(2) infinite; }
+/* Secondary, as the app draws them. Accent markers made every list read as a call to action and
+   put the loudest colour on the page next to ordinary prose. */
+.msg-body li::marker { color: var(--text-2); }
+/* The caret rides the end of the last line. As a bare ::after on the body it
+   was inline content after a block child, so it formed its own anonymous
+   block — a whole extra line that existed only while streaming and vanished
+   when the segment settled, shifting everything below it. `blink` also had
+   no keyframes, so it never blinked. */
+.cursor > :last-child:not(ul):not(ol):not(pre):not(table):not(blockquote):not(.codeblock)::after,
+.cursor > ul:last-child > li:last-child::after,
+.cursor > ol:last-child > li:last-child::after {
+  content: '\258A'; color: var(--accent);
+  /* Out of flow, at its static position: it paints immediately after the last
+     character but contributes no width and no line box, so it can neither wrap
+     that line nor add one — measured at 0px for every block shape. */
+  position: absolute;
+  animation: blink 1s steps(2) infinite;
+}
+@keyframes blink { 50% { opacity: 0; } }
 /* code blocks */
-.codeblock { margin: 9px 0; border: 1px solid var(--border); background: var(--code-bg); border-left: 2px solid var(--accent); }
-.cb-head { display: flex; justify-content: space-between; padding: 5px 10px; background: var(--surface); border-bottom: 1px solid var(--border); }
-.cb-lang { font-size: var(--fs-xs); color: var(--accent); }
-.cb-copy { background: transparent; border: 0; color: var(--text-2); cursor: pointer; font: var(--fs-xs) var(--ui); transition: color .15s; }
+/* Matched to the app's code card: rounded, evenly bordered, with a quiet header. The accent rail
+   down the left and the accent-coloured language label were the page's own invention. */
+.codeblock {
+  margin: var(--s-2) 0; border: 1px solid var(--border); background: var(--code-bg);
+  border-radius: var(--r-card); overflow: hidden;
+}
+.cb-head { display: flex; justify-content: space-between; align-items: center; padding: 6px 10px; background: var(--surface); border-bottom: 1px solid var(--border); }
+.cb-lang { font-size: var(--fs-xs); color: var(--text-dim); text-transform: uppercase; }
+.cb-copy { display: inline-flex; align-items: center; gap: 5px; background: transparent; border: 0; color: var(--text-2); cursor: pointer; font: var(--fs-xs) var(--ui); transition: color .15s; }
 .cb-copy:hover { color: var(--accent); }
 .codeblock pre { margin: 0; padding: 10px 12px; overflow-x: auto; }
-.codeblock code { font: var(--fs-xs)/1.6 var(--code); color: var(--code-fg); background: none; }
+/* The app sets code at its `.callout`; this was two steps smaller, which made the same snippet
+   look like a footnote here and like content there. */
+.codeblock code { font: var(--fs-code)/1.55 var(--code); color: var(--code-fg); background: none; }
 
 /* tool rows */
 .tool-activity {
@@ -477,7 +592,14 @@ body {
 .done-stats { padding: 2px 0 4px 38px; font-size: var(--fs-xs); color: var(--text-dim); opacity: .7; }
 .msg-row.assistant .done-stats { padding-left: 0; }
 .done-stats .ds-sep { margin: 0 4px; }
-.token-stats { font-size: var(--fs-xs); color: var(--text-dim); }
+.token-stats { font-size: var(--fs-xs); color: var(--text-dim); display: inline-flex; align-items: center; gap: 6px; }
+/* Context meter. Neutral until the window is actually filling up — a bar that is always
+   coloured is a bar nobody reads. */
+.ctx-bar { width: 46px; height: 4px; border-radius: 2px; background: var(--border); overflow: hidden; }
+.ctx-fill { display: block; height: 100%; background: var(--text-dim); transition: width .3s var(--ease); }
+.token-stats.ctx-warn .ctx-fill { background: var(--warn); }
+.token-stats.ctx-hot .ctx-fill { background: var(--hot); }
+.token-stats.ctx-hot .ctx-text { color: var(--hot); }
 
 /* plan / note / error / permission */
 .plan-box { margin: 9px 0; padding: 11px 14px; border: 1px solid rgba(217,192,105,.3); background: rgba(217,192,105,.03); }
@@ -508,6 +630,14 @@ body {
 .perm-box { margin: 9px 0; padding: 11px 14px; border: 1px solid rgba(217,192,105,.4); border-left: 2px solid var(--warn); background: rgba(217,192,105,.03); }
 .perm-box .pq { font-size: var(--fs-sm); color: var(--text); margin-bottom: 9px; }
 .perm-box code { color: var(--warn); background: rgba(217,192,105,.08); padding: 1px 5px; }
+.ask-row { display: flex; gap: var(--s-2); margin-top: var(--s-2); }
+.ask-input {
+  flex: 1; min-width: 0; padding: 8px 10px;
+  background: var(--surface-2); color: var(--text);
+  border: 1px solid var(--border); border-radius: var(--r-control);
+  font: var(--fs-sm) var(--ui);
+}
+.ask-input:focus { border-color: var(--accent); outline: none; }
 .perm-btns { display: flex; gap: 8px; }
 .perm-btns button { border: 1px solid; padding: 6px 12px; cursor: pointer; font: var(--fs-xs) var(--ui); }
 .perm-btns .yes    { background: rgba(142,207,149,.07);  color: var(--ok);  border-color: rgba(142,207,149,.4); }
@@ -1809,12 +1939,16 @@ body {
 .icon-btn { width: 40px; height: 40px; padding: 0; }
 .icon-btn.sm { width: 32px; height: 32px; }
 .wordmark { display: inline-flex; align-items: center; gap: var(--s-2); padding: 0; }
+/* The mark, drawn in the accent — not a filled tile with the mark knocked out of it. The app's
+   lockup is the bare mark, and a solid accent square is the loudest thing on either surface. */
 .brand-mark {
   width: 34px; height: 34px; display: inline-flex; align-items: center; justify-content: center;
-  border-radius: var(--r-control); background: var(--accent); color: var(--on-accent);
-  box-shadow: var(--e-1); flex: none;
+  color: var(--accent); flex: none;
 }
-.brand-mark .ico { width: 19px; height: 19px; stroke-width: 1.8; }
+/* Heavier than the utility icons around it: the mark is a ring of thin arcs, and at the
+   icon set's 1.6 it reads as a hairline rather than as the brand. */
+.brand-mark .ico, .j-avatar .ico { stroke-width: 2.2; }
+.brand-mark .ico { width: 19px; height: 19px; }
 .brand-mark.mini { width: 26px; height: 26px; }
 .brand-mark.mini .ico { width: 15px; height: 15px; }
 .conversation-heading { min-width: 0; text-align: center; line-height: var(--lh-tight); }
@@ -1869,17 +2003,21 @@ body {
   border: 1px solid var(--border); box-shadow: var(--e-1);
 }
 .msg-row.assistant { grid-template-columns: 30px minmax(0, 1fr); gap: var(--s-2) var(--s-3); }
+/* The mark itself, drawn in the accent — matching how the app puts it beside a reply. A solid
+   accent tile with the mark knocked out of it made the loudest colour on the page sit against
+   every answer, and made the same mark read as a different element on each surface. */
 .j-avatar {
-  width: 30px; height: 30px; border: 0; border-radius: var(--r-control);
-  background: var(--accent); color: var(--on-accent); box-shadow: var(--e-1);
-  animation: none;
+  width: 30px; height: 30px; border: 0; background: none; box-shadow: none;
+  color: var(--accent); animation: none;
 }
-.j-avatar .ico { width: 16px; height: 16px; stroke-width: 1.8; }
-.msg-body { line-height: 1.75; }
+.j-avatar .ico { width: 22px; height: 22px; stroke-width: 2.2; }
+/* Matches the app: Plus Jakarta Sans at 17px with the 4pt the app adds between lines. */
+.msg-body { line-height: var(--lh-body); }
 .msg-body p { margin-bottom: var(--s-3); }
+/* The app's markdown heading levels: title2, title3, headline. */
 .msg-body h1 { font-size: var(--fs-xl); }
-.msg-body h2 { font-size: 19px; }
-.msg-body h3 { font-size: 17px; }
+.msg-body h2 { font-size: var(--fs-lg); }
+.msg-body h3 { font-size: var(--fs-base); }
 .msg-body h4, .msg-body h5, .msg-body h6 { font-size: var(--fs-base); }
 .msg-body h1, .msg-body h2, .msg-body h3,
 .msg-body h4, .msg-body h5, .msg-body h6 { margin: var(--s-5) 0 var(--s-2); }
@@ -1888,8 +2026,9 @@ body {
 .msg-act-btn { min-height: 32px; padding: var(--s-1) var(--s-2); }
 .done-stats, .thread-trimmed { opacity: 1; }
 .md-table { font-size: var(--fs-sm); }
-.codeblock { border-left-width: 1px; overflow: hidden; }
-.codeblock code { font-size: var(--fs-xs); }
+.codeblock { overflow: hidden; }
+/* The app sets code at its `.callout`; two steps smaller made it read as a footnote. */
+.codeblock code { font-size: var(--fs-code); }
 .tool-row { padding: var(--s-2) var(--s-3); }
 .thinking-row { min-height: 32px; }
 

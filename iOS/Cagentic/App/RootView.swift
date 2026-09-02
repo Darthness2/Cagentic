@@ -74,9 +74,12 @@ struct RootView: View {
             detail
                 .toolbar {
                     ToolbarItem(placement: .topBarLeading) {
-                        Button("Open sidebar", systemImage: "sidebar.left") {
+                        Button {
                             presentSidebar()
+                        } label: {
+                            CagenticIconView(shape: SidebarIconShape(), size: 21)
                         }
+                        .accessibilityLabel("Open sidebar")
                         .accessibilityIdentifier("OpenSidebarButton")
                     }
                 }
@@ -234,12 +237,10 @@ struct RootView: View {
             ModelPickerView(model: model)
                 .presentationDetents([.fraction(0.74), .large])
                 .presentationDragIndicator(.visible)
-        case .conversationManager:
-            ConversationManagerView(model: model)
-                .presentationDetents([.large])
-                .presentationDragIndicator(.visible)
         case .renameConversation(let id):
             RenameConversationView(model: model, conversationID: id)
+        case .pairGateway:
+            GatewayPairingView(model: model)
         }
     }
 

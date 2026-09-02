@@ -1,139 +1,137 @@
 import SwiftUI
 
+/// Bulk archive, restore, and delete.
+///
+/// Pushed from Settings rather than presented on its own, so it deliberately owns no
+/// `NavigationStack` and no dismiss control: nesting a stack inside the Settings sheet would draw a
+/// second navigation bar, and a `dismiss()` here would close the whole sheet rather than going back
+/// one screen.
 struct ConversationManagerView: View {
     @Bindable var model: AppModel
 
-    @Environment(\.dismiss) private var dismiss
     @State private var scope: ConversationScope = .active
     @State private var selection: Set<UUID> = []
     @State private var isDeleteConfirmationPresented = false
 
     var body: some View {
-        NavigationStack {
-            VStack(spacing: 0) {
-                Picker("Conversation status", selection: $scope) {
-                    ForEach(ConversationScope.allCases) { scope in
-                        Text(scope.title).tag(scope)
-                    }
+        VStack(spacing: 0) {
+            Picker("Conversation status", selection: $scope) {
+                ForEach(ConversationScope.allCases) { scope in
+                    Text(scope.title).tag(scope)
                 }
-                .pickerStyle(.segmented)
-                .padding(.horizontal, CagenticTheme.Spacing.md)
-                .padding(.vertical, CagenticTheme.Spacing.sm)
+            }
+            .pickerStyle(.segmented)
+            .padding(.horizontal, CagenticTheme.Spacing.md)
+            .padding(.vertical, CagenticTheme.Spacing.sm)
 
-                if scopedConversations.isEmpty {
-                    ContentUnavailableView(
-                        scope.emptyTitle,
-                        systemImage: scope == .active ? "bubble.left.and.bubble.right" : "archivebox",
-                        description: Text(scope.emptyDescription)
-                    )
-                    .frame(maxWidth: .infinity, maxHeight: .infinity)
-                } else {
-                    List(scopedConversations) { conversation in
-                        Button {
-                            toggleSelection(conversation.id)
-                        } label: {
-                            HStack(spacing: CagenticTheme.Spacing.sm) {
-                                Image(
-                                    systemName: selection.contains(conversation.id)
-                                        ? "checkmark.circle.fill"
-                                        : "circle"
-                                )
-                                .font(.title3)
-                                .foregroundStyle(
-                                    selection.contains(conversation.id)
-                                        ? CagenticTheme.accent
-                                        : CagenticTheme.textTertiary
-                                )
-                                .accessibilityHidden(true)
+            if scopedConversations.isEmpty {
+                ContentUnavailableView(
+                    scope.emptyTitle,
+                    systemImage: scope == .active ? "bubble.left.and.bubble.right" : "archivebox",
+                    description: Text(scope.emptyDescription)
+                )
+                .frame(maxWidth: .infinity, maxHeight: .infinity)
+            } else {
+                List(scopedConversations) { conversation in
+                    Button {
+                        toggleSelection(conversation.id)
+                    } label: {
+                        HStack(spacing: CagenticTheme.Spacing.sm) {
+                            Image(
+                                systemName: selection.contains(conversation.id)
+                                    ? "checkmark.circle.fill"
+                                    : "circle"
+                            )
+                            .font(.title3)
+                            .foregroundStyle(
+                                selection.contains(conversation.id)
+                                    ? CagenticTheme.accent
+                                    : CagenticTheme.textTertiary
+                            )
+                            .accessibilityHidden(true)
 
                                 VStack(alignment: .leading, spacing: CagenticTheme.Spacing.xxs) {
-                                    HStack(spacing: CagenticTheme.Spacing.xxs) {
-                                        if conversation.isPinned {
-                                            Image(systemName: "pin.fill")
-                                                .font(.caption2)
-                                                .foregroundStyle(CagenticTheme.accent)
-                                                .accessibilityHidden(true)
-                                        }
-                                        Text(conversation.title)
-                                            .font(CagenticTheme.FontStyle.bodyMedium)
-                                            .foregroundStyle(CagenticTheme.textPrimary)
-                                            .lineLimit(1)
+                                HStack(spacing: CagenticTheme.Spacing.xxs) {
+                                    if conversation.isPinned {
+                                        Image(systemName: "pin.fill")
+                                            .font(.caption2)
+                                            .foregroundStyle(CagenticTheme.accent)
+                                            .accessibilityHidden(true)
                                     }
-                                    Text(conversation.preview)
-                                        .font(CagenticTheme.FontStyle.caption)
-                                        .foregroundStyle(CagenticTheme.textSecondary)
+                                    Text(conversation.title)
+                                        .font(CagenticTheme.FontStyle.bodyMedium)
+                                        .foregroundStyle(CagenticTheme.textPrimary)
                                         .lineLimit(1)
                                 }
+                                Text(conversation.preview)
+                                    .font(CagenticTheme.FontStyle.caption)
+                                    .foregroundStyle(CagenticTheme.textSecondary)
+                                    .lineLimit(1)
+                            }
 
-                                Spacer(minLength: CagenticTheme.Spacing.xs)
-                            }
-                            .frame(minHeight: 52)
-                            .contentShape(.rect)
+                            Spacer(minLength: CagenticTheme.Spacing.xs)
                         }
-                        .buttonStyle(.plain)
-                        .accessibilityLabel(conversation.title)
-                        .accessibilityValue(
-                            selection.contains(conversation.id) ? "Selected" : "Not selected"
-                        )
-                        .contextMenu {
-                            if scope == .active {
-                                Button(
-                                    conversation.isPinned ? "Unpin" : "Pin",
-                                    systemImage: "pin"
-                                ) {
-                                    model.togglePinned(conversation.id)
-                                }
-                            }
-                            if let transcript = model.conversationExportText(id: conversation.id) {
-                                ShareLink(item: transcript) {
-                                    Label("Share", systemImage: "square.and.arrow.up")
-                                }
+                        .frame(minHeight: 52)
+                        .contentShape(.rect)
+                    }
+                    .buttonStyle(.plain)
+                    .accessibilityLabel(conversation.title)
+                    .accessibilityValue(
+                        selection.contains(conversation.id) ? "Selected" : "Not selected"
+                    )
+                    .contextMenu {
+                        if scope == .active {
+                            Button(
+                                conversation.isPinned ? "Unpin" : "Pin",
+                                systemImage: "pin"
+                            ) {
+                                model.togglePinned(conversation.id)
                             }
                         }
-                    }
-                    .listStyle(.plain)
-                    .scrollContentBackground(.hidden)
-                }
-            }
-            .background(CagenticTheme.background)
-            .navigationTitle("Manage chats")
-            .navigationBarTitleDisplayMode(.inline)
-            .toolbar {
-                ToolbarItem(placement: .cancellationAction) {
-                    Button("Done") {
-                        dismiss()
+                        if let transcript = model.conversationExportText(id: conversation.id) {
+                            ShareLink(item: transcript) {
+                                Label("Share", systemImage: "square.and.arrow.up")
+                            }
+                        }
                     }
                 }
-                ToolbarItem(placement: .topBarTrailing) {
-                    Button(selection.count == scopedConversations.count ? "Clear" : "Select all") {
-                        toggleAll()
-                    }
-                    .disabled(scopedConversations.isEmpty)
-                }
+                .listStyle(.plain)
+                .scrollContentBackground(.hidden)
             }
-            .safeAreaInset(edge: .bottom, spacing: 0) {
-                if !selection.isEmpty {
-                    bulkActionBar
-                        .transition(.move(edge: .bottom).combined(with: .opacity))
+        }
+        .background(CagenticTheme.background)
+        .navigationTitle("Manage chats")
+        .navigationBarTitleDisplayMode(.inline)
+        .toolbar {
+            ToolbarItem(placement: .topBarTrailing) {
+                Button(selection.count == scopedConversations.count ? "Clear" : "Select all") {
+                    toggleAll()
                 }
+                .disabled(scopedConversations.isEmpty)
             }
-            .animation(.easeOut(duration: 0.18), value: selection.isEmpty)
-            .onChange(of: scope) {
+        }
+        .safeAreaInset(edge: .bottom, spacing: 0) {
+            if !selection.isEmpty {
+                bulkActionBar
+                    .transition(.move(edge: .bottom).combined(with: .opacity))
+            }
+        }
+        .animation(.easeOut(duration: 0.18), value: selection.isEmpty)
+        .onChange(of: scope) {
+            selection.removeAll()
+        }
+        .confirmationDialog(
+            "Delete selected chats?",
+            isPresented: $isDeleteConfirmationPresented,
+            titleVisibility: .visible
+        ) {
+            Button("Delete \(selection.count) chats", role: .destructive) {
+                model.deleteConversations(selection)
                 selection.removeAll()
             }
-            .confirmationDialog(
-                "Delete selected chats?",
-                isPresented: $isDeleteConfirmationPresented,
-                titleVisibility: .visible
-            ) {
-                Button("Delete \(selection.count) chats", role: .destructive) {
-                    model.deleteConversations(selection)
-                    selection.removeAll()
-                }
-                Button("Cancel", role: .cancel) {}
-            } message: {
-                Text("This permanently removes the selected conversations and their attachments from this device.")
-            }
+            Button("Cancel", role: .cancel) {}
+        } message: {
+            Text("This permanently removes the selected conversations and their attachments from this device.")
         }
     }
 

@@ -13,7 +13,10 @@ nonisolated struct GatewayClientLimits: Equatable, Sendable {
         // A single frame can legitimately be large: `tool_result` carries the tool's full output,
         // and a browser screenshot arrives as base64 inside it.
         maximumFrameBytes: 8 * 1_024 * 1_024,
-        maximumBufferedEvents: 128
+        maximumBufferedEvents: 128,
+        // The gateway's own ceiling. Checked here as well so an oversized file is refused before
+        // it is base64-encoded and pushed over the network to earn a 413.
+        maximumUploadBytes: 16 * 1_024 * 1_024
     )
 
     let maximumJSONResponseBytes: Int
@@ -21,13 +24,15 @@ nonisolated struct GatewayClientLimits: Equatable, Sendable {
     let maximumStreamBytes: Int
     let maximumFrameBytes: Int
     let maximumBufferedEvents: Int
+    let maximumUploadBytes: Int
 
     init(
         maximumJSONResponseBytes: Int,
         maximumChatRequestBytes: Int,
         maximumStreamBytes: Int,
         maximumFrameBytes: Int,
-        maximumBufferedEvents: Int
+        maximumBufferedEvents: Int,
+        maximumUploadBytes: Int = 16 * 1_024 * 1_024
     ) {
         precondition(maximumJSONResponseBytes > 0)
         precondition(maximumChatRequestBytes > 0)
@@ -39,6 +44,8 @@ nonisolated struct GatewayClientLimits: Equatable, Sendable {
         self.maximumStreamBytes = maximumStreamBytes
         self.maximumFrameBytes = maximumFrameBytes
         self.maximumBufferedEvents = maximumBufferedEvents
+        precondition(maximumUploadBytes > 0)
+        self.maximumUploadBytes = maximumUploadBytes
     }
 }
 
@@ -60,13 +67,47 @@ public nonisolated struct GatewayChatsSnapshot: Equatable, Sendable {
 public nonisolated protocol GatewayServing: Sendable {
     func bootstrap() async throws -> GatewayBootstrap
     func chat(message: String) -> GatewayEventStream
+    /// Replaces the `index`-th *visible user message* and re-runs the turn from there.
+    ///
+    /// The gateway owns the history, so editing is something it does rather than something the
+    /// app does to its mirror — which is why this streams a whole new turn back rather than
+    /// returning a rewritten transcript.
+    func editAndResend(index: Int, message: String) -> GatewayEventStream
     func answerPermission(id: String, answer: GatewayPermissionAnswer, rule: String?) async throws
+    func answerQuestion(id: String, answer: String) async throws
     func abort() async throws
     func newChat() async throws -> GatewayChatsSnapshot
     func loadChat(id: String) async throws -> GatewayChatsSnapshot
     func deleteChat(id: String) async throws -> GatewayChatsSnapshot
     func renameChat(id: String, title: String) async throws -> [GatewayChatSummary]
     func selectModel(_ model: String) async throws -> String
+    func uploadAttachment(name: String, data: Data) async throws -> GatewayUpload
+    func setChatConfig(
+        id: String,
+        mode: GatewayChatMode?,
+        profile: GatewayChatProfileUpdate?
+    ) async throws -> GatewayChatConfig
+}
+
+/// The half of a chat's config the app sends. Separate from `GatewayChatConfig` because sending
+/// is partial — omitting the profile leaves the chat's existing one alone rather than clearing it.
+public nonisolated struct GatewayChatProfileUpdate: Equatable, Sendable {
+    public var name: String
+    public var systemPrompt: String
+    public var temperature: Double?
+    public var effort: String?
+
+    public init(
+        name: String,
+        systemPrompt: String,
+        temperature: Double? = nil,
+        effort: String? = nil
+    ) {
+        self.name = name
+        self.systemPrompt = systemPrompt
+        self.temperature = temperature
+        self.effort = effort
+    }
 }
 
 /// Direct client for a Cagentic gateway reachable on the local network.
@@ -120,6 +161,14 @@ public nonisolated struct GatewayClient: GatewayServing, Sendable {
         )
     }
 
+    public func answerQuestion(id: String, answer: String) async throws {
+        _ = try await send(
+            route: .answer,
+            body: try Self.encode(["id": id, "answer": answer]),
+            responseType: GatewayErrorPayload.self
+        )
+    }
+
     public func abort() async throws {
         _ = try await send(
             route: .abort,
@@ -148,6 +197,62 @@ public nonisolated struct GatewayClient: GatewayServing, Sendable {
         return snapshot.chats
     }
 
+    public func setChatConfig(
+        id: String,
+        mode: GatewayChatMode?,
+        profile: GatewayChatProfileUpdate?
+    ) async throws -> GatewayChatConfig {
+        var body: [String: Any] = ["id": id]
+        if let mode { body["mode"] = mode.rawValue }
+        if let profile {
+            var encoded: [String: Any] = [
+                "name": profile.name,
+                "system_prompt": profile.systemPrompt,
+            ]
+            if let temperature = profile.temperature { encoded["temperature"] = temperature }
+            if let effort = profile.effort, !effort.isEmpty { encoded["effort"] = effort }
+            body["profile"] = encoded
+        }
+        let payload = try await send(
+            route: .chatsConfig,
+            body: try JSONSerialization.data(withJSONObject: body),
+            responseType: ChatConfigResponse.self
+        )
+        // This route reports failure inside an HTTP 200 body, as the others here do.
+        if let error = payload.error, !error.isEmpty {
+            throw GatewayClientError.server(message: error)
+        }
+        return payload.chatConfig?.value ?? GatewayChatConfig()
+    }
+
+    public func uploadAttachment(name: String, data: Data) async throws -> GatewayUpload {
+        guard !data.isEmpty else {
+            throw GatewayClientError.requestEncoding(reason: "the attachment is empty")
+        }
+        guard data.count <= limits.maximumUploadBytes else {
+            let megabytes = limits.maximumUploadBytes / (1_024 * 1_024)
+            throw GatewayClientError.requestEncoding(
+                reason: "the attachment is larger than \(megabytes)MB"
+            )
+        }
+        let payload = try await send(
+            route: .upload,
+            body: try Self.encode([
+                "name": name,
+                "data": data.base64EncodedString(),
+            ]),
+            responseType: GatewayUploadPayload.self
+        )
+        guard let upload = payload.value else {
+            throw GatewayClientError.server(
+                message: payload.error?.isEmpty == false
+                    ? payload.error!
+                    : "The gateway did not save the attachment."
+            )
+        }
+        return upload
+    }
+
     public func selectModel(_ model: String) async throws -> String {
         let payload = try await send(
             route: .model,
@@ -161,23 +266,44 @@ public nonisolated struct GatewayClient: GatewayServing, Sendable {
         return payload.model ?? model
     }
 
+    public func editAndResend(index: Int, message: String) -> GatewayEventStream {
+        turnStream(route: .chatEdit, body: ["index": index, "message": message])
+    }
+
     public func chat(message: String) -> GatewayEventStream {
-        AsyncThrowingStream(
+        // `message` and `panels` only. Sending `id` without the Collama client marker routes the
+        // turn down a path that never releases the gateway's turn lock, wedging it until the
+        // process restarts.
+        //
+        // `panels: false` says this client cannot draw charts, so the model is never told they
+        // exist and is not offered the tool. Only the web page renders them; the phone strips
+        // them out of the reply, so without this the model spends tokens producing charts for
+        // nobody.
+        turnStream(route: .chat, body: ["message": message, "panels": false])
+    }
+
+    /// One streamed turn, whichever route starts it.
+    private func turnStream(route: GatewayRoute, body: [String: Any]) -> GatewayEventStream {
+        // Encoded here rather than inside the task: a `[String: Any]` is not `Sendable`, and the
+        // bytes are.
+        let encoded = try? JSONSerialization.data(withJSONObject: body)
+        return AsyncThrowingStream(
             bufferingPolicy: .bufferingOldest(limits.maximumBufferedEvents)
         ) { continuation in
             let task = Task { @concurrent in
                 do {
-                    // Only `message`. Sending `id` without the Collama client marker routes the turn
-                    // down a path that never releases the gateway's turn lock, wedging it until the
-                    // process restarts.
-                    let body = try Self.encode(["message": message])
+                    guard let body = encoded else {
+                        throw GatewayClientError.requestEncoding(
+                            reason: "the turn could not be encoded"
+                        )
+                    }
                     guard body.count <= limits.maximumChatRequestBytes else {
                         throw GatewayClientError.requestEncoding(
                             reason: "the message exceeds \(limits.maximumChatRequestBytes) bytes"
                         )
                     }
                     let urlRequest = try requestFactory.makeRequest(
-                        route: .chat,
+                        route: route,
                         body: body,
                         accept: "text/event-stream",
                         // The stream has no heartbeat: an approval prompt parks it for up to five
@@ -455,7 +581,103 @@ nonisolated struct GatewayRequestFactory: Sendable {
     }
 }
 
+private nonisolated struct ChatConfigResponse: Decodable {
+    let ok: Bool?
+    let chatConfig: GatewayChatConfigPayload?
+    let error: String?
+
+    enum CodingKeys: String, CodingKey {
+        case ok
+        case chatConfig = "chat_config"
+        case error
+    }
+}
+
 private nonisolated struct ModelResponse: Decodable {
     let model: String?
     let error: String?
+}
+
+/// What the gateway hands back once a pairing code checks out.
+public nonisolated struct GatewayPairing: Equatable, Sendable {
+    public let token: String
+    public let name: String
+    public let version: String
+
+    public init(token: String, name: String, version: String) {
+        self.token = token
+        self.name = name
+        self.version = version
+    }
+}
+
+private nonisolated struct PairingResponse: Decodable {
+    let token: String?
+    let name: String?
+    let version: String?
+    let error: String?
+}
+
+/// Trades a pairing code for the gateway's token.
+///
+/// Deliberately a free function rather than a method on `GatewayClient`: this is
+/// the one gateway request made *without* a token, so it cannot be built by a
+/// client that requires one. The window it redeems against is short-lived,
+/// single-use, and only open because somebody ran `/token` on the computer.
+public nonisolated func pairWithGateway(
+    endpoint: GatewayEndpoint,
+    code: String,
+    session: URLSession = .shared
+) async throws -> GatewayPairing {
+    let digits = code.filter(\.isNumber)
+    guard !digits.isEmpty else {
+        throw GatewayClientError.requestEncoding(reason: "enter the code shown on the computer")
+    }
+
+    var request = URLRequest(
+        url: endpoint.url(for: .pair),
+        cachePolicy: .reloadIgnoringLocalCacheData,
+        timeoutInterval: 20
+    )
+    request.httpMethod = "POST"
+    request.httpBody = try GatewayClient.encode(["code": digits])
+    request.setValue("application/json", forHTTPHeaderField: "Accept")
+    request.setValue("application/json", forHTTPHeaderField: "Content-Type")
+
+    let data: Data
+    let response: URLResponse
+    do {
+        (data, response) = try await session.data(for: request)
+    } catch {
+        throw GatewayClient.mappedError(error)
+    }
+
+    guard let httpResponse = response as? HTTPURLResponse else {
+        throw GatewayClientError.invalidResponse
+    }
+    let payload = try? JSONDecoder().decode(PairingResponse.self, from: data)
+    guard (200...299).contains(httpResponse.statusCode) else {
+        // 409 means no window is open, which is different from a wrong code: the value may not
+        // have been a pairing code at all, and the caller can still try it as a literal token.
+        if httpResponse.statusCode == 409 {
+            throw GatewayClientError.pairingUnavailable
+        }
+        // Otherwise the gateway explains refusals in plain language — a wrong code says how many
+        // tries are left — so its own words beat a status-code translation.
+        if let message = payload?.error, !message.isEmpty {
+            throw GatewayClientError.server(message: message)
+        }
+        throw GatewayClient.httpError(statusCode: httpResponse.statusCode, body: data)
+    }
+    guard let token = payload?.token, !token.isEmpty else {
+        throw GatewayClientError.malformedResponse(
+            endpoint: "/api/pair",
+            reason: "the gateway did not return a token"
+        )
+    }
+    return GatewayPairing(
+        token: token,
+        name: payload?.name ?? "",
+        version: payload?.version ?? ""
+    )
 }

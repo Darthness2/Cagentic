@@ -9,13 +9,17 @@
 /* Begin PBXBuildFile section */
 		011D6C7DD42026FD95142099 /* AttachmentStoreTests.swift in Sources */ = {isa = PBXBuildFile; fileRef = 141C6BBC649DBF7EC44BB37B /* AttachmentStoreTests.swift */; };
 		07B8B9175F4C8EE16BC89393 /* CagenticTheme.swift in Sources */ = {isa = PBXBuildFile; fileRef = 5E8F950BCC3416A1F613C74E /* CagenticTheme.swift */; };
-		0D45393681689C0466479825 /* InterVariable-Italic.ttf in Resources */ = {isa = PBXBuildFile; fileRef = 2DF126A02C8B4595BB22622B /* InterVariable-Italic.ttf */; };
+		095C8956692F21CD6B868279 /* ChatProfile.swift in Sources */ = {isa = PBXBuildFile; fileRef = 50F348DA7536675769B82EF6 /* ChatProfile.swift */; };
+		0D003B021D3E1FBB8D68D191 /* BrandMarkTests.swift in Sources */ = {isa = PBXBuildFile; fileRef = 8838219DD0D608D58F26D05D /* BrandMarkTests.swift */; };
+		139C84CC2FF76F9754DA3791 /* CustomizeView.swift in Sources */ = {isa = PBXBuildFile; fileRef = 0208E508FE7CFF1B43B3F363 /* CustomizeView.swift */; };
 		1EF99EBC2D2FAD74DB532722 /* OllamaResponseDecodingTests.swift in Sources */ = {isa = PBXBuildFile; fileRef = 755EF2B1D3B8486BF2715B4D /* OllamaResponseDecodingTests.swift */; };
 		2400A8D6D6F69CED5101867F /* NetworkAddress.swift in Sources */ = {isa = PBXBuildFile; fileRef = A08209C2A1ADE502EF1DECD9 /* NetworkAddress.swift */; };
 		25DA62D3DA5139391ADFAA57 /* OllamaModels.swift in Sources */ = {isa = PBXBuildFile; fileRef = 5FD17B2085CD0B1E965DAA54 /* OllamaModels.swift */; };
 		2CE6D18E7574A28A437BB33D /* OllamaEndpointTests.swift in Sources */ = {isa = PBXBuildFile; fileRef = 5D339D385450D8F9E9208C68 /* OllamaEndpointTests.swift */; };
 		3143417927B565D6C25A2B41 /* AppModelTests.swift in Sources */ = {isa = PBXBuildFile; fileRef = B8C84B35B17C3C57FDE0CBC8 /* AppModelTests.swift */; };
+		325772D50E1A3EF0D81CA7E9 /* SpaceGrotesk-Regular.ttf in Resources */ = {isa = PBXBuildFile; fileRef = 7587751C2C000F9EC0501D21 /* SpaceGrotesk-Regular.ttf */; };
 		347466944E14F73D8AE5EB10 /* GatewayClientError.swift in Sources */ = {isa = PBXBuildFile; fileRef = 998523A493F0350A575D9854 /* GatewayClientError.swift */; };
+		366AD975AF8DE459DBBB84A1 /* PlusJakartaSans-Medium.ttf in Resources */ = {isa = PBXBuildFile; fileRef = D7F4A9C012AE9F78189D3285 /* PlusJakartaSans-Medium.ttf */; };
 		37032C779F73A46FCDC2DFEA /* ComposerView.swift in Sources */ = {isa = PBXBuildFile; fileRef = 26E261A2F8BFA11DD13E57C8 /* ComposerView.swift */; };
 		3D939BD19F36C41AFC86EB11 /* ServerManagerView.swift in Sources */ = {isa = PBXBuildFile; fileRef = 848B951ACBDB3DBF696A0394 /* ServerManagerView.swift */; };
 		40D3FBC58A1AD412087DA95C /* AppRepositoryTests.swift in Sources */ = {isa = PBXBuildFile; fileRef = 75BB7679AF10BFACB65594D5 /* AppRepositoryTests.swift */; };
@@ -25,9 +29,14 @@
 		4C78DB45BCC0CFF482542A4F /* Assets.xcassets in Resources */ = {isa = PBXBuildFile; fileRef = 2A11FD0C8F1D53019228C27E /* Assets.xcassets */; };
 		4CFF86292E9CDC6A55560906 /* ServerProfileTests.swift in Sources */ = {isa = PBXBuildFile; fileRef = 1C00CC04491B8AFB9EBDDB85 /* ServerProfileTests.swift */; };
 		4D66A47A46AA91837FFA4038 /* GatewayTextSanitizerTests.swift in Sources */ = {isa = PBXBuildFile; fileRef = 7EA0EEDA5B5A00989F4E6A88 /* GatewayTextSanitizerTests.swift */; };
+		4E09E5C4373B45F8932563FE /* OnboardingSkipTests.swift in Sources */ = {isa = PBXBuildFile; fileRef = 916451BBF7B0EAFFF21DA46D /* OnboardingSkipTests.swift */; };
+		4FC47A9CA4B73B22DA76D812 /* GatewayPairingView.swift in Sources */ = {isa = PBXBuildFile; fileRef = 21225D456281EEF8429BAB8A /* GatewayPairingView.swift */; };
 		503E909E6237D70F63901E4F /* AppRepository.swift in Sources */ = {isa = PBXBuildFile; fileRef = E89F1A2A9A50399AC02EA96C /* AppRepository.swift */; };
+		54920335D8DBDE1CD8242771 /* TypographyTests.swift in Sources */ = {isa = PBXBuildFile; fileRef = 778258EAAC60B5DFEA4A535C /* TypographyTests.swift */; };
+		55416B74B6D8D18FE023CAD0 /* SpaceGrotesk-Medium.ttf in Resources */ = {isa = PBXBuildFile; fileRef = E0F3457FBA8A032FE0BDAAE8 /* SpaceGrotesk-Medium.ttf */; };
 		5E6F5B7E43EAABEC237B9C81 /* ChatView.swift in Sources */ = {isa = PBXBuildFile; fileRef = B43F5E0658AA6FD37EDFD4E9 /* ChatView.swift */; };
 		5E740947A68405B9E78F9F0D /* OllamaEndpoint.swift in Sources */ = {isa = PBXBuildFile; fileRef = 0F2B22630DD8463EEBB0C542 /* OllamaEndpoint.swift */; };
+		5FE55F4E48E6431A42C46AD1 /* PlusJakartaSans-Regular.ttf in Resources */ = {isa = PBXBuildFile; fileRef = 72CD58B225813F2F63152B6A /* PlusJakartaSans-Regular.ttf */; };
 		5FF1A19228FDCE182476FC34 /* ModelPickerView.swift in Sources */ = {isa = PBXBuildFile; fileRef = 54A7E8EE033C6EE01A045AAF /* ModelPickerView.swift */; };
 		6091F2A3C33EFCCC3A9B4BBC /* MarkdownRendererTests.swift in Sources */ = {isa = PBXBuildFile; fileRef = 4642C8AADB0F3A349F78EFCC /* MarkdownRendererTests.swift */; };
 		66663A1AC25193C4625DB047 /* AppModelGatewayTests.swift in Sources */ = {isa = PBXBuildFile; fileRef = F69DC39A0D7BDC962A85577D /* AppModelGatewayTests.swift */; };
@@ -37,31 +46,52 @@
 		6AB4EEBC824B5C8EA9A5E076 /* SettingsView.swift in Sources */ = {isa = PBXBuildFile; fileRef = CF7C77A5AD4672840A8FB66F /* SettingsView.swift */; };
 		6DA5B7B9576D56E1C57F99E1 /* GatewayModels.swift in Sources */ = {isa = PBXBuildFile; fileRef = 38445A75CCE5A84597448BA8 /* GatewayModels.swift */; };
 		6EC8E070FA94054E7F515F17 /* ConnectionSetupView.swift in Sources */ = {isa = PBXBuildFile; fileRef = C8C39CDBD7EB28BF408AEF9C /* ConnectionSetupView.swift */; };
+		6EE0925762AD4BC84163902F /* PlusJakartaSans-LICENSE.txt in Resources */ = {isa = PBXBuildFile; fileRef = 6DA5F70597C08ABC0DFA51AE /* PlusJakartaSans-LICENSE.txt */; };
 		7378055BE83D290C68650B0F /* MessageRow.swift in Sources */ = {isa = PBXBuildFile; fileRef = 829A4CD66A1D8725EC5BCA49 /* MessageRow.swift */; };
 		73B44758BDD93731D8DFA961 /* BrandMark.swift in Sources */ = {isa = PBXBuildFile; fileRef = 3E7A9F60557178A79582AA73 /* BrandMark.swift */; };
+		73B7BC1469F81976D8261C94 /* CagenticIcons.swift in Sources */ = {isa = PBXBuildFile; fileRef = 03366ABE6168B471EEFC6DDD /* CagenticIcons.swift */; };
+		7497E68F096C91F6FD411F73 /* GatewayDiscovery.swift in Sources */ = {isa = PBXBuildFile; fileRef = 7E84EB8D404187B1C661AE84 /* GatewayDiscovery.swift */; };
+		754BD329C4940363CDD05CC4 /* PlusJakartaSans-Bold.ttf in Resources */ = {isa = PBXBuildFile; fileRef = 1A338FE7E85A2B8716E0E5D6 /* PlusJakartaSans-Bold.ttf */; };
 		8171600A2BCD5CB5EA6EAC70 /* OllamaClient.swift in Sources */ = {isa = PBXBuildFile; fileRef = 42F6824DF2505703299D223D /* OllamaClient.swift */; };
 		8FBAAE6796F1D26AF5A7BAF3 /* AttachmentModels.swift in Sources */ = {isa = PBXBuildFile; fileRef = B74B48FA3D4022E2C4DAED98 /* AttachmentModels.swift */; };
 		93C2FDBBA1733A409D275FAA /* OllamaRequestContextPlanner.swift in Sources */ = {isa = PBXBuildFile; fileRef = 30FD528765C943E1AAADB345 /* OllamaRequestContextPlanner.swift */; };
 		95DBD2CF0175DD0405150EEE /* GatewayEndpointTests.swift in Sources */ = {isa = PBXBuildFile; fileRef = 032EF1848784E683BD74E9BF /* GatewayEndpointTests.swift */; };
 		973248AB5E7856EB952B7053 /* OllamaRequestContextPlannerTests.swift in Sources */ = {isa = PBXBuildFile; fileRef = 91FD4177D89D9388200AAE26 /* OllamaRequestContextPlannerTests.swift */; };
+		9B5364C0CCA300F332E98DFF /* GatewayPairingTests.swift in Sources */ = {isa = PBXBuildFile; fileRef = 6A0E3D4D2F2BD38C0361092C /* GatewayPairingTests.swift */; };
+		9E80FAB6ED5E010993789775 /* GenerationOptionsDecodingTests.swift in Sources */ = {isa = PBXBuildFile; fileRef = DB2FEB3CA72D2CD66D519426 /* GenerationOptionsDecodingTests.swift */; };
+		A0DE08FCCAFC1F5D1068B5BD /* GatewayEditTests.swift in Sources */ = {isa = PBXBuildFile; fileRef = BAFB0DC0145C8ACDC3C8228A /* GatewayEditTests.swift */; };
 		A74D40FDD89D05C32CC2D337 /* ServerProfile.swift in Sources */ = {isa = PBXBuildFile; fileRef = E91B961D7F0D0AD461B6AEC3 /* ServerProfile.swift */; };
+		AB171D575589CBAC5FD32594 /* StreamingLayoutTests.swift in Sources */ = {isa = PBXBuildFile; fileRef = 0C7C85F8B89C5F1837BE22B9 /* StreamingLayoutTests.swift */; };
 		ACE3DDC0D196B1B4E9F31293 /* OllamaClientError.swift in Sources */ = {isa = PBXBuildFile; fileRef = 21BA7C1D6214CC3805C19896 /* OllamaClientError.swift */; };
 		AE74B42E4992F00C7EFBB888 /* OllamaChatChunkDecoderTests.swift in Sources */ = {isa = PBXBuildFile; fileRef = E73A5E3046ECC2E7B712D34B /* OllamaChatChunkDecoderTests.swift */; };
+		AEF6A9EFFF09E00822DE78C4 /* PlusJakartaSans-Italic.ttf in Resources */ = {isa = PBXBuildFile; fileRef = CBEF7A55517710AF8FB65A65 /* PlusJakartaSans-Italic.ttf */; };
+		B1B6C87F7F1C58CA234E6111 /* MarkdownTableRuleTests.swift in Sources */ = {isa = PBXBuildFile; fileRef = 1F63CC4DC43E380F8A86388F /* MarkdownTableRuleTests.swift */; };
+		B2338F0969B147D7DC7061CE /* GatewayQuestionTests.swift in Sources */ = {isa = PBXBuildFile; fileRef = 8A29FB2B428E9E34137CDBBF /* GatewayQuestionTests.swift */; };
+		B283F7FBDE16770DA38C167B /* ToolLabelTests.swift in Sources */ = {isa = PBXBuildFile; fileRef = C557E0AE96C01853A31EB3A1 /* ToolLabelTests.swift */; };
+		B8E26C18ABDDDE8921A82B85 /* TailscaleAddressTests.swift in Sources */ = {isa = PBXBuildFile; fileRef = 2BCC8DC1BED138BE34B6D92D /* TailscaleAddressTests.swift */; };
+		B9368C301014A489A244D07E /* GatewayAttachmentTests.swift in Sources */ = {isa = PBXBuildFile; fileRef = B952DFD7A9E36FCD1B48DC0A /* GatewayAttachmentTests.swift */; };
+		BAC093042A5A35513522B76F /* JumpToLatestTests.swift in Sources */ = {isa = PBXBuildFile; fileRef = CA74B8651585497C2A4DCBDA /* JumpToLatestTests.swift */; };
 		BD6B0F694DA65A441E5A23A9 /* OnboardingView.swift in Sources */ = {isa = PBXBuildFile; fileRef = C5A51E53E18949A06ED5DEAD /* OnboardingView.swift */; };
+		BDDD17F3B85ED840CDCCA5A0 /* SpaceGrotesk-Bold.ttf in Resources */ = {isa = PBXBuildFile; fileRef = F0AC254F5C2425E21F1865D5 /* SpaceGrotesk-Bold.ttf */; };
+		BF9E691216C92FC39968209B /* ChatProfileTests.swift in Sources */ = {isa = PBXBuildFile; fileRef = CE39413746D1417389BA472B /* ChatProfileTests.swift */; };
 		C38BB4BB82CAECFE377136F7 /* GatewayClient.swift in Sources */ = {isa = PBXBuildFile; fileRef = 4DC1F5BC1D396D27E46BB68A /* GatewayClient.swift */; };
-		C96ADAEFCEFA24AF00FF76D3 /* Inter-LICENSE.txt in Resources */ = {isa = PBXBuildFile; fileRef = DC8F1A7D07B66C75BE1166DF /* Inter-LICENSE.txt */; };
+		C44E04B4642BA4C5C7CF06E6 /* PlusJakartaSans-SemiBold.ttf in Resources */ = {isa = PBXBuildFile; fileRef = DF3F2ACAF694FA056D461387 /* PlusJakartaSans-SemiBold.ttf */; };
 		CD3D5556FBA9FA21EC6C656C /* GatewayEventDecoder.swift in Sources */ = {isa = PBXBuildFile; fileRef = 36B71E1D3BADE8662C8A146A /* GatewayEventDecoder.swift */; };
 		D404ED864688812C2BF8629D /* AppModels.swift in Sources */ = {isa = PBXBuildFile; fileRef = 17E19EDF35365067D5F7E016 /* AppModels.swift */; };
 		DC8639747260E50B3E5B99D0 /* OllamaChatChunkDecoder.swift in Sources */ = {isa = PBXBuildFile; fileRef = 0FA4CB173D103B68BBDBF4AB /* OllamaChatChunkDecoder.swift */; };
 		DD3CF38E1B90D287CC008773 /* AppModel.swift in Sources */ = {isa = PBXBuildFile; fileRef = 7A2006860F74736CA6042D0A /* AppModel.swift */; };
-		E676FF6D27ABA33D65A1655F /* InterVariable.ttf in Resources */ = {isa = PBXBuildFile; fileRef = 63F36BCC4BB7A02FF31D4E3F /* InterVariable.ttf */; };
+		DE30B7EFD98DF1915A094B62 /* JetBrainsMono-Regular.ttf in Resources */ = {isa = PBXBuildFile; fileRef = 22502BF4568ACF4AD7CC191F /* JetBrainsMono-Regular.ttf */; };
+		E5329AA85B60D07420005D74 /* JetBrainsMono-LICENSE.txt in Resources */ = {isa = PBXBuildFile; fileRef = 7884E97E8814FAC925EEB4BB /* JetBrainsMono-LICENSE.txt */; };
 		E7285D116AC1EE75392510FE /* AttachmentImporter.swift in Sources */ = {isa = PBXBuildFile; fileRef = 74777658B088FEA5F7AC6E05 /* AttachmentImporter.swift */; };
 		E7B83ABBC40CC4404E5EEC87 /* CagenticApp.swift in Sources */ = {isa = PBXBuildFile; fileRef = 2DC603766EF00A9D15F8BC54 /* CagenticApp.swift */; };
+		EBA8B9B0BFDED1679BF34ED4 /* SpaceGrotesk-SemiBold.ttf in Resources */ = {isa = PBXBuildFile; fileRef = 3E3956107EF53C52C8760EDC /* SpaceGrotesk-SemiBold.ttf */; };
 		EEC71ACC4D6536DB86D5FE97 /* ConversationManagerView.swift in Sources */ = {isa = PBXBuildFile; fileRef = DDB2E8EB4745CFDDD69E8DB3 /* ConversationManagerView.swift */; };
 		EFD5989C8D445F0DFE0F7C50 /* GatewayEventDecoderTests.swift in Sources */ = {isa = PBXBuildFile; fileRef = 8C2DA111F70BEA46894EB760 /* GatewayEventDecoderTests.swift */; };
 		F3D0D0F86ED8C4CB53249498 /* ServerCredentialStore.swift in Sources */ = {isa = PBXBuildFile; fileRef = 101F460205BEE586CDAF6B35 /* ServerCredentialStore.swift */; };
 		F4ACE2C09C74A30A38A491C0 /* GatewayTextSanitizer.swift in Sources */ = {isa = PBXBuildFile; fileRef = 55565EE506A92B03832C77FB /* GatewayTextSanitizer.swift */; };
+		F717F75E93197F6927A8976E /* ChatProfileApplicationTests.swift in Sources */ = {isa = PBXBuildFile; fileRef = 877855B076434EDBD163B459 /* ChatProfileApplicationTests.swift */; };
 		F81AA8F4A15F5672E0754846 /* OllamaServiceContractTests.swift in Sources */ = {isa = PBXBuildFile; fileRef = 15AC2D6AB13C3D6170CB79FE /* OllamaServiceContractTests.swift */; };
+		F87D9A7DBC5FAD3A6C2901F7 /* SpaceGrotesk-LICENSE.txt in Resources */ = {isa = PBXBuildFile; fileRef = E18B08345ADD66B86992DF43 /* SpaceGrotesk-LICENSE.txt */; };
 		FA03394B451060BDD9715074 /* KeychainTokenStore.swift in Sources */ = {isa = PBXBuildFile; fileRef = C80F68B64A50982F89EE114B /* KeychainTokenStore.swift */; };
 		FB39B3C138752D39CAA51D72 /* AppModelFeatureTests.swift in Sources */ = {isa = PBXBuildFile; fileRef = 8F6468D590DC2C860FDB6358 /* AppModelFeatureTests.swift */; };
 /* End PBXBuildFile section */
@@ -77,8 +107,11 @@
 /* End PBXContainerItemProxy section */
 
 /* Begin PBXFileReference section */
+		0208E508FE7CFF1B43B3F363 /* CustomizeView.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = CustomizeView.swift; sourceTree = "<group>"; };
 		032EF1848784E683BD74E9BF /* GatewayEndpointTests.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = GatewayEndpointTests.swift; sourceTree = "<group>"; };
+		03366ABE6168B471EEFC6DDD /* CagenticIcons.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = CagenticIcons.swift; sourceTree = "<group>"; };
 		06058403B05682CE759E56E3 /* AttachmentStore.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = AttachmentStore.swift; sourceTree = "<group>"; };
+		0C7C85F8B89C5F1837BE22B9 /* StreamingLayoutTests.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = StreamingLayoutTests.swift; sourceTree = "<group>"; };
 		0F2B22630DD8463EEBB0C542 /* OllamaEndpoint.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = OllamaEndpoint.swift; sourceTree = "<group>"; };
 		0FA4CB173D103B68BBDBF4AB /* OllamaChatChunkDecoder.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = OllamaChatChunkDecoder.swift; sourceTree = "<group>"; };
 		101F460205BEE586CDAF6B35 /* ServerCredentialStore.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = ServerCredentialStore.swift; sourceTree = "<group>"; };
@@ -86,15 +119,20 @@
 		15AC2D6AB13C3D6170CB79FE /* OllamaServiceContractTests.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = OllamaServiceContractTests.swift; sourceTree = "<group>"; };
 		17E19EDF35365067D5F7E016 /* AppModels.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = AppModels.swift; sourceTree = "<group>"; };
 		1937A37EA3AAEEB4F224CC37 /* CagenticThemeTests.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = CagenticThemeTests.swift; sourceTree = "<group>"; };
+		1A338FE7E85A2B8716E0E5D6 /* PlusJakartaSans-Bold.ttf */ = {isa = PBXFileReference; lastKnownFileType = file; path = "PlusJakartaSans-Bold.ttf"; sourceTree = "<group>"; };
 		1C00CC04491B8AFB9EBDDB85 /* ServerProfileTests.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = ServerProfileTests.swift; sourceTree = "<group>"; };
+		1F63CC4DC43E380F8A86388F /* MarkdownTableRuleTests.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = MarkdownTableRuleTests.swift; sourceTree = "<group>"; };
+		21225D456281EEF8429BAB8A /* GatewayPairingView.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = GatewayPairingView.swift; sourceTree = "<group>"; };
 		21BA7C1D6214CC3805C19896 /* OllamaClientError.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = OllamaClientError.swift; sourceTree = "<group>"; };
+		22502BF4568ACF4AD7CC191F /* JetBrainsMono-Regular.ttf */ = {isa = PBXFileReference; lastKnownFileType = file; path = "JetBrainsMono-Regular.ttf"; sourceTree = "<group>"; };
 		26E261A2F8BFA11DD13E57C8 /* ComposerView.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = ComposerView.swift; sourceTree = "<group>"; };
 		2A11FD0C8F1D53019228C27E /* Assets.xcassets */ = {isa = PBXFileReference; lastKnownFileType = folder.assetcatalog; path = Assets.xcassets; sourceTree = "<group>"; };
+		2BCC8DC1BED138BE34B6D92D /* TailscaleAddressTests.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = TailscaleAddressTests.swift; sourceTree = "<group>"; };
 		2DC603766EF00A9D15F8BC54 /* CagenticApp.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = CagenticApp.swift; sourceTree = "<group>"; };
-		2DF126A02C8B4595BB22622B /* InterVariable-Italic.ttf */ = {isa = PBXFileReference; lastKnownFileType = file; path = "InterVariable-Italic.ttf"; sourceTree = "<group>"; };
 		30FD528765C943E1AAADB345 /* OllamaRequestContextPlanner.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = OllamaRequestContextPlanner.swift; sourceTree = "<group>"; };
 		36B71E1D3BADE8662C8A146A /* GatewayEventDecoder.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = GatewayEventDecoder.swift; sourceTree = "<group>"; };
 		38445A75CCE5A84597448BA8 /* GatewayModels.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = GatewayModels.swift; sourceTree = "<group>"; };
+		3E3956107EF53C52C8760EDC /* SpaceGrotesk-SemiBold.ttf */ = {isa = PBXFileReference; lastKnownFileType = file; path = "SpaceGrotesk-SemiBold.ttf"; sourceTree = "<group>"; };
 		3E7A9F60557178A79582AA73 /* BrandMark.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = BrandMark.swift; sourceTree = "<group>"; };
 		3F5420528E29527D9A870497 /* CagenticTests.xctest */ = {isa = PBXFileReference; includeInIndex = 0; lastKnownFileType = wrapper.cfbundle; path = CagenticTests.xctest; sourceTree = BUILT_PRODUCTS_DIR; };
 		41FBF55BCD20C374E254F60C /* SidebarView.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = SidebarView.swift; sourceTree = "<group>"; };
@@ -102,22 +140,33 @@
 		44400C93EF15E7A64AC7B6F2 /* MarkdownText.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = MarkdownText.swift; sourceTree = "<group>"; };
 		4642C8AADB0F3A349F78EFCC /* MarkdownRendererTests.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = MarkdownRendererTests.swift; sourceTree = "<group>"; };
 		4DC1F5BC1D396D27E46BB68A /* GatewayClient.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = GatewayClient.swift; sourceTree = "<group>"; };
+		50F348DA7536675769B82EF6 /* ChatProfile.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = ChatProfile.swift; sourceTree = "<group>"; };
 		54A7E8EE033C6EE01A045AAF /* ModelPickerView.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = ModelPickerView.swift; sourceTree = "<group>"; };
 		55565EE506A92B03832C77FB /* GatewayTextSanitizer.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = GatewayTextSanitizer.swift; sourceTree = "<group>"; };
 		5D339D385450D8F9E9208C68 /* OllamaEndpointTests.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = OllamaEndpointTests.swift; sourceTree = "<group>"; };
 		5E8F950BCC3416A1F613C74E /* CagenticTheme.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = CagenticTheme.swift; sourceTree = "<group>"; };
 		5FD17B2085CD0B1E965DAA54 /* OllamaModels.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = OllamaModels.swift; sourceTree = "<group>"; };
-		63F36BCC4BB7A02FF31D4E3F /* InterVariable.ttf */ = {isa = PBXFileReference; lastKnownFileType = file; path = InterVariable.ttf; sourceTree = "<group>"; };
-		68924AB478AF7AF78086603B /* Cagentic.app */ = {isa = PBXFileReference; explicitFileType = wrapper.application; includeInIndex = 0; path = Cagentic.app; sourceTree = BUILT_PRODUCTS_DIR; };
+		68924AB478AF7AF78086603B /* Cagentic.app */ = {isa = PBXFileReference; includeInIndex = 0; lastKnownFileType = wrapper.application; path = Cagentic.app; sourceTree = BUILT_PRODUCTS_DIR; };
+		6A0E3D4D2F2BD38C0361092C /* GatewayPairingTests.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = GatewayPairingTests.swift; sourceTree = "<group>"; };
+		6DA5F70597C08ABC0DFA51AE /* PlusJakartaSans-LICENSE.txt */ = {isa = PBXFileReference; lastKnownFileType = text; path = "PlusJakartaSans-LICENSE.txt"; sourceTree = "<group>"; };
+		72CD58B225813F2F63152B6A /* PlusJakartaSans-Regular.ttf */ = {isa = PBXFileReference; lastKnownFileType = file; path = "PlusJakartaSans-Regular.ttf"; sourceTree = "<group>"; };
 		74777658B088FEA5F7AC6E05 /* AttachmentImporter.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = AttachmentImporter.swift; sourceTree = "<group>"; };
 		755EF2B1D3B8486BF2715B4D /* OllamaResponseDecodingTests.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = OllamaResponseDecodingTests.swift; sourceTree = "<group>"; };
+		7587751C2C000F9EC0501D21 /* SpaceGrotesk-Regular.ttf */ = {isa = PBXFileReference; lastKnownFileType = file; path = "SpaceGrotesk-Regular.ttf"; sourceTree = "<group>"; };
 		75BB7679AF10BFACB65594D5 /* AppRepositoryTests.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = AppRepositoryTests.swift; sourceTree = "<group>"; };
+		778258EAAC60B5DFEA4A535C /* TypographyTests.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = TypographyTests.swift; sourceTree = "<group>"; };
+		7884E97E8814FAC925EEB4BB /* JetBrainsMono-LICENSE.txt */ = {isa = PBXFileReference; lastKnownFileType = text; path = "JetBrainsMono-LICENSE.txt"; sourceTree = "<group>"; };
 		7A2006860F74736CA6042D0A /* AppModel.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = AppModel.swift; sourceTree = "<group>"; };
+		7E84EB8D404187B1C661AE84 /* GatewayDiscovery.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = GatewayDiscovery.swift; sourceTree = "<group>"; };
 		7EA0EEDA5B5A00989F4E6A88 /* GatewayTextSanitizerTests.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = GatewayTextSanitizerTests.swift; sourceTree = "<group>"; };
 		829A4CD66A1D8725EC5BCA49 /* MessageRow.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = MessageRow.swift; sourceTree = "<group>"; };
 		848B951ACBDB3DBF696A0394 /* ServerManagerView.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = ServerManagerView.swift; sourceTree = "<group>"; };
+		877855B076434EDBD163B459 /* ChatProfileApplicationTests.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = ChatProfileApplicationTests.swift; sourceTree = "<group>"; };
+		8838219DD0D608D58F26D05D /* BrandMarkTests.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = BrandMarkTests.swift; sourceTree = "<group>"; };
+		8A29FB2B428E9E34137CDBBF /* GatewayQuestionTests.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = GatewayQuestionTests.swift; sourceTree = "<group>"; };
 		8C2DA111F70BEA46894EB760 /* GatewayEventDecoderTests.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = GatewayEventDecoderTests.swift; sourceTree = "<group>"; };
 		8F6468D590DC2C860FDB6358 /* AppModelFeatureTests.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = AppModelFeatureTests.swift; sourceTree = "<group>"; };
+		916451BBF7B0EAFFF21DA46D /* OnboardingSkipTests.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = OnboardingSkipTests.swift; sourceTree = "<group>"; };
 		91FD4177D89D9388200AAE26 /* OllamaRequestContextPlannerTests.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = OllamaRequestContextPlannerTests.swift; sourceTree = "<group>"; };
 		998523A493F0350A575D9854 /* GatewayClientError.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = GatewayClientError.swift; sourceTree = "<group>"; };
 		9EDBBD542B632A473FCC0BFD /* RootView.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = RootView.swift; sourceTree = "<group>"; };
@@ -126,16 +175,27 @@
 		B43F5E0658AA6FD37EDFD4E9 /* ChatView.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = ChatView.swift; sourceTree = "<group>"; };
 		B74B48FA3D4022E2C4DAED98 /* AttachmentModels.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = AttachmentModels.swift; sourceTree = "<group>"; };
 		B8C84B35B17C3C57FDE0CBC8 /* AppModelTests.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = AppModelTests.swift; sourceTree = "<group>"; };
+		B952DFD7A9E36FCD1B48DC0A /* GatewayAttachmentTests.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = GatewayAttachmentTests.swift; sourceTree = "<group>"; };
+		BAFB0DC0145C8ACDC3C8228A /* GatewayEditTests.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = GatewayEditTests.swift; sourceTree = "<group>"; };
+		C557E0AE96C01853A31EB3A1 /* ToolLabelTests.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = ToolLabelTests.swift; sourceTree = "<group>"; };
 		C5A51E53E18949A06ED5DEAD /* OnboardingView.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = OnboardingView.swift; sourceTree = "<group>"; };
 		C80F68B64A50982F89EE114B /* KeychainTokenStore.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = KeychainTokenStore.swift; sourceTree = "<group>"; };
 		C8C39CDBD7EB28BF408AEF9C /* ConnectionSetupView.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = ConnectionSetupView.swift; sourceTree = "<group>"; };
+		CA74B8651585497C2A4DCBDA /* JumpToLatestTests.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = JumpToLatestTests.swift; sourceTree = "<group>"; };
+		CBEF7A55517710AF8FB65A65 /* PlusJakartaSans-Italic.ttf */ = {isa = PBXFileReference; lastKnownFileType = file; path = "PlusJakartaSans-Italic.ttf"; sourceTree = "<group>"; };
+		CE39413746D1417389BA472B /* ChatProfileTests.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = ChatProfileTests.swift; sourceTree = "<group>"; };
 		CF7C77A5AD4672840A8FB66F /* SettingsView.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = SettingsView.swift; sourceTree = "<group>"; };
-		DC8F1A7D07B66C75BE1166DF /* Inter-LICENSE.txt */ = {isa = PBXFileReference; lastKnownFileType = text; path = "Inter-LICENSE.txt"; sourceTree = "<group>"; };
+		D7F4A9C012AE9F78189D3285 /* PlusJakartaSans-Medium.ttf */ = {isa = PBXFileReference; lastKnownFileType = file; path = "PlusJakartaSans-Medium.ttf"; sourceTree = "<group>"; };
+		DB2FEB3CA72D2CD66D519426 /* GenerationOptionsDecodingTests.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = GenerationOptionsDecodingTests.swift; sourceTree = "<group>"; };
 		DDB2E8EB4745CFDDD69E8DB3 /* ConversationManagerView.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = ConversationManagerView.swift; sourceTree = "<group>"; };
+		DF3F2ACAF694FA056D461387 /* PlusJakartaSans-SemiBold.ttf */ = {isa = PBXFileReference; lastKnownFileType = file; path = "PlusJakartaSans-SemiBold.ttf"; sourceTree = "<group>"; };
+		E0F3457FBA8A032FE0BDAAE8 /* SpaceGrotesk-Medium.ttf */ = {isa = PBXFileReference; lastKnownFileType = file; path = "SpaceGrotesk-Medium.ttf"; sourceTree = "<group>"; };
+		E18B08345ADD66B86992DF43 /* SpaceGrotesk-LICENSE.txt */ = {isa = PBXFileReference; lastKnownFileType = text; path = "SpaceGrotesk-LICENSE.txt"; sourceTree = "<group>"; };
 		E73A5E3046ECC2E7B712D34B /* OllamaChatChunkDecoderTests.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = OllamaChatChunkDecoderTests.swift; sourceTree = "<group>"; };
 		E89F1A2A9A50399AC02EA96C /* AppRepository.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = AppRepository.swift; sourceTree = "<group>"; };
 		E91B961D7F0D0AD461B6AEC3 /* ServerProfile.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = ServerProfile.swift; sourceTree = "<group>"; };
 		EF754EADDF0DDBA04224566E /* GatewayEndpoint.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = GatewayEndpoint.swift; sourceTree = "<group>"; };
+		F0AC254F5C2425E21F1865D5 /* SpaceGrotesk-Bold.ttf */ = {isa = PBXFileReference; lastKnownFileType = file; path = "SpaceGrotesk-Bold.ttf"; sourceTree = "<group>"; };
 		F69DC39A0D7BDC962A85577D /* AppModelGatewayTests.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = AppModelGatewayTests.swift; sourceTree = "<group>"; };
 /* End PBXFileReference section */
 
@@ -172,6 +232,7 @@
 			isa = PBXGroup;
 			children = (
 				17E19EDF35365067D5F7E016 /* AppModels.swift */,
+				50F348DA7536675769B82EF6 /* ChatProfile.swift */,
 				E91B961D7F0D0AD461B6AEC3 /* ServerProfile.swift */,
 			);
 			path = Models;
@@ -190,9 +251,19 @@
 		51F69ACB7B46BF9FF291CB4D /* Fonts */ = {
 			isa = PBXGroup;
 			children = (
-				DC8F1A7D07B66C75BE1166DF /* Inter-LICENSE.txt */,
-				2DF126A02C8B4595BB22622B /* InterVariable-Italic.ttf */,
-				63F36BCC4BB7A02FF31D4E3F /* InterVariable.ttf */,
+				7884E97E8814FAC925EEB4BB /* JetBrainsMono-LICENSE.txt */,
+				22502BF4568ACF4AD7CC191F /* JetBrainsMono-Regular.ttf */,
+				1A338FE7E85A2B8716E0E5D6 /* PlusJakartaSans-Bold.ttf */,
+				CBEF7A55517710AF8FB65A65 /* PlusJakartaSans-Italic.ttf */,
+				6DA5F70597C08ABC0DFA51AE /* PlusJakartaSans-LICENSE.txt */,
+				D7F4A9C012AE9F78189D3285 /* PlusJakartaSans-Medium.ttf */,
+				72CD58B225813F2F63152B6A /* PlusJakartaSans-Regular.ttf */,
+				DF3F2ACAF694FA056D461387 /* PlusJakartaSans-SemiBold.ttf */,
+				F0AC254F5C2425E21F1865D5 /* SpaceGrotesk-Bold.ttf */,
+				E18B08345ADD66B86992DF43 /* SpaceGrotesk-LICENSE.txt */,
+				E0F3457FBA8A032FE0BDAAE8 /* SpaceGrotesk-Medium.ttf */,
+				7587751C2C000F9EC0501D21 /* SpaceGrotesk-Regular.ttf */,
+				3E3956107EF53C52C8760EDC /* SpaceGrotesk-SemiBold.ttf */,
 			);
 			path = Fonts;
 			sourceTree = "<group>";
@@ -222,6 +293,8 @@
 			isa = PBXGroup;
 			children = (
 				C8C39CDBD7EB28BF408AEF9C /* ConnectionSetupView.swift */,
+				0208E508FE7CFF1B43B3F363 /* CustomizeView.swift */,
+				21225D456281EEF8429BAB8A /* GatewayPairingView.swift */,
 				54A7E8EE033C6EE01A045AAF /* ModelPickerView.swift */,
 				848B951ACBDB3DBF696A0394 /* ServerManagerView.swift */,
 				CF7C77A5AD4672840A8FB66F /* SettingsView.swift */,
@@ -237,17 +310,32 @@
 				B8C84B35B17C3C57FDE0CBC8 /* AppModelTests.swift */,
 				75BB7679AF10BFACB65594D5 /* AppRepositoryTests.swift */,
 				141C6BBC649DBF7EC44BB37B /* AttachmentStoreTests.swift */,
+				8838219DD0D608D58F26D05D /* BrandMarkTests.swift */,
 				1937A37EA3AAEEB4F224CC37 /* CagenticThemeTests.swift */,
+				877855B076434EDBD163B459 /* ChatProfileApplicationTests.swift */,
+				CE39413746D1417389BA472B /* ChatProfileTests.swift */,
+				B952DFD7A9E36FCD1B48DC0A /* GatewayAttachmentTests.swift */,
+				BAFB0DC0145C8ACDC3C8228A /* GatewayEditTests.swift */,
 				032EF1848784E683BD74E9BF /* GatewayEndpointTests.swift */,
 				8C2DA111F70BEA46894EB760 /* GatewayEventDecoderTests.swift */,
+				6A0E3D4D2F2BD38C0361092C /* GatewayPairingTests.swift */,
+				8A29FB2B428E9E34137CDBBF /* GatewayQuestionTests.swift */,
 				7EA0EEDA5B5A00989F4E6A88 /* GatewayTextSanitizerTests.swift */,
+				DB2FEB3CA72D2CD66D519426 /* GenerationOptionsDecodingTests.swift */,
+				CA74B8651585497C2A4DCBDA /* JumpToLatestTests.swift */,
 				4642C8AADB0F3A349F78EFCC /* MarkdownRendererTests.swift */,
+				1F63CC4DC43E380F8A86388F /* MarkdownTableRuleTests.swift */,
 				E73A5E3046ECC2E7B712D34B /* OllamaChatChunkDecoderTests.swift */,
 				5D339D385450D8F9E9208C68 /* OllamaEndpointTests.swift */,
 				91FD4177D89D9388200AAE26 /* OllamaRequestContextPlannerTests.swift */,
 				755EF2B1D3B8486BF2715B4D /* OllamaResponseDecodingTests.swift */,
 				15AC2D6AB13C3D6170CB79FE /* OllamaServiceContractTests.swift */,
+				916451BBF7B0EAFFF21DA46D /* OnboardingSkipTests.swift */,
 				1C00CC04491B8AFB9EBDDB85 /* ServerProfileTests.swift */,
+				0C7C85F8B89C5F1837BE22B9 /* StreamingLayoutTests.swift */,
+				2BCC8DC1BED138BE34B6D92D /* TailscaleAddressTests.swift */,
+				C557E0AE96C01853A31EB3A1 /* ToolLabelTests.swift */,
+				778258EAAC60B5DFEA4A535C /* TypographyTests.swift */,
 			);
 			path = CagenticTests;
 			sourceTree = "<group>";
@@ -273,6 +361,7 @@
 			children = (
 				4DC1F5BC1D396D27E46BB68A /* GatewayClient.swift */,
 				998523A493F0350A575D9854 /* GatewayClientError.swift */,
+				7E84EB8D404187B1C661AE84 /* GatewayDiscovery.swift */,
 				EF754EADDF0DDBA04224566E /* GatewayEndpoint.swift */,
 				36B71E1D3BADE8662C8A146A /* GatewayEventDecoder.swift */,
 				38445A75CCE5A84597448BA8 /* GatewayModels.swift */,
@@ -292,6 +381,7 @@
 			isa = PBXGroup;
 			children = (
 				3E7A9F60557178A79582AA73 /* BrandMark.swift */,
+				03366ABE6168B471EEFC6DDD /* CagenticIcons.swift */,
 				5E8F950BCC3416A1F613C74E /* CagenticTheme.swift */,
 			);
 			path = DesignSystem;
@@ -381,6 +471,8 @@
 			attributes = {
 				BuildIndependentTargetsInParallel = YES;
 				LastUpgradeCheck = 2600;
+				TargetAttributes = {
+				};
 			};
 			buildConfigurationList = 19AE5A63D6AE7BFAC5FF421F /* Build configuration list for PBXProject "Cagentic" */;
 			developmentRegion = en;
@@ -408,9 +500,19 @@
 			buildActionMask = 2147483647;
 			files = (
 				4C78DB45BCC0CFF482542A4F /* Assets.xcassets in Resources */,
-				C96ADAEFCEFA24AF00FF76D3 /* Inter-LICENSE.txt in Resources */,
-				0D45393681689C0466479825 /* InterVariable-Italic.ttf in Resources */,
-				E676FF6D27ABA33D65A1655F /* InterVariable.ttf in Resources */,
+				E5329AA85B60D07420005D74 /* JetBrainsMono-LICENSE.txt in Resources */,
+				DE30B7EFD98DF1915A094B62 /* JetBrainsMono-Regular.ttf in Resources */,
+				754BD329C4940363CDD05CC4 /* PlusJakartaSans-Bold.ttf in Resources */,
+				AEF6A9EFFF09E00822DE78C4 /* PlusJakartaSans-Italic.ttf in Resources */,
+				6EE0925762AD4BC84163902F /* PlusJakartaSans-LICENSE.txt in Resources */,
+				366AD975AF8DE459DBBB84A1 /* PlusJakartaSans-Medium.ttf in Resources */,
+				5FE55F4E48E6431A42C46AD1 /* PlusJakartaSans-Regular.ttf in Resources */,
+				C44E04B4642BA4C5C7CF06E6 /* PlusJakartaSans-SemiBold.ttf in Resources */,
+				BDDD17F3B85ED840CDCCA5A0 /* SpaceGrotesk-Bold.ttf in Resources */,
+				F87D9A7DBC5FAD3A6C2901F7 /* SpaceGrotesk-LICENSE.txt in Resources */,
+				55416B74B6D8D18FE023CAD0 /* SpaceGrotesk-Medium.ttf in Resources */,
+				325772D50E1A3EF0D81CA7E9 /* SpaceGrotesk-Regular.ttf in Resources */,
+				EBA8B9B0BFDED1679BF34ED4 /* SpaceGrotesk-SemiBold.ttf in Resources */,
 			);
 			runOnlyForDeploymentPostprocessing = 0;
 		};
@@ -426,17 +528,32 @@
 				3143417927B565D6C25A2B41 /* AppModelTests.swift in Sources */,
 				40D3FBC58A1AD412087DA95C /* AppRepositoryTests.swift in Sources */,
 				011D6C7DD42026FD95142099 /* AttachmentStoreTests.swift in Sources */,
+				0D003B021D3E1FBB8D68D191 /* BrandMarkTests.swift in Sources */,
 				468CC0328A89169B3995B95F /* CagenticThemeTests.swift in Sources */,
+				F717F75E93197F6927A8976E /* ChatProfileApplicationTests.swift in Sources */,
+				BF9E691216C92FC39968209B /* ChatProfileTests.swift in Sources */,
+				B9368C301014A489A244D07E /* GatewayAttachmentTests.swift in Sources */,
+				A0DE08FCCAFC1F5D1068B5BD /* GatewayEditTests.swift in Sources */,
 				95DBD2CF0175DD0405150EEE /* GatewayEndpointTests.swift in Sources */,
 				EFD5989C8D445F0DFE0F7C50 /* GatewayEventDecoderTests.swift in Sources */,
+				9B5364C0CCA300F332E98DFF /* GatewayPairingTests.swift in Sources */,
+				B2338F0969B147D7DC7061CE /* GatewayQuestionTests.swift in Sources */,
 				4D66A47A46AA91837FFA4038 /* GatewayTextSanitizerTests.swift in Sources */,
+				9E80FAB6ED5E010993789775 /* GenerationOptionsDecodingTests.swift in Sources */,
+				BAC093042A5A35513522B76F /* JumpToLatestTests.swift in Sources */,
 				6091F2A3C33EFCCC3A9B4BBC /* MarkdownRendererTests.swift in Sources */,
+				B1B6C87F7F1C58CA234E6111 /* MarkdownTableRuleTests.swift in Sources */,
 				AE74B42E4992F00C7EFBB888 /* OllamaChatChunkDecoderTests.swift in Sources */,
 				2CE6D18E7574A28A437BB33D /* OllamaEndpointTests.swift in Sources */,
 				973248AB5E7856EB952B7053 /* OllamaRequestContextPlannerTests.swift in Sources */,
 				1EF99EBC2D2FAD74DB532722 /* OllamaResponseDecodingTests.swift in Sources */,
 				F81AA8F4A15F5672E0754846 /* OllamaServiceContractTests.swift in Sources */,
+				4E09E5C4373B45F8932563FE /* OnboardingSkipTests.swift in Sources */,
 				4CFF86292E9CDC6A55560906 /* ServerProfileTests.swift in Sources */,
+				AB171D575589CBAC5FD32594 /* StreamingLayoutTests.swift in Sources */,
+				B8E26C18ABDDDE8921A82B85 /* TailscaleAddressTests.swift in Sources */,
+				B283F7FBDE16770DA38C167B /* ToolLabelTests.swift in Sources */,
+				54920335D8DBDE1CD8242771 /* TypographyTests.swift in Sources */,
 			);
 			runOnlyForDeploymentPostprocessing = 0;
 		};
@@ -452,16 +569,21 @@
 				4B94A266723C6A7B502E30A9 /* AttachmentStore.swift in Sources */,
 				73B44758BDD93731D8DFA961 /* BrandMark.swift in Sources */,
 				E7B83ABBC40CC4404E5EEC87 /* CagenticApp.swift in Sources */,
+				73B7BC1469F81976D8261C94 /* CagenticIcons.swift in Sources */,
 				07B8B9175F4C8EE16BC89393 /* CagenticTheme.swift in Sources */,
+				095C8956692F21CD6B868279 /* ChatProfile.swift in Sources */,
 				5E6F5B7E43EAABEC237B9C81 /* ChatView.swift in Sources */,
 				37032C779F73A46FCDC2DFEA /* ComposerView.swift in Sources */,
 				6EC8E070FA94054E7F515F17 /* ConnectionSetupView.swift in Sources */,
 				EEC71ACC4D6536DB86D5FE97 /* ConversationManagerView.swift in Sources */,
+				139C84CC2FF76F9754DA3791 /* CustomizeView.swift in Sources */,
 				C38BB4BB82CAECFE377136F7 /* GatewayClient.swift in Sources */,
 				347466944E14F73D8AE5EB10 /* GatewayClientError.swift in Sources */,
+				7497E68F096C91F6FD411F73 /* GatewayDiscovery.swift in Sources */,
 				6A93BBBBC7DC5C34C8B7B9E2 /* GatewayEndpoint.swift in Sources */,
 				CD3D5556FBA9FA21EC6C656C /* GatewayEventDecoder.swift in Sources */,
 				6DA5B7B9576D56E1C57F99E1 /* GatewayModels.swift in Sources */,
+				4FC47A9CA4B73B22DA76D812 /* GatewayPairingView.swift in Sources */,
 				F4ACE2C09C74A30A38A491C0 /* GatewayTextSanitizer.swift in Sources */,
 				FA03394B451060BDD9715074 /* KeychainTokenStore.swift in Sources */,
 				6A69D22335D900F3B6182220 /* MarkdownText.swift in Sources */,
@@ -501,7 +623,6 @@
 				ASSETCATALOG_COMPILER_APPICON_NAME = AppIcon;
 				ASSETCATALOG_COMPILER_GLOBAL_ACCENT_COLOR_NAME = AccentColor;
 				CODE_SIGN_IDENTITY = "iPhone Developer";
-				DEVELOPMENT_TEAM = W237K258TR;
 				GENERATE_INFOPLIST_FILE = NO;
 				INFOPLIST_FILE = Cagentic/Resources/Info.plist;
 				LD_RUNPATH_SEARCH_PATHS = (
@@ -687,7 +808,6 @@
 				ASSETCATALOG_COMPILER_APPICON_NAME = AppIcon;
 				ASSETCATALOG_COMPILER_GLOBAL_ACCENT_COLOR_NAME = AccentColor;
 				CODE_SIGN_IDENTITY = "iPhone Developer";
-				DEVELOPMENT_TEAM = W237K258TR;
 				GENERATE_INFOPLIST_FILE = NO;
 				INFOPLIST_FILE = Cagentic/Resources/Info.plist;
 				LD_RUNPATH_SEARCH_PATHS = (

@@ -13,6 +13,8 @@ struct OnboardingView: View {
     @State private var kind = ServerKind.ollama
     @State private var bearerToken: String
     @State private var isConnecting = false
+    @State private var isSetupHelpExpanded = false
+    @State private var isManualEntryExpanded = false
     @State private var inlineError: String?
     @State private var connectionTask: Task<Void, Never>?
     @State private var ownsConnectionAttempt = false
@@ -109,10 +111,17 @@ struct OnboardingView: View {
             HStack {
                 BrandLockup(compact: true)
                 Spacer(minLength: CagenticTheme.Spacing.md)
-                Text("Step \(step.position) of \(OnboardingStep.allCases.count)")
-                    .font(CagenticTheme.FontStyle.subheadlineMedium)
-                    .foregroundStyle(CagenticTheme.textSecondary)
-                    .accessibilityHidden(true)
+                // The progress bars below already say where you are, so this slot is worth more
+                // as a way out: somebody who opened the app before setting up their computer
+                // should not be trapped in a form they cannot complete.
+                Button("Set up later") {
+                    model.skipOnboarding()
+                }
+                .font(CagenticTheme.FontStyle.subheadlineMedium)
+                .foregroundStyle(CagenticTheme.textSecondary)
+                .frame(minHeight: 44)
+                .disabled(isConnectionInProgress)
+                .accessibilityHint("Finishes setup without connecting. You can add a computer any time.")
             }
 
             HStack(spacing: CagenticTheme.Spacing.xs) {
@@ -135,8 +144,6 @@ struct OnboardingView: View {
         switch step {
         case .welcome:
             welcomeStep
-        case .computerSetup:
-            computerSetupStep
         case .connection:
             connectionStep
         }
@@ -153,10 +160,10 @@ struct OnboardingView: View {
                     .accessibilityAddTraits(.isHeader)
                     .accessibilityFocused($focusedStep, equals: .welcome)
 
-                Text(
-                    "Cagentic connects directly to Ollama running on a computer you control. "
-                        + "There is no Cagentic account or cloud relay between this device and your server."
-                )
+                // One sentence. The backend choice moved to the screen where it is acted on, so
+                // this page has nothing to decide and nothing to configure — it says what the app
+                // is and gets out of the way.
+                Text("Cagentic talks to a computer you control. No account, no cloud in between.")
                     .font(CagenticTheme.FontStyle.title3)
                     .foregroundStyle(CagenticTheme.textSecondary)
                     .fixedSize(horizontal: false, vertical: true)
@@ -166,75 +173,50 @@ struct OnboardingView: View {
                 OnboardingValue(
                     systemImage: "lock.shield",
                     title: "Private by default",
-                    detail: "Nothing leaves the network you control, and there is no account to create."
+                    detail: "Your chats stay between this device and your computer."
                 )
                 OnboardingValue(
                     systemImage: "bolt.horizontal.circle",
-                    title: "Direct and responsive",
-                    detail: "Responses stream over your local network without a hosted middle layer."
+                    title: "Answers as they are written",
+                    detail: "Replies stream over your own network."
                 )
-                OnboardingValue(
-                    systemImage: "server.rack",
-                    title: "Built for your setup",
-                    detail: "Connect a desktop, home server, or an authenticated private proxy."
-                )
-            }
-
-            VStack(alignment: .leading, spacing: CagenticTheme.Spacing.sm) {
-                Text("What are you connecting to?")
-                    .font(CagenticTheme.FontStyle.headline)
-                    .foregroundStyle(CagenticTheme.textPrimary)
-
-                Picker("What are you connecting to?", selection: $kind) {
-                    ForEach(ServerKind.allCases) { option in
-                        Text(option.displayName).tag(option)
-                    }
-                }
-                .pickerStyle(.segmented)
-                .accessibilityLabel("What are you connecting to?")
-
-                Text(kindDetail)
-                    .font(CagenticTheme.FontStyle.callout)
-                    .foregroundStyle(CagenticTheme.textSecondary)
-                    .fixedSize(horizontal: false, vertical: true)
-            }
-            .onChange(of: kind) { _, newKind in
-                // Only replace a name the user has not personalised.
-                let currentDefault = newKind == .gateway
-                    ? ServerKind.ollama.defaultServerName
-                    : ServerKind.gateway.defaultServerName
-                if serverName.trimmingCharacters(in: .whitespacesAndNewlines) == currentDefault {
-                    serverName = newKind.defaultServerName
-                }
             }
         }
     }
 
-    @ViewBuilder
-    private var computerSetupStep: some View {
-        switch kind {
-        case .ollama: ollamaSetupStep
-        case .gateway: gatewaySetupStep
+    /// The computer-side setup, available on demand rather than as a step everybody must read.
+    ///
+    /// It used to be the middle of three screens: a wall of environment variables and config keys
+    /// standing between a new person and the one thing they came to do. Most people never need it —
+    /// `/token` does the work now — so it waits behind a disclosure for the ones who do.
+    private var setupHelp: some View {
+        DisclosureGroup(isExpanded: $isSetupHelpExpanded) {
+            switch kind {
+            case .ollama: ollamaSetupInstructions
+            case .gateway: gatewaySetupInstructions
+            }
+        } label: {
+            Text(kind == .gateway
+                ? "How do I set this up on the computer?"
+                : "How do I make Ollama reachable?")
+                .font(CagenticTheme.FontStyle.calloutMedium)
+                .foregroundStyle(CagenticTheme.accent)
+                .frame(minHeight: 44)
         }
+        .tint(CagenticTheme.accent)
     }
 
-    private var gatewaySetupStep: some View {
-        VStack(alignment: .leading, spacing: CagenticTheme.Spacing.xl) {
-            stepHeading(
-                step: .computerSetup,
-                eyebrow: "On your computer",
-                title: "Open the gateway to this device",
-                detail: "Cagentic's gateway listens only on the computer itself until you let it "
-                    + "onto your network, and it requires a token that you set."
-            )
-
+    private var gatewaySetupInstructions: some View {
+        VStack(alignment: .leading, spacing: CagenticTheme.Spacing.lg) {
             VStack(alignment: .leading, spacing: CagenticTheme.Spacing.lg) {
-                OnboardingInstruction(number: 1, title: "Allow network access") {
+                OnboardingInstruction(number: 1, title: "Ask Cagentic for a code") {
                     VStack(alignment: .leading, spacing: CagenticTheme.Spacing.sm) {
-                        Text("In ~/.config/cagentic/config.json, inside the gateway section:")
+                        Text(
+                            "In Cagentic on the computer — the terminal or the web page — type:"
+                        )
                             .foregroundStyle(CagenticTheme.textSecondary)
 
-                        Text("\"lan\": true")
+                        Text("/token")
                             .font(.body.monospaced())
                             .foregroundStyle(CagenticTheme.textPrimary)
                             .textSelection(.enabled)
@@ -249,42 +231,22 @@ struct OnboardingView: View {
 
                 Divider()
 
-                OnboardingInstruction(number: 2, title: "Set a permanent token") {
-                    VStack(alignment: .leading, spacing: CagenticTheme.Spacing.sm) {
-                        Text(
-                            "In the same section, set a long random token. Without one the gateway "
-                                + "invents a new token every time it restarts, and this device would "
-                                + "stop working each time."
-                        )
-                            .foregroundStyle(CagenticTheme.textSecondary)
-
-                        Text("\"token\": \"a-long-random-string\"")
-                            .font(.body.monospaced())
-                            .foregroundStyle(CagenticTheme.textPrimary)
-                            .textSelection(.enabled)
-                            .padding(CagenticTheme.Spacing.sm)
-                            .frame(maxWidth: .infinity, alignment: .leading)
-                            .background(
-                                CagenticTheme.surfaceRaised,
-                                in: .rect(cornerRadius: CagenticTheme.Radius.control)
-                            )
-                    }
+                OnboardingInstruction(number: 2, title: "Let it open the door") {
+                    Text(
+                        "It asks once whether devices on your Wi-Fi may connect, sets everything "
+                            + "up for you, and shows a six-digit code."
+                    )
+                        .foregroundStyle(CagenticTheme.textSecondary)
                 }
 
                 Divider()
 
-                OnboardingInstruction(number: 3, title: "Restart it and note the address") {
-                    VStack(alignment: .leading, spacing: CagenticTheme.Spacing.xs) {
-                        Text(
-                            "Restart the gateway, then allow its port through the computer's "
-                                + "private-network firewall. The default port is 8700."
-                        )
-                            .foregroundStyle(CagenticTheme.textSecondary)
-                        Text("http://192.168.1.42:8700")
-                            .font(.body.monospaced())
-                            .foregroundStyle(CagenticTheme.accent)
-                            .textSelection(.enabled)
-                    }
+                OnboardingInstruction(number: 3, title: "Pick the computer on the next step") {
+                    Text(
+                        "It appears by name once it is running — no address to find, and nothing "
+                            + "to copy across but the six digits."
+                    )
+                        .foregroundStyle(CagenticTheme.textSecondary)
                 }
             }
 
@@ -305,16 +267,8 @@ struct OnboardingView: View {
         }
     }
 
-    private var ollamaSetupStep: some View {
-        VStack(alignment: .leading, spacing: CagenticTheme.Spacing.xl) {
-            stepHeading(
-                step: .computerSetup,
-                eyebrow: "On your computer",
-                title: "Make Ollama reachable",
-                detail: "Ollama normally accepts connections only from the computer it runs on. "
-                    + "Allow it to listen on your trusted local network before connecting this device."
-            )
-
+    private var ollamaSetupInstructions: some View {
+        VStack(alignment: .leading, spacing: CagenticTheme.Spacing.lg) {
             VStack(alignment: .leading, spacing: CagenticTheme.Spacing.lg) {
                 OnboardingInstruction(number: 1, title: "Set the Ollama host") {
                     VStack(alignment: .leading, spacing: CagenticTheme.Spacing.sm) {
@@ -387,12 +341,76 @@ struct OnboardingView: View {
             stepHeading(
                 step: .connection,
                 eyebrow: "On this device",
-                title: kind == .gateway ? "Connect to Cagentic" : "Connect to Ollama",
-                detail: kind == .gateway
-                    ? "Cagentic will verify the address and token, then load the chats already on that computer."
-                    : "Cagentic will verify the address and load the models available on your server."
+                title: "Connect a computer",
+                detail: "Cagentic checks it before saving anything."
             )
 
+            // The one decision worth making, asked where it is acted on rather than a screen
+            // earlier, so the answer and its consequences are visible together.
+            VStack(alignment: .leading, spacing: CagenticTheme.Spacing.xs) {
+                Picker("What are you connecting to?", selection: $kind) {
+                    ForEach(ServerKind.allCases) { option in
+                        Text(option.displayName).tag(option)
+                    }
+                }
+                .pickerStyle(.segmented)
+                .accessibilityLabel("What are you connecting to?")
+
+                Text(kindDetail)
+                    .font(CagenticTheme.FontStyle.callout)
+                    .foregroundStyle(CagenticTheme.textSecondary)
+                    .fixedSize(horizontal: false, vertical: true)
+            }
+            .onChange(of: kind) { _, newKind in
+                let currentDefault = newKind == .gateway
+                    ? ServerKind.ollama.defaultServerName
+                    : ServerKind.gateway.defaultServerName
+                if serverName.trimmingCharacters(in: .whitespacesAndNewlines) == currentDefault {
+                    serverName = newKind.defaultServerName
+                }
+            }
+
+            if kind == .gateway {
+                Label {
+                    Text("Type /token on the computer. It shows six digits — that is all you need.")
+                        .fixedSize(horizontal: false, vertical: true)
+                } icon: {
+                    Image(systemName: "wifi")
+                        .foregroundStyle(CagenticTheme.accent)
+                }
+                .font(CagenticTheme.FontStyle.callout)
+                .foregroundStyle(CagenticTheme.textSecondary)
+                .accessibilityElement(children: .combine)
+            }
+
+            setupHelp
+
+            manualFields
+        }
+    }
+
+    /// Typing an address by hand: the only route for Ollama, and the fallback for a gateway on a
+    /// network where discovery is blocked.
+    @ViewBuilder
+    private var manualFields: some View {
+        if kind == .gateway {
+            DisclosureGroup(isExpanded: $isManualEntryExpanded) {
+                connectionFields
+                    .padding(.top, CagenticTheme.Spacing.sm)
+            } label: {
+                Text("Enter an address instead")
+                    .font(CagenticTheme.FontStyle.calloutMedium)
+                    .foregroundStyle(CagenticTheme.accent)
+                    .frame(minHeight: 44)
+            }
+            .tint(CagenticTheme.accent)
+        } else {
+            connectionFields
+        }
+    }
+
+    private var connectionFields: some View {
+        VStack(alignment: .leading, spacing: CagenticTheme.Spacing.xl) {
             VStack(alignment: .leading, spacing: CagenticTheme.Spacing.lg) {
                 OnboardingTextFieldLabel(
                     title: "Connection name",
@@ -409,8 +427,8 @@ struct OnboardingView: View {
                 OnboardingTextFieldLabel(
                     title: "Server address",
                     detail: kind == .gateway
-                        ? "The computer’s LAN IP or .local hostname, plus the gateway port"
-                        : "The computer’s LAN IP or .local hostname"
+                        ? "LAN IP, .local hostname, or Tailscale name — plain, without https://"
+                        : "The computer’s LAN IP, .local hostname, or Tailscale name"
                 ) {
                     TextField(
                         kind == .gateway
@@ -430,11 +448,11 @@ struct OnboardingView: View {
                 OnboardingTextFieldLabel(
                     title: kind == .gateway ? "Access token" : "Bearer token",
                     detail: kind == .gateway
-                        ? "Required; the gateway.token value from the computer"
+                        ? "Required; the six digits from /token, or a gateway.token value"
                         : "Optional; only for an authenticated reverse proxy"
                 ) {
                     SecureField(
-                        kind == .gateway ? "gateway.token value" : "Optional token",
+                        kind == .gateway ? "Six digits, or a token" : "Optional token",
                         text: $bearerToken
                     )
                         .textContentType(.password)
@@ -525,7 +543,6 @@ struct OnboardingView: View {
                         backButton
                         Spacer(minLength: CagenticTheme.Spacing.md)
                         primaryButton
-                            .frame(maxWidth: 280)
                     }
                 }
             }
@@ -545,7 +562,6 @@ struct OnboardingView: View {
             }
             .buttonStyle(.bordered)
             .controlSize(.large)
-            .frame(minHeight: 50)
             .accessibilityHint("Cancels this connection attempt and keeps the form open.")
         } else if step != .welcome {
             Button("Back", systemImage: "chevron.left") {
@@ -553,7 +569,6 @@ struct OnboardingView: View {
             }
             .buttonStyle(.bordered)
             .controlSize(.large)
-            .frame(minHeight: 50)
         }
     }
 
@@ -573,30 +588,38 @@ struct OnboardingView: View {
                         .accessibilityHidden(true)
                 }
             }
-            .frame(maxWidth: .infinity, minHeight: 50)
+            .padding(.horizontal, CagenticTheme.Spacing.xs)
         }
         .buttonStyle(.borderedProminent)
         .tint(CagenticTheme.accent)
         .controlSize(.large)
-        .disabled(step == .connection && !canConnect)
+        .disabled(step == .connection && !gatewayUsesDiscovery && !canConnect)
         .accessibilityHint(primaryButtonHint)
+    }
+
+    /// True when the gateway path is still offering discovery rather than a typed address.
+    private var gatewayUsesDiscovery: Bool {
+        step == .connection && kind == .gateway && !isManualEntryExpanded
     }
 
     private var primaryButtonTitle: String {
         if isConnectionInProgress {
             return "Connecting…"
         }
-        return step == .connection ? "Connect" : "Continue"
+        if step == .welcome {
+            return "Continue"
+        }
+        return gatewayUsesDiscovery ? "Find on Wi-Fi" : "Connect"
     }
 
     private var primaryButtonHint: String {
         switch step {
         case .welcome:
-            "Shows Ollama local-network setup instructions."
-        case .computerSetup:
-            "Shows the Ollama server connection form."
+            "Shows the connection screen."
         case .connection:
-            "Verifies the server and loads its available models."
+            gatewayUsesDiscovery
+                ? "Looks for computers running Cagentic on your Wi-Fi."
+                : "Verifies the computer and loads what it offers."
         }
     }
 
@@ -660,10 +683,14 @@ struct OnboardingView: View {
     private func primaryAction() {
         focusedField = nil
         switch step {
-        case .welcome, .computerSetup:
+        case .welcome:
             moveForward()
         case .connection:
-            connect()
+            if gatewayUsesDiscovery {
+                model.presentedSheet = .pairGateway
+            } else {
+                connect()
+            }
         }
     }
 
@@ -747,7 +774,6 @@ struct OnboardingView: View {
 
 private enum OnboardingStep: Int, CaseIterable, Hashable, Identifiable {
     case welcome
-    case computerSetup
     case connection
 
     var id: Self { self }
@@ -756,8 +782,7 @@ private enum OnboardingStep: Int, CaseIterable, Hashable, Identifiable {
     var accessibilityTitle: String {
         switch self {
         case .welcome: "Welcome"
-        case .computerSetup: "Computer setup"
-        case .connection: "Server connection"
+        case .connection: "Connect a computer"
         }
     }
 }

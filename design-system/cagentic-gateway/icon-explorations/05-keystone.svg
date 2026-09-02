@@ -1,0 +1,5 @@
+<!-- Exploration only — not connected to a shipped surface. -->
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 24 24" fill="none">
+  <path d="m12 3.75 7.15 4.13v8.24L12 20.25l-7.15-4.13V7.88L12 3.75Z" stroke="currentColor" stroke-width="1.65" stroke-linejoin="round"/>
+  <path d="m12 8.45 3.55 3.55L12 15.55 8.45 12 12 8.45Z" fill="currentColor"/>
+</svg>

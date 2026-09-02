@@ -12,6 +12,7 @@ page. Bound to localhost only.
 
 from __future__ import annotations
 
+import contextlib
 import errno
 import json
 import logging
@@ -28,6 +29,7 @@ from urllib.parse import parse_qs, urlparse
 from . import (
     command_utils,
     inbox,
+    permissions,
     personal_os,
     proactive,
     projects,
@@ -54,6 +56,7 @@ from .token_count import count_messages
 from .workspaces import WorkspaceError, WorkspacePolicy
 
 if TYPE_CHECKING:
+    from .discovery import ServiceAdvertiser
     from .engine import QueryEngine
 
 _log = logging.getLogger(__name__)
@@ -81,6 +84,7 @@ GATEWAY_COMMANDS: tuple[tuple[str, str, str], ...] = (
     ("mcp", "[server]", "list MCP servers or one server's tools"),
     ("name", "[name]", "show or set your name"),
     ("host", "[url]", "show or change the Ollama host"),
+    ("token", "[off]", "pair a phone with this computer"),
     ("config", "", "show redacted configuration"),
     ("set", "<key> <value>", "set a validated config value"),
     ("diag", "", "show runtime diagnostics"),
@@ -225,6 +229,7 @@ def _tool_details(tool_calls: list[dict], messages: list[dict], start: int) -> l
     result was found (e.g. the turn was aborted mid-call).
     """
     from .engine import _summarize_args
+    from .tool_labels import label_pair
 
     results: list[tuple[str, str]] = []  # (tool name, result text)
     for m in messages[start : start + len(tool_calls) * 2]:
@@ -261,6 +266,8 @@ def _tool_details(tool_calls: list[dict], messages: list[dict], start: int) -> l
         details.append(
             {
                 "name": name,
+                "label": label_pair(name)[0],
+                "label_plural": label_pair(name)[1],
                 "summary": _summarize_args(name, args),
                 "ok": ok,
                 "first_line": first_line,
@@ -350,6 +357,16 @@ class Gateway:
         pinned = raw_token.strip() if isinstance(raw_token, str) else ""
         self.token = pinned or secrets.token_urlsafe(32)
 
+        # A pairing window is opened deliberately (/token) and closes on the
+        # first success, after five wrong codes, or on expiry — whichever comes
+        # first. The code is only ever a bearer of the real token, never a
+        # credential in its own right.
+        self._pair_lock = threading.Lock()
+        self._pair_code: str | None = None
+        self._pair_expires_at = 0.0
+        self._pair_attempts = 0
+        self.advertiser: ServiceAdvertiser | None = None
+
         # Opt-in LAN exposure (config gateway.lan=true): binds all interfaces
         # so other machines on the network can connect. Every /api/* request
         # still requires the secret token — set gateway.token and enter it on
@@ -388,6 +405,12 @@ class Gateway:
         # prompt_id -> the rule strings that prompt offered, so an answer
         # can only install a rule the user was actually shown.
         self._perm_rules: dict[str, tuple[str, ...]] = {}
+        # `ask_user_question` needs an answer from whoever is watching. Kept apart from the
+        # permission prompts above: a question is not an approval, it can be outstanding at the
+        # same time as one, and answering the wrong kind must not satisfy the other.
+        self._ask_cv = threading.Condition()
+        self._ask_pending: set[str] = set()
+        self._ask_answers: dict[str, str] = {}
 
         # Page context queued by the extension side panel, folded into the
         # next message the user sends.
@@ -474,10 +497,43 @@ class Gateway:
         self._thread = threading.Thread(target=server.serve_forever, daemon=True)
         self._thread.start()
         self.proactive_monitor.start()
+        self._start_advertising()
         return True
+
+    def _start_advertising(self) -> None:
+        """Announce this gateway on the LAN so devices can find it by name.
+
+        Only in LAN mode: a loopback-only gateway is unreachable from anywhere
+        else, and advertising it would put an entry in every browser's list that
+        can never be connected to.
+        """
+        if not self.lan:
+            return
+        try:
+            from .discovery import ServiceAdvertiser
+
+            advertiser = ServiceAdvertiser(
+                port=self.port,
+                txt={
+                    "v": str(__import__("cagentic").__version__),
+                    "path": "/api",
+                    "auth": "token",
+                },
+            )
+            if advertiser.start():
+                self.advertiser = advertiser
+        except Exception:
+            # Discovery is a convenience; the gateway still works without it.
+            _log.warning("could not advertise the gateway over mDNS", exc_info=True)
 
     def stop(self) -> None:
         self.proactive_monitor.stop()
+        if self.advertiser is not None:
+            try:
+                self.advertiser.stop()
+            except Exception:
+                _log.debug("error stopping mDNS advertiser", exc_info=True)
+            self.advertiser = None
         if self._server is not None:
             try:
                 self._server.shutdown()
@@ -568,6 +624,53 @@ class Gateway:
                 self._perm_pending.discard(prompt_id)
                 self._perm_rules.pop(prompt_id, None)
 
+    def ask_user(self, question: str, options: list[str] | None = None) -> str:
+        """Put a question to whoever is watching this turn and block until they answer.
+
+        The same shape as `_resolve`: emit, park the turn thread on a condition variable, and let
+        an HTTP handler wake it. `ask_user_question` used to be terminal-only — it reads stdin,
+        which belongs to the REPL, so on the gateway it returned an error telling the model to ask
+        in its reply instead. That works, but it turns a question with defined options into free
+        text somebody has to parse back out of a sentence.
+        """
+        emit = getattr(self._thread_context, "emit", None) or self._active_emit
+        if emit is None:
+            return "ERROR: nobody is watching this turn to answer."
+        import uuid
+
+        choices = [str(o) for o in (options or []) if str(o).strip()]
+        prompt_id = str(uuid.uuid4())
+        with self._ask_cv:
+            self._ask_answers.pop(prompt_id, None)
+            self._ask_pending.add(prompt_id)
+        emit("question", {"id": prompt_id, "question": question, "options": choices})
+        try:
+            with self._ask_cv:
+                # The same five minutes a permission prompt gets. Past that the turn has to be
+                # able to continue rather than hold the lock forever.
+                deadline = time.monotonic() + 300
+                while prompt_id not in self._ask_answers:
+                    remaining = deadline - time.monotonic()
+                    if remaining <= 0:
+                        return "ERROR: no answer — the question timed out."
+                    self._ask_cv.wait(remaining)
+                return self._ask_answers.pop(prompt_id)
+        finally:
+            with self._ask_cv:
+                self._ask_pending.discard(prompt_id)
+
+    def deliver_answer(self, answer: str, prompt_id: str | None = None) -> None:
+        """Record an answer for a pending question and wake the turn waiting on it."""
+        with self._ask_cv:
+            if prompt_id is None:
+                prompt_id = next(iter(self._ask_pending), None)
+            # A stale id is ignored rather than applied to whatever is pending now: answering a
+            # question that has already timed out must not silently answer the next one.
+            if prompt_id is None or prompt_id not in self._ask_pending:
+                return
+            self._ask_answers[prompt_id] = str(answer)
+            self._ask_cv.notify_all()
+
     def deliver_permission(
         self, answer: str, prompt_id: str | None = None, rule: str | None = None
     ) -> None:
@@ -606,19 +709,141 @@ class Gateway:
             self._perm_answers[target] = answer
             self._perm_cv.notify_all()
 
-    def _composed_suffix(self) -> str:
-        """Build the live gateway prompt without a per-turn device tail."""
+    @property
+    def panels_enabled(self) -> bool:
+        """Whether the model is invited to draw charts and tables in the page.
+
+        Off means the instructions never reach the prompt, so the model stops
+        producing them at all rather than producing them for nobody: only the web
+        page renders panels, and the phone strips them out of the reply.
+        """
+        raw_gw = self.config.get("gateway") if isinstance(self.config, dict) else None
+        gw_cfg = raw_gw if isinstance(raw_gw, dict) else {}
+        return command_utils.boolean_value(gw_cfg.get("panels", True), True)
+
+    def _composed_suffix(
+        self, *, system_prompt: str | None = None, panels: bool | None = None
+    ) -> str:
+        """Build the live gateway prompt without a per-turn device tail.
+
+        `system_prompt` replaces the user's standing one for a single turn, which is how a chat
+        profile takes effect. Passed in rather than assigned onto `self` because saved-session
+        turns run concurrently under their own locks — a shared field would let one chat's persona
+        leak into another's.
+        """
         parts: list[str] = []
-        if self._user_system_prompt:
-            parts.append(self._user_system_prompt)
-        parts.append(_HUD_INSTRUCTIONS)
+        prompt = self._user_system_prompt if system_prompt is None else system_prompt
+        if prompt:
+            parts.append(prompt)
+        if self.panels_enabled if panels is None else panels:
+            parts.append(_HUD_INSTRUCTIONS)
         parts.append(personal_os.system_context())
         parts.append(inbox.system_context())
         parts.append(routines.system_context())
         return "\n\n".join(parts)
 
+    @staticmethod
+    def chat_config(session: dict | None) -> dict:
+        """A chat's own profile and approval mode, normalised.
+
+        Stored on the session so it travels with the chat: reopening it on the phone, the web page
+        or the terminal all find the same setting, and it survives a restart.
+        """
+        data = session if isinstance(session, dict) else {}
+        raw = data.get("chat_config")
+        raw = raw if isinstance(raw, dict) else {}
+        profile = raw.get("profile")
+        profile = profile if isinstance(profile, dict) else {}
+        temperature = profile.get("temperature")
+        try:
+            temperature = None if temperature is None else float(temperature)
+        except (TypeError, ValueError):
+            temperature = None
+        if temperature is not None and not 0.0 <= temperature <= 2.0:
+            temperature = None
+        effort = str(profile.get("effort") or "").strip().lower()
+        from .engine import EFFORT_LEVELS
+
+        return {
+            "mode": permissions.normalize_mode(raw.get("mode")),
+            "profile": {
+                "name": str(profile.get("name") or "").strip(),
+                "system_prompt": str(profile.get("system_prompt") or "").strip(),
+                "temperature": temperature,
+                "effort": effort if effort in EFFORT_LEVELS else "",
+            },
+        }
+
+    @contextlib.contextmanager
+    def _chat_settings_applied(self, session: dict, engine, state, *, panels: bool | None = None):
+        """Apply a chat's profile and mode for one turn, then put everything back.
+
+        Restoring is not optional. The primary engine and its `AppState` are shared with the
+        terminal REPL and the web page, so a chat that ran unrestricted must not leave approvals
+        disarmed for the next thing that talks to this gateway. Saved-session turns get their own
+        state and engine, but go through the same path so there is only one set of rules.
+        """
+        config = self.chat_config(session)
+        profile = config["profile"]
+        previous_panels = getattr(state, "panels_enabled", True)
+        previous_temperature = getattr(engine, "temperature", None)
+        previous_effort = getattr(state, "effort", None)
+        previous_flags = {
+            field: getattr(state, field, False) for field in permissions.CHAT_MODES["restricted"]
+        }
+
+        # Panels are a property of the *client*, not the chat: only the web page draws them, and
+        # the phone strips them out of the reply. A client that says it cannot render them gets a
+        # model that is never told about them and is not offered the tool, rather than one that
+        # produces charts for nobody.
+        if panels is not None:
+            state.update(panels_enabled=panels)
+        engine.system_suffix = self._composed_suffix(
+            system_prompt=profile["system_prompt"] or None,
+            panels=panels,
+        )
+        if profile["temperature"] is not None:
+            engine.temperature = profile["temperature"]
+        if profile["effort"]:
+            state.update(effort=profile["effort"])
+        state.update(**permissions.mode_flags(config["mode"]))
+        # After the state changes, so the effort dial reaches the prompt it is injected into.
+        engine.refresh_system_prompt()
+        try:
+            yield config
+        finally:
+            if previous_temperature is not None:
+                engine.temperature = previous_temperature
+            if previous_effort is not None and profile["effort"]:
+                state.update(effort=previous_effort)
+            state.update(**previous_flags)
+            if panels is not None:
+                state.update(panels_enabled=previous_panels)
+
+    def set_chat_config(self, chat_id: str, mode=None, profile=None) -> dict:
+        """Pin a profile and/or approval mode to one chat."""
+        target = self.session if not chat_id or chat_id == self.session.get("id") else None
+        data = target if target is not None else sessions.load(chat_id)
+        if not data:
+            return {"error": f"chat {chat_id} not found"}
+
+        existing = self.chat_config(data)
+        merged = {
+            "mode": permissions.normalize_mode(existing["mode"] if mode is None else mode),
+            "profile": existing["profile"] if profile is None else profile,
+        }
+        data["chat_config"] = merged
+        normalised = self.chat_config(data)
+        data["chat_config"] = normalised
+        if target is None:
+            sessions.save(data)
+        return {"ok": True, "chat_config": normalised}
+
     def _rebuild_suffix(self) -> None:
         """Refresh the primary gateway engine's live, device-neutral context."""
+        # The same setting decides both halves: the instructions in the prompt and
+        # whether the tool is offered at all.
+        self.agent.state.update(panels_enabled=self.panels_enabled)
         self.engine.system_suffix = self._composed_suffix()
         self.engine.refresh_system_prompt()
 
@@ -635,6 +860,7 @@ class Gateway:
             return "emitted"
 
         self.engine.executor.widget_action = widget_action
+        self.engine.executor.ask_user = self.ask_user
 
     def _refresh_shared_prompts(self) -> None:
         """Refresh both engines after changing their shared AppState."""
@@ -686,6 +912,19 @@ class Gateway:
         self.session["model"] = self._model_spec
         self.session["messages"] = msgs
         sessions.save(self.session)
+
+    def _detach_current_session(self) -> None:
+        """Drop the loaded chat without persisting it.
+
+        Every chat switch — `_new_chat_unlocked`, `_load_chat_unlocked`, even `list_chats`
+        — begins by flushing the loaded session to disk. A caller that has just removed a
+        chat's stored copy therefore has to clear the in-memory one as well, or the very
+        next switch writes it straight back and the delete silently undoes itself.
+        `_save_current` skips a chat with no messages, so emptying the engine is what makes
+        those flushes no-ops.
+        """
+        self.engine.reset()
+        self.session["messages"] = []
 
     def _interrupt_turn(self, timeout: float = 15.0) -> bool:
         """Abort any in-flight turn and wait for it to finish saving into the
@@ -904,6 +1143,9 @@ class Gateway:
         }
         if self.session.get("project") is not None:
             current["project"] = self.session["project"]
+        # So a client can show which profile and approval mode this chat is on without
+        # having to remember what it last asked for.
+        current["chat_config"] = self.chat_config(self.session)
         return current
 
     def new_chat(self, project: dict | None = None) -> dict:
@@ -1052,7 +1294,14 @@ class Gateway:
                 if chat_id in proj.get("chats", []):
                     projects.remove_chat(proj["id"], chat_id)
             if chat_id == self.session.get("id"):
-                self._new_chat_unlocked()
+                # This is the chat on screen. Detach it before switching away, or the
+                # switch's own save resurrects the rows just deleted.
+                self._detach_current_session()
+                remaining = self.list_chats()
+                # Deleting a chat should not manufacture one. Fall back to the most recent
+                # survivor and only start something new when there is nothing left to open.
+                if not remaining or "error" in self._load_chat_unlocked(remaining[0]["id"]):
+                    self._new_chat_unlocked()
             return {
                 "chats": self.list_chats(),
                 "current": self.current_chat(),
@@ -1272,6 +1521,7 @@ class Gateway:
             "yolo": self.agent.state.yolo,
             "gateway_port": gateway_port,
             "gateway_auto_start": command_utils.boolean_value(gw_cfg.get("auto_start", True), True),
+            "panels": self.panels_enabled,
             "proactive_enabled": command_utils.boolean_value(
                 proactive_cfg.get("enabled", True), True
             ),
@@ -1280,6 +1530,126 @@ class Gateway:
             ),
             "system_prompt": self._user_system_prompt or "",
         }
+
+    # -- pairing ------------------------------------------------------------
+
+    PAIR_WINDOW_SECONDS = 120
+    PAIR_MAX_ATTEMPTS = 5
+
+    def begin_pairing(self) -> dict:
+        """Open a short window in which a device can trade a code for the token.
+
+        Returns everything a person needs to read out loud: the code, how long
+        it lasts, and the address the device should end up talking to.
+        """
+        code = f"{secrets.randbelow(1_000_000):06d}"
+        with self._pair_lock:
+            self._pair_code = code
+            self._pair_expires_at = time.monotonic() + self.PAIR_WINDOW_SECONDS
+            self._pair_attempts = 0
+        return {
+            "code": code,
+            "expires_in": self.PAIR_WINDOW_SECONDS,
+            "name": self.advertised_name(),
+            "address": self.lan_url(),
+            "lan": self.lan,
+        }
+
+    def cancel_pairing(self) -> None:
+        with self._pair_lock:
+            self._pair_code = None
+            self._pair_expires_at = 0.0
+            self._pair_attempts = 0
+
+    def pairing_status(self) -> dict:
+        """Whether a window is open, and how much of it is left."""
+        with self._pair_lock:
+            remaining = self._pair_expires_at - time.monotonic()
+            if self._pair_code is None or remaining <= 0:
+                return {"open": False, "expires_in": 0}
+            return {
+                "open": True,
+                "code": self._pair_code,
+                "expires_in": int(remaining),
+                "attempts_left": self.PAIR_MAX_ATTEMPTS - self._pair_attempts,
+            }
+
+    def redeem_pairing_code(self, supplied: str) -> tuple[dict, int]:
+        """Trade a correct code for the gateway token.
+
+        The comparison is constant-time and the window is destroyed on the first
+        success, so a code is worth exactly one device. Wrong guesses are
+        counted, not merely rejected: five closes the window rather than letting
+        a caller walk the six-digit space.
+        """
+        supplied = "".join(ch for ch in str(supplied) if ch.isdigit())
+        with self._pair_lock:
+            expired = self._pair_code is None or time.monotonic() > self._pair_expires_at
+            if expired:
+                self._pair_code = None
+                return {"error": "no pairing is in progress; run /token on the computer"}, 409
+            self._pair_attempts += 1
+            if self._pair_attempts > self.PAIR_MAX_ATTEMPTS:
+                self._pair_code = None
+                return {"error": "too many attempts; run /token on the computer again"}, 429
+            if not secrets.compare_digest(supplied, str(self._pair_code)):
+                remaining = self.PAIR_MAX_ATTEMPTS - self._pair_attempts
+                _log.warning("rejected an incorrect pairing code")
+                return {"error": f"that code is not right ({remaining} tries left)"}, 403
+            self._pair_code = None
+            self._pair_expires_at = 0.0
+        _log.info("paired a new device")
+        return {
+            "token": self.token,
+            "name": self.advertised_name(),
+            "version": __import__("cagentic").__version__,
+        }, 200
+
+    @staticmethod
+    def open_pairing_on_running_gateway(port: int, token: str) -> tuple[dict | None, str | None]:
+        """Ask an already-running gateway to open a pairing window.
+
+        The gateway usually runs as a background service, in its own process. A
+        second one started here would advertise a different port and hand out a
+        different token, so the phone could pair with an instance that dies when
+        this terminal does. Talking to the one that is already there avoids that
+        entirely — when its token matches the pinned one.
+        """
+        import json as _json
+        import urllib.error
+        import urllib.request
+
+        request = urllib.request.Request(
+            f"http://127.0.0.1:{int(port)}/api/pair/open",
+            data=b"{}",
+            headers={"Content-Type": "application/json", "X-Cagentic-Token": str(token)},
+            method="POST",
+        )
+        try:
+            with urllib.request.urlopen(request, timeout=5) as response:
+                return _json.loads(response.read() or b"{}"), None
+        except urllib.error.HTTPError as exc:
+            if exc.code in (401, 403):
+                # It is running with an older, unpinned token, so it predates the
+                # token that was just written to the config.
+                return None, "stale-token"
+            return None, f"http {exc.code}"
+        except (OSError, ValueError):
+            return None, "unreachable"
+
+    def advertised_name(self) -> str:
+        from .discovery import machine_name
+
+        return machine_name()
+
+    def lan_url(self) -> str:
+        """The address a phone should use, rather than the loopback one."""
+        from .discovery import local_ipv4
+
+        address = local_ipv4()
+        if address is None:
+            return self.url()
+        return f"http://{address}:{self.port}"
 
     def abort_generation(self) -> None:
         """Abort the current streaming generation."""
@@ -1345,6 +1715,13 @@ class Gateway:
             enabled = incoming_bool("gateway_auto_start")
             if enabled is not None:
                 _config.set_value(cfg, "gateway.auto_start", enabled)
+        if "panels" in data:
+            enabled = incoming_bool("panels")
+            if enabled is not None:
+                _config.set_value(cfg, "gateway.panels", enabled)
+                # The instructions live in the system prompt, so the change only takes
+                # effect once that prompt is rebuilt.
+                self._rebuild_suffix()
         if "proactive_enabled" in data:
             enabled = incoming_bool("proactive_enabled")
             if enabled is not None:
@@ -1740,8 +2117,11 @@ class Gateway:
         self.engine.model = self.agent.model
         try:
             self._rebuild_suffix()
-            for ev in self.engine.submit_message(message):
-                emit(ev.kind, ev.data)
+            # A re-run is still a turn in this chat, so it runs under the chat's own profile and
+            # approval mode. Without this an edited message quietly ignored both.
+            with self._chat_settings_applied(self.session, self.engine, self.agent.state):
+                for ev in self.engine.submit_message(message):
+                    emit(ev.kind, ev.data)
         except _ClientGone:
             raise
         except Exception as e:
@@ -1773,7 +2153,9 @@ class Gateway:
         finally:
             self._turn_lock.release()
 
-    def run_turn(self, message: str, emit, prelocked: bool = False) -> None:
+    def run_turn(
+        self, message: str, emit, prelocked: bool = False, panels: bool | None = None
+    ) -> None:
         if not prelocked and not self._turn_lock.acquire(blocking=False):
             emit("error", {"text": "Cagentic is still working on the previous message."})
             return
@@ -1788,13 +2170,18 @@ class Gateway:
             self._rebuild_suffix()
             display_message = message
             model_message = self._consume_pending_context(message)
-            for ev in self.engine.submit_message(
-                model_message,
-                display_prompt=display_message,
+            # Inside the turn lock, so the chat's own profile and approval mode apply to this
+            # turn and are put back before anything else uses the shared engine.
+            with self._chat_settings_applied(
+                self.session, self.engine, self.agent.state, panels=panels
             ):
-                if ev.kind == "done":
-                    completed = True
-                emit(ev.kind, ev.data)
+                for ev in self.engine.submit_message(
+                    model_message,
+                    display_prompt=display_message,
+                ):
+                    if ev.kind == "done":
+                        completed = True
+                    emit(ev.kind, ev.data)
         except _ClientGone:
             raise
         except Exception as e:
@@ -1882,6 +2269,7 @@ class Gateway:
                 stream=True,
             )
             engine.executor.widget_action = self.engine.executor.widget_action
+            engine.executor.ask_user = self.ask_user
             engine.system_suffix = self._composed_suffix()
             engine.project_context = context
             engine.load_messages(data.get("messages", []))
@@ -1909,7 +2297,9 @@ class Gateway:
             return {"error": "session is busy"}, 409
         return {"ok": True}, 200
 
-    def run_session_turn(self, session_id: str, message: str, emit) -> None:
+    def run_session_turn(
+        self, session_id: str, message: str, emit, panels: bool | None = None
+    ) -> None:
         actor = self._session_actor(session_id)
         if actor is None or not actor["lock"].acquire(blocking=False):
             emit("error", {"text": "session is busy or unavailable"})
@@ -1921,11 +2311,13 @@ class Gateway:
         title_job = None
         self._thread_context.emit = emit
         try:
-            engine.system_suffix = self._composed_suffix()
-            for event in engine.submit_message(message):
-                if event.kind == "done":
-                    completed = True
-                emit(event.kind, event.data)
+            # A saved-session actor has its own engine and state, so its chat's profile and mode
+            # apply here without touching the primary engine at all.
+            with self._chat_settings_applied(data, engine, engine.state, panels=panels):
+                for event in engine.submit_message(message):
+                    if event.kind == "done":
+                        completed = True
+                    emit(event.kind, event.data)
         except _ClientGone:
             raise
         except Exception as exc:
@@ -2120,15 +2512,24 @@ class Gateway:
             active_groups = (
                 agent.state.tool_groups if agent.state.tool_groups is not None else DEFAULT_GROUPS
             )
+            from .engine import _PANEL_TOOLS
+
+            # A tool the engine withholds is not active, whatever the groups say —
+            # listing it here would promise the model an ability it does not have.
+            withheld = set() if self.panels_enabled else set(_PANEL_TOOLS)
             active_names = {
                 name
                 for group in active_groups
                 for name in TOOL_GROUPS.get(group, ())
-                if name in known
+                if name in known and name not in withheld
             }
             lines = [f"{len(active_names)} of {len(known)} tools active ({mode}):"]
             for group in sorted(active_groups):
-                names = sorted(name for name in TOOL_GROUPS.get(group, ()) if name in known)
+                names = sorted(
+                    name
+                    for name in TOOL_GROUPS.get(group, ())
+                    if name in known and name not in withheld
+                )
                 if names:
                     lines.append(f"  [{group}] {', '.join(names)}")
             return {"ok": True, "text": "\n".join(lines)}
@@ -2262,6 +2663,30 @@ class Gateway:
                 return {"ok": True, "text": f"host → {agent.client.host}"}
             except Exception as e:
                 return {"ok": False, "text": f"error: {e}"}
+
+        if cmd == "token":
+            if arg1.lower() in ("off", "cancel", "stop"):
+                self.cancel_pairing()
+                return {"ok": True, "text": "pairing cancelled."}
+            if not self.lan:
+                return {
+                    "ok": False,
+                    "text": (
+                        "this gateway only listens on the computer itself, so a phone cannot "
+                        "reach it. Set gateway.lan to true (or run /token in the terminal, "
+                        "which offers to do it for you) and restart the gateway."
+                    ),
+                }
+            pairing = self.begin_pairing()
+            minutes = max(1, pairing["expires_in"] // 60)
+            return {
+                "ok": True,
+                "text": (
+                    f"pairing code {pairing['code']} — good for {minutes} minute(s).\n"
+                    f'On the phone: add a Cagentic gateway, pick "{pairing["name"]}" from the '
+                    f"list, and enter the code. If it is not listed, use {pairing['address']}."
+                ),
+            }
 
         if cmd == "notes":
             from . import notes as _notes
@@ -2477,7 +2902,7 @@ class _Handler(BaseHTTPRequestHandler):
         # Static page assets bootstrap the UI (and carry the token to the
         # browser), so they aren't token-gated — but they must still be a
         # same-host request to thwart DNS-rebinding.
-        if path in ("/", "/app.css", "/app.js"):
+        if path in ("/", "/app.css", "/app.js") or path in _FAVICONS or path in _FONTS:
             if not self._host_is_local() or not self._origin_ok():
                 self._deny()
                 return
@@ -2489,6 +2914,10 @@ class _Handler(BaseHTTPRequestHandler):
                 self._send(html.encode("utf-8"), "text/html; charset=utf-8")
             elif path == "/app.css":
                 self._send(_CSS.encode("utf-8"), "text/css; charset=utf-8")
+            elif path in _FAVICONS:
+                self._send(_FAVICONS[path].encode("utf-8"), "image/svg+xml; charset=utf-8")
+            elif path in _FONTS:
+                self._send(_FONTS[path], "font/woff2")
             else:
                 self._send(_JS.encode("utf-8"), "application/javascript; charset=utf-8")
             return
@@ -2531,13 +2960,34 @@ class _Handler(BaseHTTPRequestHandler):
 
     def do_POST(self) -> None:  # noqa: N802
         path = self.path.split("?")[0]
-        # Every POST route lives under /api/* — require auth (token + Host +
-        # Origin) before doing anything. This blocks CSRF and unauthenticated
+        # Pairing is the single route that cannot carry the token, because
+        # handing the token over is what it exists to do. It stays gated by a
+        # six-digit code that is only valid inside a two-minute window the user
+        # opened deliberately, by an attempt limit, and by the same cross-origin
+        # check as everything else — a page in a browser must not be able to
+        # walk codes on the user's behalf.
+        if path == "/api/pair":
+            if not self._origin_ok():
+                self._deny()
+                return
+            body = self._body()
+            result, status = self._gw().redeem_pairing_code(str(body.get("code", "")))
+            self._json(result, status=status)
+            return
+        # Every other POST route lives under /api/* — require auth (token + Host
+        # + Origin) before doing anything. This blocks CSRF and unauthenticated
         # access to the shell/files/browser the assistant can drive.
         if not self._authorized():
             self._deny()
             return
         gw = self._gw()
+        if path == "/api/pair/open":
+            self._json(gw.begin_pairing())
+            return
+        if path == "/api/pair/cancel":
+            gw.cancel_pairing()
+            self._json({"ok": True})
+            return
         if path == "/api/abort":
             gw.abort_generation()
             self._json({"ok": True})
@@ -2585,8 +3035,12 @@ class _Handler(BaseHTTPRequestHandler):
                 return
             else:
                 prelocked = True
+            # A client that cannot draw charts says so, and the model is never told they
+            # exist. Absent means "can render them", so existing clients are unaffected.
+            raw_panels = b.get("panels")
             self._stream_chat(
                 message,
+                panels=bool(raw_panels) if isinstance(raw_panels, bool) else None,
                 prelocked=prelocked,
                 session_id=session_id or None,
             )
@@ -2598,6 +3052,11 @@ class _Handler(BaseHTTPRequestHandler):
         if path == "/api/chat/delete-msg":
             b = self._body()
             self._json(self._gw().delete_message(int(b.get("index", 0))))
+            return
+        if path == "/api/answer":
+            b = self._body()
+            gw.deliver_answer(str(b.get("answer") or ""), str(b.get("id") or "") or None)
+            self._json({"ok": True})
             return
         if path == "/api/permission":
             b = self._body()
@@ -2681,6 +3140,16 @@ class _Handler(BaseHTTPRequestHandler):
         if path == "/api/chats/load":
             cur = gw.load_chat(str(self._body().get("id", "")))
             self._json({"current": cur, "chats": gw.list_chats()})
+            return
+        if path == "/api/chats/config":
+            b = self._body()
+            self._json(
+                gw.set_chat_config(
+                    str(b.get("id") or ""),
+                    mode=b.get("mode"),
+                    profile=b.get("profile"),
+                )
+            )
             return
         if path == "/api/chats/delete":
             self._json(gw.delete_chat(str(self._body().get("id", ""))))
@@ -2783,6 +3252,7 @@ class _Handler(BaseHTTPRequestHandler):
         message: str,
         prelocked: bool = False,
         session_id: str | None = None,
+        panels: bool | None = None,
     ) -> None:
         emit = self._begin_sse()
         if not message:
@@ -2795,9 +3265,9 @@ class _Handler(BaseHTTPRequestHandler):
             return
         try:
             if session_id and session_id != self._gw().session.get("id"):
-                self._gw().run_session_turn(session_id, message, emit)
+                self._gw().run_session_turn(session_id, message, emit, panels=panels)
             else:
-                self._gw().run_turn(message, emit, prelocked=prelocked)
+                self._gw().run_turn(message, emit, prelocked=prelocked, panels=panels)
             emit("end", {})
         except _ClientGone:
             return
@@ -2830,3 +3300,39 @@ def _asset_text(name: str) -> str:
 _HTML = _asset_text("index.html")
 _CSS = _asset_text("app.css")
 _JS = _asset_text("app.js")
+# Three, because the page's theme is its own setting and not the operating system's: the
+# media-query one is what the markup links so the tab is right before any script runs, and the
+# explicit pair is what the theme switch points at once the reader has chosen.
+_FAVICONS = {
+    f"/{name}": _asset_text(name)
+    for name in ("favicon.svg", "favicon-light.svg", "favicon-dark.svg")
+}
+
+
+def _asset_bytes(name: str) -> bytes:
+    from importlib.resources import files
+
+    return files("cagentic.gateway_assets").joinpath(name).read_bytes()
+
+
+def _load_fonts() -> dict[str, bytes]:
+    """The web copies of the app's typefaces, read once at import.
+
+    Shared byte-for-byte with iOS so both surfaces are set in the same letterforms. Loaded eagerly
+    like the rest of the page assets: they are a few hundred KB in total and a browser only asks
+    for the weights a page actually renders.
+    """
+    from importlib.resources import files
+
+    directory = files("cagentic.gateway_assets").joinpath("fonts")
+    out: dict[str, bytes] = {}
+    try:
+        for entry in directory.iterdir():
+            if entry.name.endswith(".woff2"):
+                out[f"/fonts/{entry.name}"] = entry.read_bytes()
+    except (FileNotFoundError, NotADirectoryError):  # pragma: no cover - packaging guard
+        _log.warning("bundled web fonts are missing; the page will fall back to system type")
+    return out
+
+
+_FONTS = _load_fonts()

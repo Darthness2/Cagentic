@@ -83,8 +83,21 @@ struct SidebarView: View {
         } header: {
             Text(title)
                 .textCase(nil)
-                .font(CagenticTheme.FontStyle.captionSemibold)
+                .font(CagenticTheme.FontStyle.footnote)
                 .foregroundStyle(CagenticTheme.textTertiary)
+                // Starts on the same vertical as the titles below it. The default header inset is
+                // a few points shy of where the rows land, and nothing in a list reads as sloppy
+                // faster than two left edges that almost agree.
+                .listRowInsets(
+                    EdgeInsets(
+                        top: CagenticTheme.Spacing.sm,
+                        leading: Self.titleInset,
+                        bottom: CagenticTheme.Spacing.xxs,
+                        trailing: Self.titleInset
+                    )
+                )
+                .listRowBackground(Color.clear)
+                .listRowSeparator(.hidden)
         }
     }
 
@@ -98,21 +111,25 @@ struct SidebarView: View {
                 hasDraft: model.hasDraft(for: conversation.id),
                 isSelected: model.selectedConversationID == conversation.id
             )
-            .padding(.horizontal, CagenticTheme.Spacing.sm)
+            .padding(.horizontal, Self.textInset)
+            // The current chat used to be marked three times over — a tinted fill, accent-coloured
+            // text, and a heavier weight — which made one row shout while the rest of the list sat
+            // quiet. The drawer closes the moment you pick something, so this marker is only ever
+            // read as "where am I", never as a call to action: a plain raised surface is enough.
             .background(
                 model.selectedConversationID == conversation.id
-                    ? CagenticTheme.accentSoft
+                    ? CagenticTheme.surfaceRaised
                     : .clear,
-                in: .rect(cornerRadius: CagenticTheme.Radius.control)
+                in: .rect(cornerRadius: CagenticTheme.Radius.card)
             )
         }
         .buttonStyle(.plain)
         .listRowInsets(
             EdgeInsets(
-                top: 1,
-                leading: CagenticTheme.Spacing.xs,
-                bottom: 1,
-                trailing: CagenticTheme.Spacing.xs
+                top: 2,
+                leading: Self.rowInset,
+                bottom: 2,
+                trailing: Self.rowInset
             )
         )
         .listRowBackground(Color.clear)
@@ -153,6 +170,13 @@ struct SidebarView: View {
         }
     }
 
+    /// The selected row's fill is inset from the drawer edge, and its text is inset again inside
+    /// that. `titleInset` is derived from both rather than written out, so the section header
+    /// cannot drift off the titles when either of the other two is retuned.
+    private static let rowInset = CagenticTheme.Spacing.xs
+    private static let textInset = CagenticTheme.Spacing.sm
+    private static let titleInset = rowInset + textInset
+
     private func createConversation() {
         model.createConversation()
         isPresented = false
@@ -181,14 +205,14 @@ private struct ConversationRow: View {
             }
 
             Text(conversation.title)
+                // Every title stays at full contrast — dimming the rest to make one stand out just
+                // makes the list look switched off. The weight is the whisper; the fill is the mark.
                 .font(
                     isSelected
-                        ? CagenticTheme.FontStyle.bodySemibold
+                        ? CagenticTheme.FontStyle.bodyMedium
                         : CagenticTheme.FontStyle.body
                 )
-                .foregroundStyle(
-                    isSelected ? CagenticTheme.accent : CagenticTheme.textPrimary
-                )
+                .foregroundStyle(CagenticTheme.textPrimary)
                 .lineLimit(1)
                 .truncationMode(.tail)
 
@@ -262,7 +286,7 @@ private struct SidebarFooter: View {
             HStack(spacing: CagenticTheme.Spacing.sm) {
                 Button(action: onNewChat) {
                     HStack(spacing: CagenticTheme.Spacing.xs) {
-                        Image(systemName: "square.and.pencil")
+                        CagenticIconView(shape: NewChatIconShape(), size: 19)
                             .foregroundStyle(CagenticTheme.accent)
                         Text("New chat")
                             .foregroundStyle(CagenticTheme.textPrimary)

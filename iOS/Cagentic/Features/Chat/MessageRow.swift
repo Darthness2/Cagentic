@@ -417,8 +417,8 @@ private struct AttachmentPreviewView: View {
                         Text(textPreview)
                             .font(
                                 attachment.kind == .textFile
-                                    ? .system(.callout, design: .monospaced)
-                                    : CagenticTheme.FontStyle.body
+                                    ? CagenticTheme.FontStyle.Code.block
+                                    : CagenticTheme.FontStyle.Message.body
                             )
                             .foregroundStyle(CagenticTheme.textPrimary)
                             .textSelection(.enabled)
@@ -559,33 +559,47 @@ private struct SystemMessageRow: View {
     }
 }
 
-private struct AssistantMark: View {
+/// The brand mark, turning while the assistant is working.
+///
+/// It replaces the system spinner everywhere a turn is in progress, so waiting always looks like
+/// the same one thing rather than a spinner here and a different indicator there.
+///
+/// The mark is four arcs on the quarters with equal spans, so it is unchanged by a quarter turn —
+/// rotating 90° and repeating without autoreverse loops seamlessly and never has to snap back.
+struct ThinkingMark: View {
     @Environment(\.accessibilityReduceMotion) private var reduceMotion
+    @State private var isSpinning = false
+
+    var size: CGFloat = 24
+    var isAnimating = true
+
+    var body: some View {
+        BrandMark(size: size)
+            .rotationEffect(.degrees(isSpinning ? 90 : 0))
+            .animation(
+                isAnimating && !reduceMotion
+                    ? .linear(duration: 0.9).repeatForever(autoreverses: false)
+                    : nil,
+                value: isSpinning
+            )
+            // Reacts to the setting changing at runtime, not only to what it was on appear.
+            .onChange(of: isAnimating, initial: true) { updateAnimationState() }
+            .onChange(of: reduceMotion) { updateAnimationState() }
+            .accessibilityHidden(true)
+    }
+
+    private func updateAnimationState() {
+        isSpinning = isAnimating && !reduceMotion
+    }
+}
+
+private struct AssistantMark: View {
     @ScaledMetric(relativeTo: .body) private var markSize = 24.0
-    @State private var isBreathing = false
 
     let isStreaming: Bool
 
     var body: some View {
-        BrandMark(size: min(markSize, 34))
-            .scaleEffect(isBreathing ? 0.9 : 1)
-            .opacity(isBreathing ? 0.58 : 1)
-            .animation(
-                isStreaming && !reduceMotion
-                    ? .easeInOut(duration: 1.05).repeatForever(autoreverses: true)
-                    : nil,
-                value: isBreathing
-            )
-            .onChange(of: isStreaming, initial: true) {
-                updateAnimationState()
-            }
-            .onChange(of: reduceMotion) {
-                updateAnimationState()
-            }
-    }
-
-    private func updateAnimationState() {
-        isBreathing = isStreaming && !reduceMotion
+        ThinkingMark(size: min(markSize, 34), isAnimating: isStreaming)
     }
 }
 
@@ -605,9 +619,7 @@ private struct ThinkingDisclosure: View {
             } label: {
                 HStack(spacing: CagenticTheme.Spacing.xxs) {
                     if isStreaming {
-                        ProgressView()
-                            .controlSize(.mini)
-                            .accessibilityHidden(true)
+                        ThinkingMark(size: 13)
                     } else {
                         Image(systemName: "sparkles")
                             .font(.caption2)
@@ -668,18 +680,53 @@ private struct AssistantActivityTimeline: View {
     let activity: [AssistantActivity]
     let isStreaming: Bool
 
+    /// One rendered row: a single narration or plan, or a run of the same tool.
+    struct Group: Identifiable {
+        let id: UUID
+        let kind: AssistantActivity.Kind
+        let items: [AssistantActivity]
+
+        var first: AssistantActivity { items[0] }
+    }
+
+    /// Collapses neighbouring calls to the same tool into one row.
+    ///
+    /// A model that reads four directories produces four near-identical lines, which pushes the
+    /// answer off screen and says nothing the count would not. Only *adjacent* runs merge, so the
+    /// order of the story — narrate, act, narrate — survives.
+    static func grouped(_ activity: [AssistantActivity]) -> [Group] {
+        var groups: [Group] = []
+        for item in activity {
+            if item.kind == .tool,
+               let last = groups.last,
+               last.kind == .tool,
+               last.first.toolName == item.toolName,
+               !item.toolName.isEmpty
+            {
+                groups[groups.count - 1] = Group(
+                    id: last.id,
+                    kind: .tool,
+                    items: last.items + [item]
+                )
+            } else {
+                groups.append(Group(id: item.id, kind: item.kind, items: [item]))
+            }
+        }
+        return groups
+    }
+
     var body: some View {
         VStack(alignment: .leading, spacing: CagenticTheme.Spacing.xs) {
-            ForEach(activity) { item in
-                switch item.kind {
+            ForEach(Self.grouped(activity)) { group in
+                switch group.kind {
                 case .narration:
-                    MarkdownText(item.text)
+                    MarkdownText(group.first.text)
                         .font(CagenticTheme.FontStyle.callout)
                         .foregroundStyle(CagenticTheme.textSecondary)
                 case .plan:
-                    PlanBlock(steps: item.steps)
+                    PlanBlock(steps: group.first.steps)
                 case .tool:
-                    ToolActivityRow(activity: item)
+                    ToolActivityRow(runs: group.items)
                 }
             }
         }
@@ -729,7 +776,11 @@ private struct ToolActivityRow: View {
     @Environment(\.accessibilityReduceMotion) private var reduceMotion
     @State private var isExpanded = false
 
-    let activity: AssistantActivity
+    /// One or more adjacent calls to the same tool.
+    let runs: [AssistantActivity]
+
+    private var activity: AssistantActivity { runs[0] }
+    private var count: Int { runs.count }
 
     var body: some View {
         VStack(alignment: .leading, spacing: CagenticTheme.Spacing.xxs) {
@@ -742,11 +793,12 @@ private struct ToolActivityRow: View {
                 HStack(spacing: CagenticTheme.Spacing.xs) {
                     stateMark
 
-                    Text(activity.toolName)
+                    Text(activity.displayLabel(count: count))
                         .font(CagenticTheme.FontStyle.captionSemibold)
                         .foregroundStyle(CagenticTheme.textSecondary)
 
-                    if !activity.text.isEmpty {
+                    // A collapsed run names the tool, not one arbitrary target of it.
+                    if count == 1, !activity.text.isEmpty {
                         Text(activity.text)
                             .font(CagenticTheme.FontStyle.caption)
                             .foregroundStyle(CagenticTheme.textTertiary)
@@ -780,11 +832,25 @@ private struct ToolActivityRow: View {
                         .frame(maxHeight: .infinity)
                         .accessibilityHidden(true)
 
-                    Text(activity.resultLine)
-                        .font(CagenticTheme.FontStyle.caption)
-                        .foregroundStyle(CagenticTheme.textSecondary)
-                        .textSelection(.enabled)
-                        .fixedSize(horizontal: false, vertical: true)
+                    VStack(alignment: .leading, spacing: CagenticTheme.Spacing.xs) {
+                        ForEach(runs) { run in
+                            VStack(alignment: .leading, spacing: 1) {
+                                if !run.text.isEmpty {
+                                    Text(run.text)
+                                        .font(CagenticTheme.FontStyle.caption)
+                                        .foregroundStyle(CagenticTheme.textSecondary)
+                                        .textSelection(.enabled)
+                                }
+                                if !run.resultLine.isEmpty {
+                                    Text(run.resultLine)
+                                        .font(CagenticTheme.FontStyle.caption)
+                                        .foregroundStyle(CagenticTheme.textTertiary)
+                                        .textSelection(.enabled)
+                                }
+                            }
+                            .fixedSize(horizontal: false, vertical: true)
+                        }
+                    }
                 }
                 .padding(.leading, CagenticTheme.Spacing.xxs)
                 .padding(.bottom, CagenticTheme.Spacing.xxs)
@@ -800,11 +866,9 @@ private struct ToolActivityRow: View {
 
     @ViewBuilder
     private var stateMark: some View {
-        switch activity.toolState {
+        switch collapsedState {
         case .running:
-            ProgressView()
-                .controlSize(.mini)
-                .accessibilityHidden(true)
+            ThinkingMark(size: 13)
         case .succeeded:
             Image(systemName: "checkmark")
                 .font(.caption2.weight(.bold))
@@ -818,80 +882,84 @@ private struct ToolActivityRow: View {
         }
     }
 
+    /// A run is only finished when all of it is, and a single failure colours the whole row —
+    /// hiding one failed call inside a collapsed group would be the wrong kind of tidy.
+    private var collapsedState: AssistantActivity.ToolState {
+        if runs.contains(where: { $0.toolState == .running }) { return .running }
+        if runs.contains(where: { $0.toolState == .failed }) { return .failed }
+        return .succeeded
+    }
+
     private var railColor: Color {
-        activity.toolState == .failed ? CagenticTheme.error : CagenticTheme.border
+        collapsedState == .failed ? CagenticTheme.error : CagenticTheme.border
     }
 
     private var canExpand: Bool {
-        !activity.resultLine.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty
+        runs.contains {
+            !$0.resultLine.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty
+                || (count > 1 && !$0.text.isEmpty)
+        }
     }
 
     private var accessibilityLabel: String {
-        let outcome = switch activity.toolState {
+        let outcome = switch collapsedState {
         case .running: "running"
         case .succeeded: "finished"
         case .failed: "failed"
         }
-        return [activity.toolName, activity.text, outcome]
-            .filter { !$0.isEmpty }
-            .joined(separator: ", ")
+        return [
+            activity.displayLabel(count: count),
+            count == 1 ? activity.text : "",
+            outcome,
+        ]
+        .filter { !$0.isEmpty }
+        .joined(separator: ", ")
     }
 }
 
-/// What the assistant shows before the first token lands.
+/// What the assistant shows before any text or tool activity has arrived.
 ///
-/// The verb and the three bobbing dots are the same ones the web UI uses, so the wait reads the
-/// same wherever Cagentic is being driven from. The verb is chosen once per appearance rather than
-/// per redraw — it would otherwise reshuffle on every layout pass.
+/// The verb sits beside the mark in the avatar column, and the two are baseline-aligned rather
+/// than centre-aligned — this `HStack` used to have no explicit alignment, which put a `.body`
+/// verb in the middle of a 44pt box next to a 6pt dot row that also drifted 4pt upward, so the
+/// two never sat on the same line.
 private struct StreamingPlaceholder: View {
     @Environment(\.accessibilityReduceMotion) private var reduceMotion
-    @State private var verb = StreamingPlaceholder.verbs.randomElement() ?? "Thinking"
+    @ScaledMetric(relativeTo: .body) private var markSize = 24.0
+    @State private var verbIndex = Int.random(in: 0..<StreamingPlaceholder.verbs.count)
 
     fileprivate static let verbs = ["Thinking", "Reading context", "Working", "Reviewing"]
 
-    var body: some View {
-        HStack(spacing: CagenticTheme.Spacing.xs) {
-            Text(verb)
-                .font(CagenticTheme.FontStyle.body)
-                .foregroundStyle(CagenticTheme.textSecondary)
+    /// Long enough to read, short enough that a slow turn does not look stuck.
+    private static let verbInterval = Duration.seconds(2.5)
 
-            BobbingDots()
-        }
-        .frame(maxWidth: .infinity, alignment: .leading)
-        .frame(minHeight: 44)
-        .accessibilityElement(children: .ignore)
-        .accessibilityLabel("\(verb)…")
+    private var verb: String {
+        Self.verbs[verbIndex % Self.verbs.count]
     }
-}
-
-/// Three dots that rise in sequence — the native counterpart of the web UI's `bob` keyframes.
-private struct BobbingDots: View {
-    @Environment(\.accessibilityReduceMotion) private var reduceMotion
-    @State private var isAnimating = false
 
     var body: some View {
-        HStack(spacing: 5) {
-            ForEach(0 ..< 3, id: \.self) { index in
-                Circle()
-                    .fill(CagenticTheme.accent)
-                    .frame(width: 6, height: 6)
-                    .opacity(isAnimating ? 1 : 0.15)
-                    .offset(y: isAnimating ? -4 : 0)
-                    .animation(
-                        reduceMotion
-                            ? nil
-                            : .easeInOut(duration: 0.5)
-                                .repeatForever(autoreverses: true)
-                                .delay(Double(index) * 0.18),
-                        value: isAnimating
-                    )
+        Text(verb)
+            .font(CagenticTheme.FontStyle.body)
+            .foregroundStyle(CagenticTheme.textSecondary)
+            .contentTransition(.opacity)
+            .frame(maxWidth: .infinity, alignment: .leading)
+            // The same box the mark occupies, so two top-aligned columns centre their contents
+            // on the same line. A taller box here is what pushed the verb below the mark.
+            .frame(minHeight: min(markSize, 34))
+            .accessibilityElement(children: .ignore)
+            .accessibilityLabel("\(verb)…")
+            .task {
+                // The verb used to be picked once and never change, so "rotating verbs" was one
+                // random word for the whole turn.
+                guard !reduceMotion else { return }
+                while !Task.isCancelled {
+                    try? await Task.sleep(for: Self.verbInterval)
+                    guard !Task.isCancelled else { return }
+                    withAnimation(.easeInOut(duration: 0.3)) {
+                        verbIndex += 1
+                    }
+                }
             }
-        }
-        .accessibilityHidden(true)
-        .onAppear {
-            guard !reduceMotion else { return }
-            isAnimating = true
-        }
     }
 }
 

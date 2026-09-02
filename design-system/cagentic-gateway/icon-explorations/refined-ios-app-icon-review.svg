@@ -1,0 +1,78 @@
+<!-- Cagentic iOS app-icon review — exploration only; not a production asset. -->
+<svg xmlns="http://www.w3.org/2000/svg" width="1500" height="1060" viewBox="0 0 1500 1060">
+  <defs>
+    <style>
+      .eyebrow { font: 600 17px -apple-system, BlinkMacSystemFont, "Segoe UI", sans-serif; letter-spacing: 2.3px; }
+      .title { font: 700 48px -apple-system, BlinkMacSystemFont, "Segoe UI", sans-serif; }
+      .body { font: 400 21px -apple-system, BlinkMacSystemFont, "Segoe UI", sans-serif; }
+      .name { font: 650 25px -apple-system, BlinkMacSystemFont, "Segoe UI", sans-serif; }
+      .label { font: 500 15px -apple-system, BlinkMacSystemFont, "Segoe UI", sans-serif; letter-spacing: .8px; }
+      .caption { font: 400 17px -apple-system, BlinkMacSystemFont, "Segoe UI", sans-serif; }
+      .stroke { fill: none; stroke: currentColor; }
+    </style>
+    <symbol id="core-c" viewBox="0 0 24 24">
+      <path class="stroke" d="M17.85 6.45A8.1 8.1 0 1 0 17.85 17.55" stroke-width="2.5" stroke-linecap="round"/>
+      <path d="m11.7 9.7 2.3 2.3-2.3 2.3-2.3-2.3 2.3-2.3Z" fill="currentColor"/>
+    </symbol>
+    <symbol id="relay" viewBox="0 0 24 24">
+      <path class="stroke" d="M12 3.55a8.45 8.45 0 0 1 7.22 4.07M20.45 12a8.45 8.45 0 0 1-4.07 7.22M12 20.45a8.45 8.45 0 0 1-7.22-4.07M3.55 12A8.45 8.45 0 0 1 7.62 4.78" stroke-width="2.1" stroke-linecap="round"/>
+    </symbol>
+    <symbol id="keystone" viewBox="0 0 24 24">
+      <path class="stroke" d="m12 3.45 7.35 4.25v8.6L12 20.55 4.65 16.3V7.7L12 3.45Z" stroke-width="2" stroke-linejoin="round"/>
+      <path d="m12 8.55 3.45 3.45L12 15.45 8.55 12 12 8.55Z" fill="currentColor"/>
+    </symbol>
+  </defs>
+
+  <rect width="1500" height="1060" fill="#F7F9FB"/>
+  <text class="eyebrow" x="100" y="96" fill="#596675">CAGENTIC / REFINED ICONS</text>
+  <text class="title" x="100" y="160" fill="#111820">iOS app-icon studies</text>
+  <text class="body" x="100" y="205" fill="#46515D">Refined for a quiet, full-bleed iOS tile: stronger weight, more decisive geometry, and a readable 16px silhouette.</text>
+  <rect x="100" y="250" width="1300" height="1" fill="#D0D7DE"/>
+
+  <g transform="translate(100 310)">
+    <rect width="400" height="640" rx="28" fill="#FFFFFF" stroke="#D0D7DE"/>
+    <text class="name" x="36" y="55" fill="#111820">02 / Core C</text>
+    <text class="caption" x="36" y="86" fill="#596675">Rounded C-form with a diamond core.</text>
+    <rect x="85" y="126" width="230" height="230" rx="53" fill="#F7F9FB"/>
+    <g color="#0969DA"><use href="#core-c" x="120" y="161" width="160" height="160"/></g>
+    <text class="caption" x="200" y="392" text-anchor="middle" fill="#111820">Cagentic</text>
+    <rect x="36" y="430" width="328" height="1" fill="#D0D7DE"/>
+    <text class="label" x="36" y="470" fill="#596675">APPEARANCE VARIANTS</text>
+    <rect x="36" y="495" width="74" height="74" rx="17" fill="#F7F9FB"/><g color="#0969DA"><use href="#core-c" x="47" y="506" width="52" height="52"/></g>
+    <rect x="162" y="495" width="74" height="74" rx="17" fill="#0A0C10"/><g color="#7CC4FF"><use href="#core-c" x="173" y="506" width="52" height="52"/></g>
+    <rect x="288" y="495" width="74" height="74" rx="17" fill="#F2F2F2"/><g color="#242424"><use href="#core-c" x="299" y="506" width="52" height="52"/></g>
+    <text class="label" x="73" y="603" text-anchor="middle" fill="#596675">STANDARD</text><text class="label" x="199" y="603" text-anchor="middle" fill="#596675">DARK</text><text class="label" x="325" y="603" text-anchor="middle" fill="#596675">TINTED</text>
+  </g>
+
+  <g transform="translate(550 310)">
+    <rect width="400" height="640" rx="28" fill="#FFFFFF" stroke="#D0D7DE"/>
+    <text class="name" x="36" y="55" fill="#111820">04 / Orbit Relay</text>
+    <text class="caption" x="36" y="86" fill="#596675">Four balanced relay arcs around open space.</text>
+    <rect x="85" y="126" width="230" height="230" rx="53" fill="#F7F9FB"/>
+    <g color="#0969DA"><use href="#relay" x="120" y="161" width="160" height="160"/></g>
+    <text class="caption" x="200" y="392" text-anchor="middle" fill="#111820">Cagentic</text>
+    <rect x="36" y="430" width="328" height="1" fill="#D0D7DE"/>
+    <text class="label" x="36" y="470" fill="#596675">APPEARANCE VARIANTS</text>
+    <rect x="36" y="495" width="74" height="74" rx="17" fill="#F7F9FB"/><g color="#0969DA"><use href="#relay" x="47" y="506" width="52" height="52"/></g>
+    <rect x="162" y="495" width="74" height="74" rx="17" fill="#0A0C10"/><g color="#7CC4FF"><use href="#relay" x="173" y="506" width="52" height="52"/></g>
+    <rect x="288" y="495" width="74" height="74" rx="17" fill="#F2F2F2"/><g color="#242424"><use href="#relay" x="299" y="506" width="52" height="52"/></g>
+    <text class="label" x="73" y="603" text-anchor="middle" fill="#596675">STANDARD</text><text class="label" x="199" y="603" text-anchor="middle" fill="#596675">DARK</text><text class="label" x="325" y="603" text-anchor="middle" fill="#596675">TINTED</text>
+  </g>
+
+  <g transform="translate(1000 310)">
+    <rect width="400" height="640" rx="28" fill="#FFFFFF" stroke="#D0D7DE"/>
+    <text class="name" x="36" y="55" fill="#111820">05 / Keystone</text>
+    <text class="caption" x="36" y="86" fill="#596675">A composed frame around a live core.</text>
+    <rect x="85" y="126" width="230" height="230" rx="53" fill="#F7F9FB"/>
+    <g color="#0969DA"><use href="#keystone" x="120" y="161" width="160" height="160"/></g>
+    <text class="caption" x="200" y="392" text-anchor="middle" fill="#111820">Cagentic</text>
+    <rect x="36" y="430" width="328" height="1" fill="#D0D7DE"/>
+    <text class="label" x="36" y="470" fill="#596675">APPEARANCE VARIANTS</text>
+    <rect x="36" y="495" width="74" height="74" rx="17" fill="#F7F9FB"/><g color="#0969DA"><use href="#keystone" x="47" y="506" width="52" height="52"/></g>
+    <rect x="162" y="495" width="74" height="74" rx="17" fill="#0A0C10"/><g color="#7CC4FF"><use href="#keystone" x="173" y="506" width="52" height="52"/></g>
+    <rect x="288" y="495" width="74" height="74" rx="17" fill="#F2F2F2"/><g color="#242424"><use href="#keystone" x="299" y="506" width="52" height="52"/></g>
+    <text class="label" x="73" y="603" text-anchor="middle" fill="#596675">STANDARD</text><text class="label" x="199" y="603" text-anchor="middle" fill="#596675">DARK</text><text class="label" x="325" y="603" text-anchor="middle" fill="#596675">TINTED</text>
+  </g>
+
+  <text class="caption" x="100" y="1010" fill="#596675">Preview uses the existing iOS palette: Standard #F7F9FB / #0969DA · Dark #0A0C10 / #7CC4FF · Tinted #F2F2F2 / #242424.</text>
+</svg>

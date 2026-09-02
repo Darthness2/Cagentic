@@ -144,25 +144,35 @@ public nonisolated struct GatewayEndpoint: Hashable, Sendable {
 nonisolated enum GatewayRoute: Sendable, Equatable {
     case bootstrap
     case chat
+    case chatEdit
     case abort
     case permission
+    case answer
     case model
     case chatsNew
     case chatsLoad
     case chatsDelete
     case chatsRename
+    case chatsConfig
+    case upload
+    case pair
 
     var path: String {
         switch self {
         case .bootstrap: "bootstrap"
         case .chat: "chat"
+        case .chatEdit: "chat/edit"
         case .abort: "abort"
         case .permission: "permission"
+        case .answer: "answer"
         case .model: "model"
         case .chatsNew: "chats/new"
         case .chatsLoad: "chats/load"
         case .chatsDelete: "chats/delete"
         case .chatsRename: "chats/rename"
+        case .chatsConfig: "chats/config"
+        case .upload: "upload"
+        case .pair: "pair"
         }
     }
 

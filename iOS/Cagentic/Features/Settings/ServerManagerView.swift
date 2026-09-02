@@ -54,8 +54,16 @@ struct ServerManagerView: View {
                     }
                 }
                 ToolbarItem(placement: .primaryAction) {
-                    Button("Add server", systemImage: "plus") {
-                        presentEditor(.add)
+                    Menu {
+                        Button("Find on Wi-Fi…", systemImage: "wifi") {
+                            model.queueSheetAfterDismiss(.pairGateway)
+                            dismiss()
+                        }
+                        Button("Enter an address…", systemImage: "keyboard") {
+                            presentEditor(.add)
+                        }
+                    } label: {
+                        Label("Add server", systemImage: "plus")
                     }
                     .disabled(isOperationLocked || model.isGenerating)
                 }
@@ -196,11 +204,21 @@ struct ServerManagerView: View {
         } description: {
             Text("Add an Ollama server or a Cagentic gateway to start a conversation.")
         } actions: {
-            Button("Add server") {
-                presentEditor(.add)
+            VStack(spacing: CagenticTheme.Spacing.xs) {
+                Button("Find on Wi-Fi") {
+                    model.queueSheetAfterDismiss(.pairGateway)
+                    dismiss()
+                }
+                .buttonStyle(.borderedProminent)
+                .controlSize(.large)
+
+                Button("Enter an address") {
+                    presentEditor(.add)
+                }
+                .buttonStyle(.plain)
+                .foregroundStyle(CagenticTheme.accent)
+                .frame(minHeight: 44)
             }
-            .buttonStyle(.borderedProminent)
-            .controlSize(.large)
         }
         .frame(maxWidth: .infinity, minHeight: 360)
     }

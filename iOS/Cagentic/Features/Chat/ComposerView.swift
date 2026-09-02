@@ -20,6 +20,11 @@ struct ComposerView: View {
                     connectionRecoveryRow
                 }
 
+                if let usage = model.contextUsage, usage.isWorthShowing {
+                    ContextMeter(usage: usage)
+                        .transition(reduceMotion ? .opacity : .move(edge: .bottom).combined(with: .opacity))
+                }
+
                 if !model.pendingAttachments.isEmpty || isAttachmentImportInProgress {
                     pendingAttachmentTray
                         .transition(
@@ -510,4 +515,47 @@ private enum ComposerAttachmentError: LocalizedError {
 #Preview("Composer") {
     ComposerView(model: .preview())
         .background(CagenticTheme.stage)
+}
+
+/// How full the model's window is, shown once it is half gone.
+///
+/// It appears rather than living there permanently: a meter that is always on screen stops being
+/// read, and this number only matters as it approaches the edge. Before this, running out of
+/// context surfaced as "the gateway reported an error", with nothing to have seen coming.
+private struct ContextMeter: View {
+    @Environment(\.accessibilityReduceMotion) private var reduceMotion
+
+    let usage: ContextUsage
+
+    var body: some View {
+        HStack(spacing: CagenticTheme.Spacing.xs) {
+            Capsule()
+                .fill(CagenticTheme.border)
+                .frame(height: 4)
+                .overlay(alignment: .leading) {
+                    GeometryReader { geometry in
+                        Capsule()
+                            .fill(tint)
+                            .frame(width: geometry.size.width * usage.share)
+                            .animation(
+                                reduceMotion ? nil : .easeOut(duration: 0.3),
+                                value: usage.share
+                            )
+                    }
+                }
+                .frame(maxWidth: 120)
+
+            Text(usage.summary)
+                .font(CagenticTheme.FontStyle.caption)
+                .foregroundStyle(usage.isCritical ? CagenticTheme.warning : CagenticTheme.textTertiary)
+        }
+        .frame(maxWidth: .infinity, alignment: .leading)
+        .padding(.horizontal, CagenticTheme.Spacing.xs)
+        .accessibilityElement(children: .ignore)
+        .accessibilityLabel(usage.summary)
+    }
+
+    private var tint: Color {
+        usage.isCritical ? CagenticTheme.warning : CagenticTheme.textTertiary
+    }
 }

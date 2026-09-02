@@ -35,12 +35,13 @@ nonisolated enum NetworkAddress {
         return false
     }
 
-    /// True for private-range IPs, link-local/unique-local IPv6, and `.local` mDNS names.
+    /// True for private-range IPs, link-local/unique-local IPv6, `.local` mDNS names, and
+    /// Tailscale MagicDNS names.
     ///
     /// This is also the predicate that decides whether a secret may be sent over plain HTTP, so it
     /// must stay strictly narrower than "not obviously public".
     static func isLAN(_ host: String) -> Bool {
-        if isValidLocalHostname(host) {
+        if isValidLocalHostname(host) || isTailscaleMagicDNS(host) {
             return true
         }
 
@@ -121,6 +122,21 @@ nonisolated enum NetworkAddress {
 
     static func isValidLocalHostname(_ host: String) -> Bool {
         host.hasSuffix(".local") && isValidHostname(host)
+    }
+
+    /// True for a Tailscale MagicDNS name, such as `studio.tailnet-name.ts.net`.
+    ///
+    /// Treated exactly like a LAN address, including for the cleartext-credential rule. A tailnet
+    /// is a WireGuard overlay: traffic between two nodes is already encrypted end to end before it
+    /// touches any network, so plain HTTP inside it is no more exposed than plain HTTP across a
+    /// home LAN — and rather less, since there is no shared broadcast segment. Refusing these names
+    /// pushed people toward pasting the `https://` URL Tailscale's own UI shows, which lands on
+    /// whatever `tailscale serve` is proxying rather than on the gateway.
+    static func isTailscaleMagicDNS(_ host: String) -> Bool {
+        // A tailnet name is always `<machine>.<tailnet>.ts.net`, so require the two extra labels
+        // rather than matching a bare `ts.net`.
+        guard host.hasSuffix(".ts.net"), isValidHostname(host) else { return false }
+        return host.split(separator: ".").count >= 3
     }
 
     static func isValidPublicHostname(_ host: String) -> Bool {

@@ -81,6 +81,23 @@ def approx_tokens(messages: list[dict]) -> int:
     return _approx_tokens(messages)
 
 
+def approx_schema_tokens(schemas: object) -> int:
+    """Estimate what the tool definitions cost on the wire.
+
+    They ride along with every single request, so leaving them out of the budget
+    undercounts it by however many tools are enabled. With a couple of dozen
+    tools that is thousands of tokens — enough that compaction never fires and
+    the model rejects the request outright, which reads to the user as a
+    connection failure rather than a full context.
+    """
+    if not schemas:
+        return 0
+    try:
+        return len(json.dumps(schemas, default=str)) // 4
+    except (TypeError, ValueError):
+        return len(str(schemas)) // 4
+
+
 def find_compact_boundary(messages: list[dict]) -> int:
     """Index of the last boundary marker, or -1 if absent."""
     for i in range(len(messages) - 1, -1, -1):

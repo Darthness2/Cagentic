@@ -1,6 +1,7 @@
 import CryptoKit
 import Foundation
 import Observation
+import UIKit
 
 struct OllamaServiceFactory: Sendable {
     let make: @Sendable (OllamaEndpoint, String?) -> any OllamaServing
@@ -141,6 +142,7 @@ final class AppModel {
     private(set) var connectionState: ConnectionState
     private(set) var isRestoring: Bool
     private(set) var isGenerating = false
+    @ObservationIgnored private var backgroundTaskID = UIBackgroundTaskIdentifier.invalid
     private(set) var isImportingAttachments = false
     private(set) var isLoadingModelMetadata = false
     private(set) var pullingModelName: String?
@@ -157,6 +159,20 @@ final class AppModel {
     /// The approval a gateway turn is currently blocked on. The gateway parks the turn's thread
     /// until an answer arrives, so nothing else streams while this is set.
     private(set) var pendingPermission: GatewayPermissionRequest?
+
+    /// A question the model is waiting on. Separate from `pendingPermission`: it wants
+    /// information rather than approval, and both can be outstanding at once.
+    private(set) var pendingQuestion: GatewayQuestion?
+
+    /// What each mirrored chat is set to, as the gateway last reported it. Keyed by the local
+    /// mirror's id. Not persisted: the gateway owns this, so it is read back rather than
+    /// remembered — a value cached here could disagree with the computer that enforces it.
+    private(set) var gatewayChatConfigs: [UUID: GatewayChatConfig] = [:]
+
+    /// How full the model's context window was as of the last turn. Reported by the gateway
+    /// before it sends, so it reflects the real prompt including tool schemas rather than an
+    /// estimate made here. Running out of it used to surface as "the gateway reported an error".
+    private(set) var contextUsage: ContextUsage?
 
     @ObservationIgnored private let repository: any AppPersisting
     @ObservationIgnored private let tokenStore: any TokenStoring
@@ -451,9 +467,11 @@ final class AppModel {
     }
 
     var canUsePhotoAttachments: Bool {
-        // The gateway takes a plain message string; the app has no way to hand it a file, and its
-        // model list carries no capability metadata to gate on.
-        guard !isUsingGateway else { return false }
+        // A gateway's model list carries no capability metadata, but the decision is not this
+        // side's to make anyway: the gateway's mention pipeline inlines an image only for a vision
+        // model and describes it otherwise, so gating here would just refuse work the computer
+        // already knows how to do.
+        guard !isUsingGateway else { return true }
         guard let model = availableModels.first(where: { $0.name == activeModelIdentifier }) else {
             return true
         }
@@ -461,7 +479,7 @@ final class AppModel {
     }
 
     var canUseFileAttachments: Bool {
-        !isUsingGateway
+        true
     }
 
     var isNoticePresented: Bool {
@@ -1249,6 +1267,7 @@ final class AppModel {
         service = nil
         gatewayService = nil
         pendingPermission = nil
+        pendingQuestion = nil
         bearerToken = ""
         availableModels = []
         connectionState = .notConfigured
@@ -1303,6 +1322,9 @@ final class AppModel {
                 $0.endpoint != normalizedAddress
             } ?? false || kindChanged
             let cleanedToken: String
+            // What actually gets stored. It differs from what was typed only when a pairing code
+            // was entered, which is exchanged for the token it stands for.
+            var resolvedToken: String
             switch credentialUpdate {
             case .preserveExisting:
                 guard existingProfile != nil, !endpointChanged else {
@@ -1328,6 +1350,7 @@ final class AppModel {
             case .remove:
                 cleanedToken = ""
             }
+            resolvedToken = cleanedToken
             let probe: ConnectionProbe
             switch kind {
             case .ollama:
@@ -1352,7 +1375,11 @@ final class AppModel {
                     throw GatewayClientError.missingToken
                 }
                 let endpoint = try GatewayEndpoint(serverURL)
-                let nextService = gatewayFactory.make(endpoint, cleanedToken)
+                // The six digits `/token` prints are what a person has in front of them, so they
+                // work here as well as in the Find-on-Wi-Fi flow. They are traded for the real
+                // token, and that is what gets stored — a code lasts two minutes, a token lasts.
+                resolvedToken = try await Self.gatewayCredential(cleanedToken, at: endpoint)
+                let nextService = gatewayFactory.make(endpoint, resolvedToken)
                 // One authenticated round trip doubles as the reachability probe: a LAN device is
                 // refused the gateway's HTML page, so /api/bootstrap is the only cheap liveness
                 // check — and it returns the model list and chat list the app needs anyway.
@@ -1384,7 +1411,7 @@ final class AppModel {
             }
 
             let removesStoredCredential = existingProfile?.authentication == .bearerToken
-                && cleanedToken.isEmpty
+                && resolvedToken.isEmpty
             let rotatesProfileIdentity = existingProfile != nil
                 && (endpointChanged || removesStoredCredential)
             let targetProfileID = if rotatesProfileIdentity {
@@ -1403,18 +1430,18 @@ final class AppModel {
                     for: targetProfileID
                 )
                 credentialRollback = (targetProfileID, previousProfileCredential)
-                if cleanedToken.isEmpty {
+                if resolvedToken.isEmpty {
                     try await credentialStore.removeCredential(for: targetProfileID)
                 } else {
                     try await credentialStore.saveCredential(
-                        .bearerToken(cleanedToken),
+                        .bearerToken(resolvedToken),
                         for: targetProfileID
                     )
                 }
             }
             if targetProfileID == .legacyMigration, !preservesExistingCredential {
                 legacyTokenRollbackValue = try await tokenStore.loadToken()
-                try await tokenStore.saveToken(cleanedToken)
+                try await tokenStore.saveToken(resolvedToken)
             }
             try Task.checkCancellation()
             guard connectionAttemptID == attemptID, !connectionAttemptIsCancelled else {
@@ -1450,7 +1477,7 @@ final class AppModel {
             profile.endpoint = normalizedAddress
             profile.kind = kind
             profile.selectedModel = nextSelectedModel
-            profile.authentication = cleanedToken.isEmpty ? .none : .bearerToken
+            profile.authentication = resolvedToken.isEmpty ? .none : .bearerToken
             profile.updatedAt = now
             profile.lastConnectedAt = now
             profile.lastServerVersion = probe.version
@@ -1489,7 +1516,7 @@ final class AppModel {
             capabilitiesTask = nil
             service = probe.ollamaService
             gatewayService = probe.gatewayService
-            self.bearerToken = cleanedToken
+            self.bearerToken = resolvedToken
             availableModels = nextModels
             connectionState = .connected(version: probe.version)
             stableConnectionState = connectionState
@@ -1601,6 +1628,17 @@ final class AppModel {
             credentialUpdate: .preserveExisting,
             preserveExistingConnectionOnFailure: false
         )
+    }
+
+    /// Finishes onboarding without configuring a server.
+    ///
+    /// Someone who opens the app before setting up their computer should be able to look around
+    /// and come back to it. Nothing is lost by deferring: the empty state says what is missing and
+    /// opens the same connection screens onboarding would have.
+    func skipOnboarding() {
+        guard !settings.hasCompletedOnboarding else { return }
+        settings.hasCompletedOnboarding = true
+        scheduleSave(immediately: true)
     }
 
     func updateSettings(_ settings: AppSettings) {
@@ -1715,6 +1753,7 @@ final class AppModel {
         gatewayRawSegment = ""
         gatewaySettledThinking = ""
         isGenerating = true
+        beginBackgroundGeneration()
         hapticTrigger += 1
         lastStreamConversationID = conversationID
         streamRevision += 1
@@ -1727,6 +1766,7 @@ final class AppModel {
             generationTask = startGatewayGeneration(
                 service: gateway,
                 message: text,
+                attachments: attachments,
                 conversationID: conversationID,
                 messageID: assistantMessage.id
             )
@@ -1801,6 +1841,7 @@ final class AppModel {
             // see the client leave, which unwinds the turn even mid-tool.
             Task { try? await gatewayService.abort() }
             pendingPermission = nil
+        pendingQuestion = nil
         }
         generationTask?.cancel()
         flushActiveStream(
@@ -1817,7 +1858,7 @@ final class AppModel {
     func retryResponse(messageID: UUID, in conversationID: UUID) {
         guard !isGenerating,
               connectionState.isConnected,
-              service != nil,
+              hasLiveBackend,
               !activeModelIdentifier.isEmpty,
               selectedConversationID == conversationID,
               let index = conversationIndex(id: conversationID),
@@ -1832,6 +1873,18 @@ final class AppModel {
         }
 
         let text = conversations[index].messages[userIndex].content
+        if isUsingGateway {
+            // Regenerating is the same operation as editing, with the text left alone — which is
+            // how the web page does it too.
+            resendOnGateway(
+                userIndex: userIndex,
+                inConversationAt: index,
+                content: text,
+                undoTitle: "Response regenerated"
+            )
+            return
+        }
+        guard service != nil else { return }
         let attachments = conversations[index].messages[userIndex].attachments
         replaceUserTurn(
             at: userIndex,
@@ -1878,7 +1931,7 @@ final class AppModel {
         let text = rawText.trimmingCharacters(in: .whitespacesAndNewlines)
         guard !isGenerating,
               connectionState.isConnected,
-              service != nil,
+              hasLiveBackend,
               !activeModelIdentifier.isEmpty,
               selectedConversationID == conversationID,
               let index = conversationIndex(id: conversationID),
@@ -1889,6 +1942,21 @@ final class AppModel {
             return
         }
 
+        if isUsingGateway {
+            // The gateway owns the history, so an edit is something it does rather than something
+            // done to the mirror: it truncates from that turn and re-runs, and the reply streams
+            // back like any other.
+            guard !text.isEmpty else { return }
+            resendOnGateway(
+                userIndex: userIndex,
+                inConversationAt: index,
+                content: text,
+                undoTitle: "Message edited"
+            )
+            return
+        }
+
+        guard service != nil else { return }
         let attachments = replacementAttachments
             ?? conversations[index].messages[userIndex].attachments
         guard !text.isEmpty || !attachments.isEmpty else { return }
@@ -1950,6 +2018,64 @@ final class AppModel {
         queueAttachmentCleanupAfterPersistence(removedAttachments)
         conversations[conversationIndex].messages.removeSubrange(userIndex...)
         send(content, attachments: attachments, preservingTitle: preservedTitle)
+    }
+
+    /// Asks the gateway to rewrite one turn and run it again.
+    ///
+    /// The index sent is the position among *visible user messages*, not among all messages —
+    /// that is what `/api/chat/edit` counts, because the gateway's own history holds system and
+    /// tool messages the mirror never shows.
+    private func resendOnGateway(
+        userIndex: Int,
+        inConversationAt conversationIndex: Int,
+        content: String,
+        undoTitle: String
+    ) {
+        guard let gateway = gatewayService else { return }
+        let conversation = conversations[conversationIndex]
+        let position = conversation.messages[..<userIndex].count { $0.role == .user }
+
+        recordUndo(for: conversation, title: undoTitle)
+        let conversationID = conversation.id
+        // Trim the mirror to match what the gateway is about to do, then put the turn back with a
+        // reply waiting on it — the same shape `send` builds, so everything downstream is the
+        // ordinary streaming path.
+        conversations[conversationIndex].messages.removeSubrange(userIndex...)
+        let userMessage = ChatMessage(role: .user, content: content)
+        let assistantMessage = ChatMessage(
+            role: .assistant,
+            modelName: activeModelIdentifier,
+            content: "",
+            state: .streaming
+        )
+        conversations[conversationIndex].messages.append(userMessage)
+        conversations[conversationIndex].messages.append(assistantMessage)
+        conversations[conversationIndex].updatedAt = .now
+        refreshSummary(for: conversationID)
+
+        activeGeneration = ActiveGeneration(
+            conversationID: conversationID,
+            messageID: assistantMessage.id
+        )
+        streamIsGatewayBacked = true
+        gatewayRawSegment = ""
+        gatewaySettledThinking = ""
+        isGenerating = true
+        beginBackgroundGeneration()
+        hapticTrigger += 1
+        lastStreamConversationID = conversationID
+        streamRevision += 1
+        pendingStreamContent = ""
+        pendingStreamThinking = ""
+        lastStreamAutosaveAt = ContinuousClock().now
+        scheduleSave(immediately: true)
+
+        generationTask = startGatewayGeneration(
+            service: gateway,
+            stream: { gateway.editAndResend(index: position, message: content) },
+            conversationID: conversationID,
+            messageID: assistantMessage.id
+        )
     }
 
     private func createBranch(
@@ -2281,7 +2407,37 @@ final class AppModel {
         lastStreamAutosaveAt = nil
         activeGeneration = nil
         isGenerating = false
+        endBackgroundGeneration()
         hapticTrigger += 1
+    }
+
+    // MARK: - Background execution
+
+    /// Asks iOS to keep the app running while a reply is still arriving.
+    ///
+    /// Leaving the app used to abandon the turn: the stream is an ordinary URLSession task, and
+    /// iOS suspends those on the way out. On a gateway the computer carries on regardless — the
+    /// reply was being written, the phone just stopped listening — so the visible result was a
+    /// turn that failed for no reason and a reply that had to be found by reopening the chat.
+    ///
+    /// This buys the few minutes iOS grants, which covers switching apps to check something.
+    /// Beyond that the system reclaims it, and the gateway's own copy is still authoritative:
+    /// `scheduleGatewayChatSync()` on the way back in picks up whatever finished meanwhile.
+    private func beginBackgroundGeneration() {
+        guard backgroundTaskID == .invalid else { return }
+        backgroundTaskID = UIApplication.shared.beginBackgroundTask(
+            withName: "cagentic.generation"
+        ) { [weak self] in
+            // The system is out of patience. Ending it here rather than letting it expire is
+            // what keeps iOS from killing the process outright.
+            self?.endBackgroundGeneration()
+        }
+    }
+
+    private func endBackgroundGeneration() {
+        guard backgroundTaskID != .invalid else { return }
+        UIApplication.shared.endBackgroundTask(backgroundTaskID)
+        backgroundTaskID = .invalid
     }
 
     // MARK: - Gateway backend
@@ -2290,15 +2446,62 @@ final class AppModel {
     ///
     /// Unlike the Ollama path there is no request to assemble: the gateway owns the conversation, so
     /// a turn is just the user's text. Everything interesting arrives on the way back.
+    /// Streams a turn the gateway is already set up to run.
+    ///
+    /// The stream is passed in rather than built here because a turn can start two ways: a new
+    /// message, or a rewritten one being re-run. Everything after the first byte is identical.
     private func startGatewayGeneration(
         service: any GatewayServing,
-        message: String,
+        stream: @escaping @Sendable () -> GatewayEventStream,
         conversationID: UUID,
         messageID: UUID
     ) -> Task<Void, Never> {
         Task { @concurrent [weak self] in
             do {
-                for try await event in service.chat(message: message) {
+                for try await event in stream() {
+                    guard !Task.isCancelled else { throw CancellationError() }
+                    await self?.apply(
+                        event,
+                        conversationID: conversationID,
+                        messageID: messageID
+                    )
+                }
+                await self?.finishGatewayTurn(
+                    conversationID: conversationID,
+                    messageID: messageID
+                )
+            } catch is CancellationError {
+                await self?.markCancelled(conversationID: conversationID, messageID: messageID)
+            } catch {
+                await self?.failGatewayTurn(
+                    error,
+                    conversationID: conversationID,
+                    messageID: messageID
+                )
+            }
+        }
+    }
+
+    private func startGatewayGeneration(
+        service: any GatewayServing,
+        message: String,
+        attachments: [AttachmentMetadata],
+        conversationID: UUID,
+        messageID: UUID
+    ) -> Task<Void, Never> {
+        let store = attachmentStore
+        return Task { @concurrent [weak self] in
+            do {
+                // Uploading inside the turn's own task means a failure lands on the assistant
+                // message like any other, instead of needing a second failure path in `send`.
+                let outgoing = try await Self.gatewayMessage(
+                    message,
+                    attachments: attachments,
+                    store: store,
+                    service: service
+                )
+                try Task.checkCancellation()
+                for try await event in service.chat(message: outgoing) {
                     guard !Task.isCancelled else {
                         throw CancellationError()
                     }
@@ -2325,6 +2528,50 @@ final class AppModel {
                 )
             }
         }
+    }
+
+    /// The message the gateway is actually sent: the user's text plus a mention per attachment.
+    ///
+    /// The gateway has no way to receive a file alongside a turn, so each one is uploaded first and
+    /// referenced by the workspace-relative path it comes back with. That hands the work to the
+    /// engine's existing `@path` pipeline — the same one the terminal and the web page use — which
+    /// is what extracts text from a PDF and inlines an image for a vision model. Doing it any other
+    /// way would mean a second attachment implementation to keep in step with the first.
+    private static func gatewayMessage(
+        _ text: String,
+        attachments: [AttachmentMetadata],
+        store: AttachmentStore,
+        service: any GatewayServing
+    ) async throws -> String {
+        guard !attachments.isEmpty else { return text }
+        var mentions: [String] = []
+        mentions.reserveCapacity(attachments.count)
+        for attachment in attachments {
+            try Task.checkCancellation()
+            let payload = try await store.payloadData(for: attachment)
+            let upload = try await service.uploadAttachment(
+                name: Self.uploadName(for: attachment),
+                data: payload
+            )
+            mentions.append(upload.mention)
+        }
+        let joined = mentions.joined(separator: " ")
+        // On their own line, so a mention is never glued to the end of a sentence.
+        return text.isEmpty ? joined : text + "\n\n" + joined
+    }
+
+    /// The filename an attachment is uploaded under.
+    ///
+    /// It has to describe the *payload*, not the file the user picked. The store normalises
+    /// everything to one of two formats — a photo is re-encoded as JPEG, a PDF is extracted to
+    /// UTF-8 text — and the gateway classifies an upload purely by its suffix. So a photo from the
+    /// library, which often arrives named just "Photo", would be read as text; and the extracted
+    /// text of "report.pdf" sent under that name would have the engine try to parse it as a PDF.
+    static func uploadName(for attachment: AttachmentMetadata) -> String {
+        let stem = (attachment.displayName as NSString)
+            .deletingPathExtension
+            .trimmingCharacters(in: .whitespacesAndNewlines)
+        return (stem.isEmpty ? "attachment" : stem) + "." + attachment.payloadFormat.fileExtension
     }
 
     private func apply(
@@ -2372,7 +2619,13 @@ final class AppModel {
             // for a tool is narration about what it is doing, not the answer.
             settleGatewaySegment(conversationID: conversationID, messageID: messageID)
             appendActivity(
-                .tool(id: call.id, name: call.name, summary: call.summary),
+                .tool(
+                    id: call.id,
+                    name: call.name,
+                    summary: call.summary,
+                    label: call.label,
+                    labelPlural: call.labelPlural
+                ),
                 conversationID: conversationID,
                 messageID: messageID
             )
@@ -2395,6 +2648,18 @@ final class AppModel {
                 conversationID: conversationID,
                 messageID: messageID
             )
+        case .question(let question):
+            // Same reasoning as a permission request: the gateway's turn thread is parked, so
+            // flush whatever has streamed before putting the question up.
+            flushGatewaySegment(
+                conversationID: conversationID,
+                messageID: messageID,
+                schedulesAutosave: true
+            )
+            pendingQuestion = question
+            hapticTrigger += 1
+        case .contextUsage(let used, let limit):
+            contextUsage = ContextUsage(used: used, limit: limit)
         case .compacted(let before, let after):
             guard before > 0, after > 0, before > after else { return }
             appendGatewayNotice(
@@ -2605,6 +2870,7 @@ final class AppModel {
         conversations[location.conversation].updatedAt = .now
         refreshSummary(for: conversationID)
         pendingPermission = nil
+        pendingQuestion = nil
         completeGeneration(conversationID: conversationID, messageID: messageID)
         lastStreamConversationID = conversationID
         streamRevision += 1
@@ -2622,6 +2888,7 @@ final class AppModel {
             return
         }
         pendingPermission = nil
+        pendingQuestion = nil
         // A refusal means the turn never started: the gateway was busy with another client or with
         // its own background work. Take the message back out of the transcript and hand the text
         // back to the composer instead of leaving it looking sent.
@@ -2671,6 +2938,53 @@ final class AppModel {
         scheduleSave(immediately: true)
     }
 
+    /// Trades a pairing code for a gateway token and saves the result as a server.
+    ///
+    /// This is the whole setup on the phone's side: the address comes from the
+    /// Bonjour advertisement rather than being typed, and the token never is —
+    /// it arrives over the wire and goes straight to Keychain by the same path a
+    /// hand-entered one would.
+    func pairGateway(
+        with discovered: DiscoveredGateway,
+        code: String,
+        discovery: GatewayDiscovery
+    ) async -> Result<Void, Error> {
+        do {
+            let endpoint = try await discovery.resolve(discovered)
+            let pairing = try await pairWithGateway(endpoint: endpoint, code: code)
+            let name = pairing.name.isEmpty ? discovered.name : pairing.name
+            return await addServerConnection(
+                serverURL: endpoint.displayAddress,
+                serverName: name,
+                kind: .gateway,
+                bearerToken: pairing.token
+            )
+        } catch {
+            return .failure(error)
+        }
+    }
+
+    /// Resolves what was typed into the token field into a usable gateway token.
+    ///
+    /// Six digits is the pairing code `/token` shows, not a token: exchanging it here means the
+    /// address route and the Find-on-Wi-Fi route accept the same thing, and the credential that
+    /// lands in Keychain outlives the two-minute window either way.
+    private static func gatewayCredential(
+        _ supplied: String,
+        at endpoint: GatewayEndpoint
+    ) async throws -> String {
+        guard supplied.count == 6, supplied.allSatisfy(\.isNumber) else {
+            return supplied
+        }
+        do {
+            return try await pairWithGateway(endpoint: endpoint, code: supplied).token
+        } catch GatewayClientError.pairingUnavailable {
+            // No window is open, so this was probably never a code. A gateway whose own token
+            // happens to be six digits still deserves to work.
+            return supplied
+        }
+    }
+
     // MARK: - Gateway approvals
 
     /// Answers the approval a gateway turn is blocked on.
@@ -2680,6 +2994,7 @@ final class AppModel {
     func answerPendingPermission(_ answer: GatewayPermissionAnswer) {
         guard let request = pendingPermission, let gatewayService else { return }
         pendingPermission = nil
+        pendingQuestion = nil
         hapticTrigger += 1
         // The rule string is only ever the one this prompt offered; the gateway drops any other.
         let rule = answer == .allowRule ? request.rule : nil
@@ -2690,6 +3005,23 @@ final class AppModel {
                     answer: answer,
                     rule: rule
                 )
+            } catch {
+                await self?.reportPermissionDeliveryFailure(error)
+            }
+        }
+    }
+
+    func answerPendingQuestion(_ answer: String) {
+        guard let question = pendingQuestion, let gatewayService else { return }
+        let trimmed = answer.trimmingCharacters(in: .whitespacesAndNewlines)
+        guard !trimmed.isEmpty else { return }
+        // Cleared optimistically: the turn is parked on this, and leaving the card up while the
+        // answer is in flight invites a second one.
+        pendingQuestion = nil
+        hapticTrigger += 1
+        Task { [weak self] in
+            do {
+                try await gatewayService.answerQuestion(id: question.id, answer: trimmed)
             } catch {
                 await self?.reportPermissionDeliveryFailure(error)
             }
@@ -2791,6 +3123,12 @@ final class AppModel {
             .sorted { $0.updatedAt > $1.updatedAt }
         conversationSummaryRevision += 1
 
+        if let current {
+            gatewayChatConfigs[
+                Self.mirroredConversationID(profileID: profileID, remoteID: current.id)
+            ] = current.config
+        }
+
         if selectsCurrent, let current {
             selectedConversationID = Self.mirroredConversationID(
                 profileID: profileID,
@@ -2818,7 +3156,9 @@ final class AppModel {
                     var item = AssistantActivity.tool(
                         id: "",
                         name: detail.name,
-                        summary: detail.summary
+                        summary: detail.summary,
+                        label: detail.label,
+                        labelPlural: detail.labelPlural
                     )
                     // `ok` is tri-state: nil means the gateway never found a result, which happens
                     // when a turn was aborted between the call and its outcome.
@@ -2830,10 +3170,24 @@ final class AppModel {
                     item.resultLine = detail.firstLine
                     return item
                 }
+                let text = GatewayTextSanitizer.strippingHUDFences(message.content)
+                    .trimmingCharacters(in: .whitespacesAndNewlines)
+                // Live, a round's narration settles into `activity` the moment a tool call
+                // arrives, so it sits *above* the tool rows. Rehydrating left it in `content`,
+                // which renders below them — so reopening a chat moved every tool row to the top
+                // of the message it belonged to. Same shape both ways now.
+                if !activity.isEmpty, !text.isEmpty {
+                    return ChatMessage(
+                        id: id,
+                        role: .assistant,
+                        content: "",
+                        activity: [.narration(text)] + activity
+                    )
+                }
                 return ChatMessage(
                     id: id,
                     role: .assistant,
-                    content: GatewayTextSanitizer.strippingHUDFences(message.content),
+                    content: text,
                     activity: activity
                 )
             }
@@ -2930,6 +3284,93 @@ final class AppModel {
                 await self?.reportGatewayChatFailure(error)
             }
             self?.gatewayChatSyncTask = nil
+        }
+    }
+
+    var chatProfiles: [ChatProfile] {
+        settings.chatProfiles.profiles
+    }
+
+    var activeChatProfile: ChatProfile? {
+        settings.chatProfiles.activeProfile
+    }
+
+    /// The approval mode the selected chat runs under, or the safe default.
+    var activeChatMode: GatewayChatMode {
+        guard isUsingGateway, let selectedConversationID else { return .restricted }
+        return gatewayChatConfigs[selectedConversationID]?.mode ?? .restricted
+    }
+
+    /// The profile pinned to the selected chat, if the gateway reports one.
+    var activeChatProfileName: String {
+        guard isUsingGateway, let selectedConversationID else { return "" }
+        return gatewayChatConfigs[selectedConversationID]?.profileName ?? ""
+    }
+
+    func setChatMode(_ mode: GatewayChatMode) {
+        updateChatConfig(mode: mode, profile: nil)
+    }
+
+    /// Sends a profile to the gateway for the selected chat, and selects its preferred model when
+    /// it names one that is installed. Model selection goes through `selectModel` rather than
+    /// `updateSettings`, because only that path tells the gateway to switch.
+    func applyChatProfile(_ profile: ChatProfile) {
+        // Upsert rather than select: `select` is a no-op for an id the catalog does not hold, so
+        // applying a profile that has not been saved yet would quietly do nothing.
+        settings.chatProfiles.upsert(profile, makeActive: true)
+        // The effective values stay where the send path already reads them, so a profile is a
+        // preset you apply rather than a second source of truth to keep in step. On a direct
+        // Ollama connection this is the whole mechanism; on a gateway the computer is told below.
+        settings.systemPrompt = profile.systemPrompt
+        settings.generation = profile.generation
+        scheduleSave()
+        if let preferred = profile.preferredModel,
+           !preferred.isEmpty,
+           preferred != activeModelIdentifier,
+           availableModels.contains(where: { $0.name == preferred })
+        {
+            selectModel(preferred)
+        }
+        guard isUsingGateway else { return }
+        updateChatConfig(
+            mode: nil,
+            profile: GatewayChatProfileUpdate(
+                name: profile.name,
+                systemPrompt: profile.systemPrompt,
+                temperature: profile.generation.temperature,
+                effort: profile.effort?.rawValue
+            )
+        )
+    }
+
+    private func updateChatConfig(mode: GatewayChatMode?, profile: GatewayChatProfileUpdate?) {
+        guard let gatewayService,
+              let conversationID = selectedConversationID,
+              let remoteID = conversation(id: conversationID)?.remoteID
+        else {
+            return
+        }
+        // Optimistic, so the picker reflects the choice immediately; the gateway's own answer
+        // replaces it below and wins if it normalised anything.
+        if let mode {
+            var config = gatewayChatConfigs[conversationID] ?? GatewayChatConfig()
+            config.mode = mode
+            gatewayChatConfigs[conversationID] = config
+        }
+        hapticTrigger += 1
+        Task { [weak self] in
+            do {
+                let applied = try await gatewayService.setChatConfig(
+                    id: remoteID,
+                    mode: mode,
+                    profile: profile
+                )
+                self?.gatewayChatConfigs[conversationID] = applied
+            } catch {
+                await self?.reportGatewayChatFailure(error)
+                // Put the picker back to whatever the computer actually has.
+                self?.scheduleGatewayChatSync()
+            }
         }
     }
 
@@ -3227,6 +3668,10 @@ final class AppModel {
 
     private func apply(snapshot: AppSnapshot) {
         settings = snapshot.settings
+        // Nobody should meet this feature as an empty list and a plus button: whatever system
+        // prompt and dials they already had become their first profile. The starter has a fixed
+        // id, so a second launch cannot add a second one.
+        settings.chatProfiles.seedIfEmpty(from: settings)
         conversations = snapshot.conversations
         conversationSummaries = snapshot.conversations
             .map(ConversationSummary.init(conversation:))

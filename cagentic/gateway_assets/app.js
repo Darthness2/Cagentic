@@ -129,7 +129,8 @@ function _codeBlockHTML(lang, code){
   // markup, no matter what the highlighter did to it.
   return '<div class="codeblock" data-raw="'+esc(clean)+'">'+
     '<div class="cb-head"><span class="cb-lang">'+label+'</span>'+
-    '<button class="cb-copy" title="Copy code">Copy</button></div>'+
+    '<button class="cb-copy" title="Copy code">'
+      +'<svg class="ico sm" aria-hidden="true"><use href="#i-copy"/></svg>Copy</button></div>'+
     '<pre><code>'+highlight(escText(clean),lang)+'</code></pre></div>';
 }
 function _tableHTML(rows, aligns){
@@ -314,8 +315,26 @@ function setEmptyMode(empty){
   if(!empty&&list) list.innerHTML='';
 }
 function clearLog(){ log.innerHTML=''; setEmptyMode(false); }
+// How full the model's context window is. Drawn from the `context` event rather than guessed:
+// running out of it used to surface as "the gateway reported an error", which is the least
+// legible way a window can fill up.
+function showContextMeter(used, limit){
+  const el=$('#tokenStats');
+  if(!el) return;
+  if(!limit||!used){ el.classList.add('hidden'); return; }
+  const share=Math.max(0,Math.min(1,used/limit));
+  const pct=Math.round(share*100);
+  el.innerHTML='<span class="ctx-bar"><span class="ctx-fill" style="width:'+(share*100).toFixed(1)+'%"></span></span>'
+    +'<span class="ctx-text">'+fmtTokens(used)+'/'+fmtTokens(limit)+'</span>';
+  // Only coloured once it matters; a permanently amber meter stops meaning anything.
+  el.classList.toggle('ctx-warn', share>=0.75 && share<0.9);
+  el.classList.toggle('ctx-hot', share>=0.9);
+  el.title='Context: '+pct+'% of '+fmtTokens(limit)+' tokens used';
+  el.classList.remove('hidden');
+}
+
 function avatarHTML(){
-  return '<div class="j-avatar" aria-hidden="true"><svg class="ico"><use href="#i-spark"/></svg></div>';
+  return '<div class="j-avatar" aria-hidden="true"><svg class="ico"><use href="#i-mark"/></svg></div>';
 }
 /* setOrbLabel is a no-op defined near the top of the file; compactOrb went
    with the orb it collapsed. Both are kept callable so the call sites that
@@ -1787,6 +1806,16 @@ function syncToolActivity(activity){
   const label=activity.querySelector('.tool-summary');
   if(label) label.textContent=(pending?'Using ':'Used ')+count+' tool'+(count===1?'':'s')+(pending?'\u2026':'');
 }
+// The gateway sends both a singular phrase and a plural template with every tool
+// event, so a collapsed run reads "Listed 4 directories" rather than "list_dir x4".
+// Falling back to the raw name keeps an older gateway working.
+function toolLabel(t, count){
+  const one=t.label||t.name||'';
+  if(!count||count<=1) return one;
+  const many=t.label_plural;
+  if(many) return many.replace('{n}', count);
+  return one+' \u00d7'+count;
+}
 function addToolRow(t, done, hostRow){
   // Collapse same-name tool calls, skipping over non-tool-row elements
   // (info notes, assistant text, etc.) so that calls across iterations
@@ -1801,7 +1830,7 @@ function addToolRow(t, done, hostRow){
     let cnt=prev.dataset.cnt ? parseInt(prev.dataset.cnt)+1 : 2;
     prev.dataset.cnt=cnt;
     const nameEl=prev.querySelector('.tname');
-    if(nameEl) nameEl.textContent=t.name+' \u00d7'+cnt;
+    if(nameEl) nameEl.textContent=toolLabel(t,cnt);
     if(t.summary){
       const sumEl=prev.querySelector('.tsum');
       if(sumEl) sumEl.textContent=t.summary;
@@ -1819,7 +1848,7 @@ function addToolRow(t, done, hostRow){
   const icon='<svg class="ico sm" aria-hidden="true"><use href="#'+(isCmd?'i-chevron-right':'i-check')+'"/></svg>';
   const iconColor=isCmd?'var(--warn)':'var(--accent)';
   row.innerHTML='<span class="tool-icon" style="color:'+iconColor+'">'+icon+'</span>'+
-    '<span class="tname">'+esc(t.name||'')+'</span>'+
+    '<span class="tname">'+esc(toolLabel(t,1))+'</span>'+
     (t.summary?'<span class="tsum">'+esc(t.summary)+'</span>':'')+
     '<span class="tres">'+(done?esc(t.first_line||(t.ok===false?'Failed':'Done')):'Running&#8230;')+'</span>';
   if(done) finishToolRow(row,t);
@@ -1892,6 +1921,51 @@ function showPermission(d){
   box.appendChild(btns); getThread().appendChild(box); scrollDown(true);
 }
 
+// The model asking *us* something. Distinct from an approval: it wants information, not
+// permission, and the turn is parked on the answer exactly the same way. Before this the tool
+// was terminal-only, so on the web the model was told to ask in its reply instead — which turned
+// a question with defined options into prose somebody had to answer in prose.
+function showQuestion(d){
+  const box=document.createElement('div'); box.className='perm-box ask-box';
+  box.setAttribute('role','group'); box.setAttribute('aria-label','Question');
+  box.innerHTML='<div class="pq">'+esc(d.question||'')+'</div>';
+
+  const send=(text)=>{
+    box.innerHTML='<div class="pq">'+esc(d.question||'')+'</div>'
+      +'<div class="perm-decided">'+esc(text)+'</div>';
+    fetch('/api/answer',{method:'POST',headers:{'Content-Type':'application/json'},
+      body:JSON.stringify({id:d.id,answer:text})});
+  };
+
+  const options=Array.isArray(d.options)?d.options.filter(Boolean):[];
+  if(options.length){
+    const btns=document.createElement('div'); btns.className='perm-btns';
+    options.forEach(opt=>{
+      const b=document.createElement('button');
+      b.className='yes'; b.textContent=opt;
+      b.onclick=()=>send(opt); btns.appendChild(b);
+    });
+    box.appendChild(btns);
+  }
+
+  // Always offer free text, even with options: a list the model wrote may not contain the
+  // answer, and being unable to say so would park the turn for five minutes.
+  const row=document.createElement('div'); row.className='ask-row';
+  const field=document.createElement('input');
+  field.type='text'; field.className='ask-input';
+  field.placeholder=options.length?'Or answer in your own words…':'Your answer…';
+  field.setAttribute('aria-label','Your answer');
+  const go=document.createElement('button');
+  go.className='yes'; go.textContent='Answer';
+  const submit=()=>{ const v=field.value.trim(); if(v) send(v); };
+  go.onclick=submit;
+  field.addEventListener('keydown',e=>{ if(e.key==='Enter'){ e.preventDefault(); submit(); } });
+  row.appendChild(field); row.appendChild(go); box.appendChild(row);
+
+  getThread().appendChild(box); scrollDown(true);
+  field.focus();
+}
+
 // ---- SSE STREAM READER (shared) -------------------------------------------
 async function readSSE(response, onEvent){
   if(!response||!response.body) throw new Error('Response stream is unavailable.');
@@ -1920,8 +1994,9 @@ async function readSSE(response, onEvent){
 // ---- LIVE TURN --------------------------------------------------------------
 let live={row:null,body:null,raw:'',toolRow:null,thinking:null,thinkBox:null,turnStart:null,tokensIn:0,tokensOut:0};
 let _liveRenderFrame=0;
+let _liveLastPaint=0;
 function resetLive(){
-  if(_liveRenderFrame) cancelAnimationFrame(_liveRenderFrame);
+  if(_liveRenderFrame) clearTimeout(_liveRenderFrame);
   _liveRenderFrame=0;
   live={row:null,body:null,raw:'',toolRow:null,thinking:null,thinkBox:null,turnStart:null,tokensIn:0,tokensOut:0};
 }
@@ -1943,24 +2018,71 @@ function settleLiveSegment(){
   if(live.body){ flushLiveBody(); live.body.classList.remove('cursor'); live.body.dataset.settled='true'; }
   live.body=null; live.raw='';
 }
-function paintLiveBody(){
-  _liveRenderFrame=0;
+// md() parses a whole document, so running it on a half-arrived reply makes the
+// block structure flicker frame to frame: an unterminated ``` fence renders as
+// wrapped prose until its closing fence lands and then collapses into a code
+// block, a lone "-" or "#" is a paragraph for a frame before the rest of the
+// line turns it into a list item or heading, and a table header is a paragraph
+// until its |---| delimiter arrives. Each of those changes the answer's height
+// while the viewport is pinned to the bottom, which is what made the page bob
+// as it streamed. Complete the document before rendering it.
+function completeStreamingMarkdown(src,final){
+  let s=src||'';
+  // An odd number of fences means one is still open. Close it so the code
+  // renders as code from its first line rather than reflowing when it ends.
+  if(((s.match(/```/g)||[]).length)%2){ s+=(s.endsWith('\n')?'':'\n')+'```'; }
+  // Hold back a trailing line that is a block marker with nothing after it yet,
+  // or a table row whose delimiter has not arrived. One line of latency buys a
+  // stable layout; the next delta is milliseconds away.
+  if(final) return s;
+  const lines=s.split('\n');
+  // The line still being typed: hold it back while it is nothing but the start
+  // of a block marker. "1" is a paragraph, "1." is a paragraph, "1. go" is a
+  // list item — rendering the first two and then swallowing them is itself a
+  // height change, so nothing is shown until the line means something. Only a
+  // line with no newline after it is still being typed; a terminated one is
+  // final content and must render.
+  if(!s.endsWith('\n')&&lines.length){
+    const last=lines[lines.length-1];
+    if(last.trim()&&/^\s*(?:[-*+>|]+|#{1,6}|\d+[.)]?)\s*$/.test(last)) lines.pop();
+  }
+  // A table is only a table once its |---| delimiter lands; until then every
+  // row it has so far renders as a paragraph. A trailing empty element is the
+  // line that has not started yet, not a blank line, so it cannot end the run.
+  let end=lines.length;
+  while(end>0&&lines[end-1]==='') end--;
+  let cut=end;
+  while(cut>0&&/^\s*\|/.test(lines[cut-1])) cut--;
+  if(cut<end&&!lines.slice(cut,end).some(l=>l.includes('-')&&/^\s*\|?[\s:|-]*-[\s:|-]*\|?\s*$/.test(l))){
+    lines.length=cut;
+  }
+  return lines.join('\n');
+}
+function paintLiveBody(final){
+  _liveRenderFrame=0; _liveLastPaint=Date.now();
   if(!live.body||!live.body.isConnected) return;
   syncThinking(live.raw);
-  live.body.innerHTML=md(stripThink(stripHud(live.raw)));
+  live.body.innerHTML=md(completeStreamingMarkdown(stripThink(stripHud(live.raw)),final===true));
   live.body.classList.add('cursor'); scrollDown();
 }
+// Re-parsing and re-inserting the whole answer at 60fps is both wasteful and
+// uneven on a long reply — a frame that overruns its budget lands the next one
+// late, so the text advances in visible lurches. Roughly 18 repaints a second
+// reads as continuous and leaves the main thread time to lay them out.
+const LIVE_PAINT_MS=55;
 function scheduleLiveBody(){
-  if(!_liveRenderFrame) _liveRenderFrame=requestAnimationFrame(paintLiveBody);
+  if(_liveRenderFrame) return;
+  const wait=Math.max(0,LIVE_PAINT_MS-(Date.now()-_liveLastPaint));
+  _liveRenderFrame=setTimeout(()=>paintLiveBody(false),wait);
 }
 function flushLiveBody(){
-  if(_liveRenderFrame){ cancelAnimationFrame(_liveRenderFrame); _liveRenderFrame=0; }
-  paintLiveBody();
+  if(_liveRenderFrame){ clearTimeout(_liveRenderFrame); _liveRenderFrame=0; }
+  paintLiveBody(true);
 }
 function settleLiveBody(discard=false){
   if(!live.body) return;
   if(discard){
-    if(_liveRenderFrame) cancelAnimationFrame(_liveRenderFrame);
+    if(_liveRenderFrame) clearTimeout(_liveRenderFrame);
     _liveRenderFrame=0;
     live.body.closest('.msg-row.assistant')?.remove();
   } else {
@@ -1986,8 +2108,9 @@ function showThinking(){
 function clearThinking(){ if(live.thinking){live.thinking.remove();live.thinking=null;} if(_thinkTimer){clearInterval(_thinkTimer);_thinkTimer=null;} }
 function handle(ev){
   const k=ev.kind, d=ev.data||{};
-  const internalTokenNote=k==='info'&&/^sending ~[\d,]+ tokens to /.test(d.text||'');
-  if(k!=='user'&&!internalTokenNote) clearThinking();
+  // `context` is a measurement, not conversation: it arrives before the model has said
+  // anything and must not dismiss the thinking indicator.
+  if(k!=='user'&&k!=='context') clearThinking();
   if(k==='delta'){
     if(!live.body) ensureLiveBody();
     live.row.classList.remove('tool-only');
@@ -2020,12 +2143,14 @@ function handle(ev){
       live.toolRow=null;
     }
   } else if(k==='permission'){ settleLiveSegment(); showPermission(d);
+  } else if(k==='question'){ settleLiveSegment(); showQuestion(d);
+  } else if(k==='context'){
+    // Used to arrive as an `info` message reading "sending ~N tokens to <model>", which this
+    // had to recognise by its wording to keep out of the transcript. It is a number now.
+    live.tokensIn=+d.used||0;
+    showContextMeter(+d.used||0, +d.limit||0);
   } else if(k==='info'){
-    // Token/model routing is useful live telemetry, not conversation content.
-    // Keep it in the footer counter without inserting a transcript message.
-    const m=d.text&&d.text.match(/~(\d[\d,]*)\s*tokens/);
-    if(m) live.tokensIn=parseInt(m[1].replace(/,/g,''),10);
-    if(!internalTokenNote){ addNote(d.text,false); settleLiveBody(false); }
+    addNote(d.text,false); settleLiveBody(false);
   } else if(k==='warn'){ settleLiveBody(true); addNote(d.text,false);
   } else if(k==='error'){ settleLiveBody(false); addNote(d.text||'Something went wrong. Try again.',true);
   } else if(k==='widget'){
@@ -2796,6 +2921,7 @@ function openSettings(){
   $('#setStream').checked=!!s.stream; $('#setYolo').checked=!!s.yolo;
   $('#setGwPort').value=s.gateway_port||8700;
   $('#setGwAuto').checked=!!(s.gateway_auto_start!==false);
+  $('#setPanels').checked=!!(s.panels!==false);
   $('#setProactive').checked=!!(s.proactive_enabled!==false);
   $('#setDesktopNotifications').checked=!!(s.desktop_notifications!==false);
   $('#setSysPrompt').value=s.system_prompt||'';
@@ -2816,6 +2942,7 @@ async function saveSettings(){
       stream:$('#setStream').checked, yolo:$('#setYolo').checked,
       gateway_port:parseInt($('#setGwPort').value)||8700,
       gateway_auto_start:$('#setGwAuto').checked,
+      panels:$('#setPanels').checked,
       proactive_enabled:$('#setProactive').checked,
       desktop_notifications:$('#setDesktopNotifications').checked,
       system_prompt:$('#setSysPrompt').value });
@@ -3076,9 +3203,15 @@ $('#chatSearchClear').onclick=clearChatSearch;
 const THEMES=['auto','dark','light'];
 const THEME_MEDIA=window.matchMedia('(prefers-color-scheme: dark)');
 function syncThemeChrome(t){
-  const meta=document.querySelector('meta[name="theme-color"]'); if(!meta) return;
   const dark=t==='dark'||(t==='auto'&&THEME_MEDIA.matches);
-  meta.content=dark?'#0a0c10':'#f7f9fb';
+  const meta=document.querySelector('meta[name="theme-color"]');
+  if(meta) meta.content=dark?'#0a0c10':'#f7f9fb';
+  // The favicon linked in the markup follows the OS, which is the right default before this
+  // runs — but the page's theme is its own setting, so once it is known the tab follows that
+  // instead. Point at the explicit file rather than redrawing the mark here: one generator owns
+  // the artwork, and a second copy in JS would be free to drift from it.
+  const icon=document.querySelector('link[rel="icon"]');
+  if(icon) icon.href=dark?'/favicon-dark.svg':'/favicon-light.svg';
 }
 function applyTheme(t){
   document.documentElement.setAttribute('data-theme',t);

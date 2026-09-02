@@ -366,9 +366,18 @@ struct AppModelGatewayTests {
         try await connectGateway(model)
 
         #expect(!model.conversationsAreLocallyOwned)
-        // A gateway turn is a plain message string, so there is nowhere to put an attachment.
-        #expect(!model.canUseFileAttachments)
-        #expect(!model.canUsePhotoAttachments)
+    }
+
+    @Test("Attachments are offered on a gateway connection")
+    func attachmentsAreOfferedOnGateway() async throws {
+        let service = MockGatewayService(bootstrap: .stub())
+        let model = makeAppModel(gateway: service)
+        try await connectGateway(model)
+
+        // A gateway turn is a plain message string, but the gateway can be handed the file
+        // separately and pointed at it — so the composer offers attachments here too.
+        #expect(model.canUseFileAttachments)
+        #expect(model.canUsePhotoAttachments)
     }
 
     @Test("Selecting a mirrored chat moves the gateway's own cursor")
@@ -465,16 +474,37 @@ struct AppModelGatewayTests {
         let messages = try #require(model.selectedConversation?.messages)
         #expect(messages.count == 2)
         let assistant = try #require(messages.last)
-        #expect(assistant.activity.map(\.toolName) == ["grep", "read_file"])
-        #expect(assistant.activity.map(\.toolState) == [.succeeded, .running])
+        // Narration first, then the tools it preceded — the same shape the live stream builds.
+        // Leaving the text in `content` rendered it *below* the tool rows, so reopening a chat
+        // moved every tool row to the top of the message it belonged to.
+        #expect(assistant.activity.map(\.kind) == [.narration, .tool, .tool])
+        #expect(assistant.activity.first?.text == "Found two issues.")
+        #expect(assistant.activity.dropFirst().map(\.toolName) == ["grep", "read_file"])
+        #expect(assistant.activity.dropFirst().map(\.toolState) == [.succeeded, .running])
         // Widget payloads are not rendered, so they must not land in the transcript as raw JSON.
-        #expect(assistant.content == "Found two issues.")
+        #expect(assistant.content.isEmpty)
+        #expect(!assistant.activity.contains { $0.text.contains("{") })
     }
 
     // MARK: - Helpers
 
-    private func makeAppModel(gateway: MockGatewayService) -> AppModel {
-        AppModel(
+    private func makeAppModel(
+        gateway: MockGatewayService,
+        attachmentStore: AttachmentStore? = nil
+    ) -> AppModel {
+        if let attachmentStore {
+            return AppModel(
+                repository: InMemoryAppRepository(),
+                tokenStore: InMemoryTokenStore(),
+                attachmentStore: attachmentStore,
+                serviceFactory: OllamaServiceFactory { _, _ in
+                    MockUnusedOllamaService()
+                },
+                gatewayFactory: GatewayServiceFactory { _, _ in gateway },
+                isRestoring: false
+            )
+        }
+        return AppModel(
             repository: InMemoryAppRepository(),
             tokenStore: InMemoryTokenStore(),
             serviceFactory: OllamaServiceFactory { _, _ in
@@ -518,11 +548,16 @@ struct AppModelGatewayTests {
 }
 
 // MARK: - Test doubles
+//
+// Internal rather than file-private: `GatewayAttachmentTests` drives the same fake gateway, and a
+// second copy of it would be free to drift from the real client's contract.
 
 extension GatewayBootstrap {
     static func stub(
         chats: [GatewayChatSummary]? = nil,
-        current: GatewayChatDetail? = nil
+        current: GatewayChatDetail? = nil,
+        models: [String]? = nil,
+        activeModel: String? = nil
     ) -> GatewayBootstrap {
         let resolvedCurrent = current
             ?? GatewayChatDetail(id: "live0000", title: "New chat", model: "qwen2.5:7b", messages: [])
@@ -537,21 +572,21 @@ extension GatewayBootstrap {
             ]
         return GatewayBootstrap(
             version: "0.9.3",
-            activeModel: "qwen2.5:7b",
-            models: ["qwen2.5:7b"],
+            activeModel: activeModel ?? "qwen2.5:7b",
+            models: models ?? ["qwen2.5:7b"],
             chats: resolvedChats,
             current: resolvedCurrent
         )
     }
 }
 
-private nonisolated struct PermissionAnswerRecord: Sendable, Equatable {
+nonisolated struct PermissionAnswerRecord: Sendable, Equatable {
     let id: String
     let answer: GatewayPermissionAnswer
     let rule: String?
 }
 
-private actor MockGatewayService: GatewayServing {
+actor MockGatewayService: GatewayServing {
     private let bootstrapValue: GatewayBootstrap
     private let controlled: ControlledGatewayStream?
     private var script: [GatewayEvent] = []
@@ -562,6 +597,26 @@ private actor MockGatewayService: GatewayServing {
     private(set) var permissionAnswers: [PermissionAnswerRecord] = []
     private(set) var abortCount = 0
     private(set) var loadedChatIDs: [String] = []
+    private(set) var uploads: [UploadRecord] = []
+    private(set) var chatConfigCalls: [ChatConfigCall] = []
+    private(set) var questionAnswers: [QuestionAnswerRecord] = []
+    private(set) var edits: [EditRecord] = []
+    private var storedChatConfig = GatewayChatConfig()
+    private var chatConfigFailure: (any Error)?
+
+    func setChatConfigFailure(_ error: any Error) {
+        chatConfigFailure = error
+    }
+    private var uploadFailure: (any Error)?
+    private var uploadPathPrefix = ".cagentic/uploads/chat-1/"
+
+    func setUploadFailure(_ error: any Error) {
+        uploadFailure = error
+    }
+
+    func setUploadPathPrefix(_ prefix: String) {
+        uploadPathPrefix = prefix
+    }
 
     init(bootstrap: GatewayBootstrap, controlled: ControlledGatewayStream? = nil) {
         bootstrapValue = bootstrap
@@ -579,6 +634,15 @@ private actor MockGatewayService: GatewayServing {
     func bootstrap() async throws -> GatewayBootstrap {
         bootstrapCount += 1
         return bootstrapValue
+    }
+
+    nonisolated func editAndResend(index: Int, message: String) -> GatewayEventStream {
+        Task { await recordEdit(index: index, message: message) }
+        return chat(message: message)
+    }
+
+    private func recordEdit(index: Int, message: String) {
+        edits.append(EditRecord(index: index, message: message))
     }
 
     nonisolated func chat(message: String) -> GatewayEventStream {
@@ -616,6 +680,10 @@ private actor MockGatewayService: GatewayServing {
         permissionAnswers.append(PermissionAnswerRecord(id: id, answer: answer, rule: rule))
     }
 
+    func answerQuestion(id: String, answer: String) async throws {
+        questionAnswers.append(QuestionAnswerRecord(id: id, answer: answer))
+    }
+
     func abort() async throws {
         abortCount += 1
     }
@@ -643,10 +711,65 @@ private actor MockGatewayService: GatewayServing {
     func selectModel(_ model: String) async throws -> String {
         model
     }
+
+    func setChatConfig(
+        id: String,
+        mode: GatewayChatMode?,
+        profile: GatewayChatProfileUpdate?
+    ) async throws -> GatewayChatConfig {
+        chatConfigCalls.append(ChatConfigCall(id: id, mode: mode, profile: profile))
+        if let chatConfigFailure {
+            throw chatConfigFailure
+        }
+        // Mirrors the gateway: it merges, so an omitted half keeps whatever the chat already had.
+        if let mode { storedChatConfig.mode = mode }
+        if let profile {
+            storedChatConfig.profileName = profile.name
+            storedChatConfig.systemPrompt = profile.systemPrompt
+            storedChatConfig.temperature = profile.temperature
+            storedChatConfig.effort = profile.effort ?? ""
+        }
+        return storedChatConfig
+    }
+
+    func uploadAttachment(name: String, data: Data) async throws -> GatewayUpload {
+        uploads.append(UploadRecord(name: name, byteCount: data.count))
+        if let uploadFailure {
+            throw uploadFailure
+        }
+        // Mirrors the gateway: files land under the workspace and come back as a relative path.
+        return GatewayUpload(
+            name: name,
+            path: uploadPathPrefix + name,
+            byteCount: data.count,
+            kind: "text"
+        )
+    }
+}
+
+nonisolated struct EditRecord: Equatable, Sendable {
+    let index: Int
+    let message: String
+}
+
+nonisolated struct QuestionAnswerRecord: Equatable, Sendable {
+    let id: String
+    let answer: String
+}
+
+struct ChatConfigCall: Equatable, Sendable {
+    let id: String
+    let mode: GatewayChatMode?
+    let profile: GatewayChatProfileUpdate?
+}
+
+struct UploadRecord: Equatable, Sendable {
+    let name: String
+    let byteCount: Int
 }
 
 /// Drives a gateway stream event by event so a test can assert on mid-turn state.
-private nonisolated final class ControlledGatewayStream: @unchecked Sendable {
+nonisolated final class ControlledGatewayStream: @unchecked Sendable {
     private let lock = NSLock()
     private var continuation: GatewayEventStream.Continuation?
 
@@ -681,7 +804,7 @@ private nonisolated final class ControlledGatewayStream: @unchecked Sendable {
 }
 
 /// Proves the Ollama backend is never reached while a gateway profile is active.
-private nonisolated struct MockUnusedOllamaService: OllamaServing {
+nonisolated struct MockUnusedOllamaService: OllamaServing {
     func serverVersion() async throws -> OllamaServerVersion {
         Issue.record("The Ollama backend must not be used for a gateway profile")
         throw OllamaClientError.invalidResponse

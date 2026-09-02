@@ -71,6 +71,10 @@ nonisolated struct AssistantActivity: Identifiable, Codable, Equatable, Hashable
     var text: String
     var steps: [String]
     var toolName: String
+    /// Human phrasing from the gateway — "Listed directory" rather than `list_dir`.
+    var toolLabel: String
+    /// The same phrase for a collapsed run of identical calls, with an `{n}` slot.
+    var toolLabelPlural: String
     /// The gateway's own call identifier, used to match a result to its call.
     var toolCallID: String
     var toolState: ToolState
@@ -83,6 +87,8 @@ nonisolated struct AssistantActivity: Identifiable, Codable, Equatable, Hashable
         text: String = "",
         steps: [String] = [],
         toolName: String = "",
+        toolLabel: String = "",
+        toolLabelPlural: String = "",
         toolCallID: String = "",
         toolState: ToolState = .running,
         resultLine: String = ""
@@ -92,6 +98,8 @@ nonisolated struct AssistantActivity: Identifiable, Codable, Equatable, Hashable
         self.text = text
         self.steps = steps
         self.toolName = toolName
+        self.toolLabel = toolLabel
+        self.toolLabelPlural = toolLabelPlural
         self.toolCallID = toolCallID
         self.toolState = toolState
         self.resultLine = resultLine
@@ -105,8 +113,32 @@ nonisolated struct AssistantActivity: Identifiable, Codable, Equatable, Hashable
         AssistantActivity(kind: .plan, steps: steps)
     }
 
-    static func tool(id: String, name: String, summary: String) -> AssistantActivity {
-        AssistantActivity(kind: .tool, text: summary, toolName: name, toolCallID: id)
+    static func tool(
+        id: String,
+        name: String,
+        summary: String,
+        label: String = "",
+        labelPlural: String = ""
+    ) -> AssistantActivity {
+        AssistantActivity(
+            kind: .tool,
+            text: summary,
+            toolName: name,
+            toolLabel: label,
+            toolLabelPlural: labelPlural,
+            toolCallID: id
+        )
+    }
+
+    /// What to show for `count` adjacent runs of this tool.
+    ///
+    /// Falls back to the raw name only when talking to a gateway old enough not to send the
+    /// phrasing, which is better than showing nothing.
+    func displayLabel(count: Int) -> String {
+        let one = toolLabel.isEmpty ? toolName : toolLabel
+        guard count > 1 else { return one }
+        guard !toolLabelPlural.isEmpty else { return "\(one) ×\(count)" }
+        return toolLabelPlural.replacingOccurrences(of: "{n}", with: String(count))
     }
 
     private enum CodingKeys: String, CodingKey {
@@ -115,6 +147,8 @@ nonisolated struct AssistantActivity: Identifiable, Codable, Equatable, Hashable
         case text
         case steps
         case toolName
+        case toolLabel
+        case toolLabelPlural
         case toolCallID
         case toolState
         case resultLine
@@ -127,6 +161,8 @@ nonisolated struct AssistantActivity: Identifiable, Codable, Equatable, Hashable
         text = try container.decodeIfPresent(String.self, forKey: .text) ?? ""
         steps = try container.decodeIfPresent([String].self, forKey: .steps) ?? []
         toolName = try container.decodeIfPresent(String.self, forKey: .toolName) ?? ""
+        toolLabel = try container.decodeIfPresent(String.self, forKey: .toolLabel) ?? ""
+        toolLabelPlural = try container.decodeIfPresent(String.self, forKey: .toolLabelPlural) ?? ""
         toolCallID = try container.decodeIfPresent(String.self, forKey: .toolCallID) ?? ""
         toolState = try container.decodeIfPresent(ToolState.self, forKey: .toolState) ?? .running
         resultLine = try container.decodeIfPresent(String.self, forKey: .resultLine) ?? ""
@@ -349,6 +385,40 @@ nonisolated struct GenerationOptions: Codable, Equatable, Hashable, Sendable {
     var seed: Int?
     var keepAlive = "30m"
     var enableThinking = true
+
+    init() {}
+
+    enum CodingKeys: String, CodingKey {
+        case temperature
+        case topP
+        case contextLength
+        case seed
+        case keepAlive
+        case enableThinking
+    }
+
+    /// Written out because the synthesized decoder is not survivable here.
+    ///
+    /// This type is nested inside `AppSettings`, which is nested inside `AppSnapshot`. A key it
+    /// does not recognise the absence of throws, and the throw does not stop at this struct — it
+    /// leaves `JSONAppRepository.load()`, which reports no snapshot at all, and every saved chat
+    /// goes with it. A file written before `topP` existed is enough to do it, and so is the next
+    /// field anybody adds. Every other type in this file already defaults each missing key; this
+    /// one is now the same.
+    init(from decoder: any Decoder) throws {
+        let container = try decoder.container(keyedBy: CodingKeys.self)
+        let defaults = GenerationOptions()
+        temperature = try container.decodeIfPresent(Double.self, forKey: .temperature)
+            ?? defaults.temperature
+        topP = try container.decodeIfPresent(Double.self, forKey: .topP) ?? defaults.topP
+        contextLength = try container.decodeIfPresent(Int.self, forKey: .contextLength)
+            ?? defaults.contextLength
+        seed = try container.decodeIfPresent(Int.self, forKey: .seed)
+        keepAlive = try container.decodeIfPresent(String.self, forKey: .keepAlive)
+            ?? defaults.keepAlive
+        enableThinking = try container.decodeIfPresent(Bool.self, forKey: .enableThinking)
+            ?? defaults.enableThinking
+    }
 }
 
 nonisolated struct AppSettings: Codable, Equatable, Hashable, Sendable {
@@ -361,6 +431,8 @@ nonisolated struct AppSettings: Codable, Equatable, Hashable, Sendable {
     var hapticsEnabled: Bool
     var hasCompletedOnboarding: Bool
     var serverCatalog: ServerProfileCatalog
+    /// Named sets of instructions and dials. Orthogonal to `serverCatalog`, which is *servers*.
+    var chatProfiles: ChatProfileCatalog
 
     init(
         serverURL: String = "",
@@ -371,7 +443,8 @@ nonisolated struct AppSettings: Codable, Equatable, Hashable, Sendable {
         appearance: AppearancePreference = .system,
         hapticsEnabled: Bool = true,
         hasCompletedOnboarding: Bool = false,
-        serverCatalog: ServerProfileCatalog = ServerProfileCatalog()
+        serverCatalog: ServerProfileCatalog = ServerProfileCatalog(),
+        chatProfiles: ChatProfileCatalog = ChatProfileCatalog()
     ) {
         self.serverURL = serverURL
         self.serverName = serverName
@@ -382,6 +455,7 @@ nonisolated struct AppSettings: Codable, Equatable, Hashable, Sendable {
         self.hapticsEnabled = hapticsEnabled
         self.hasCompletedOnboarding = hasCompletedOnboarding
         self.serverCatalog = serverCatalog
+        self.chatProfiles = chatProfiles
     }
 
     private enum CodingKeys: String, CodingKey {
@@ -394,6 +468,7 @@ nonisolated struct AppSettings: Codable, Equatable, Hashable, Sendable {
         case hapticsEnabled
         case hasCompletedOnboarding
         case serverCatalog
+        case chatProfiles
     }
 
     init(from decoder: any Decoder) throws {
@@ -416,6 +491,38 @@ nonisolated struct AppSettings: Codable, Equatable, Hashable, Sendable {
             ServerProfileCatalog.self,
             forKey: .serverCatalog
         ) ?? ServerProfileCatalog()
+        chatProfiles = try container.decodeIfPresent(
+            ChatProfileCatalog.self,
+            forKey: .chatProfiles
+        ) ?? ChatProfileCatalog()
+    }
+}
+
+/// How full the model's context window is.
+///
+/// Not persisted: it describes the computer's current state, and a figure cached across launches
+/// would describe a turn that is no longer the last one.
+nonisolated struct ContextUsage: Equatable, Hashable, Sendable {
+    let used: Int
+    let limit: Int
+
+    var share: Double {
+        guard limit > 0 else { return 0 }
+        return min(1, max(0, Double(used) / Double(limit)))
+    }
+
+    /// Only worth showing once the window is actually filling up. A meter that is always on
+    /// screen is one nobody reads, and the number matters most as it approaches the edge.
+    var isWorthShowing: Bool {
+        limit > 0 && share >= 0.5
+    }
+
+    var isCritical: Bool {
+        share >= 0.9
+    }
+
+    var summary: String {
+        "\(Int(share * 100))% of context used"
     }
 }
 
@@ -554,8 +661,8 @@ enum AppSheet: Identifiable, Equatable {
     case serverManager
     case settings
     case modelLibrary
-    case conversationManager
     case renameConversation(UUID)
+    case pairGateway
 
     var id: String {
         switch self {
@@ -563,8 +670,8 @@ enum AppSheet: Identifiable, Equatable {
         case .serverManager: "server-manager"
         case .settings: "settings"
         case .modelLibrary: "model-library"
-        case .conversationManager: "conversation-manager"
         case .renameConversation(let id): "rename-\(id.uuidString)"
+        case .pairGateway: "pair-gateway"
         }
     }
 }

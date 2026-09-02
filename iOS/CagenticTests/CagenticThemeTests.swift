@@ -4,16 +4,6 @@ import UIKit
 @testable import Cagentic
 
 struct CagenticThemeTests {
-    @Test("Bundled Inter variable fonts are registered")
-    @MainActor
-    func interFontsAreRegistered() {
-        #expect(UIFont(name: "InterVariable", size: 17) != nil)
-        #expect(UIFont(name: "InterVariable-Medium", size: 17) != nil)
-        #expect(UIFont(name: "InterVariable-SemiBold", size: 17) != nil)
-        #expect(UIFont(name: "InterVariable-Bold", size: 17) != nil)
-        #expect(UIFont(name: "InterVariableItalic", size: 17) != nil)
-    }
-
     @Test("Dynamic theme colors resolve away from the main actor")
     func dynamicColorsResolveOffMainActor() async {
         let resolvedComponents = await Task.detached {

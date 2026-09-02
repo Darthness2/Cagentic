@@ -339,6 +339,10 @@ class TestPersistedTranscriptRendering(_GatewayCase):
             [
                 {
                     "name": "read_file",
+                    # Reloaded history carries the human phrasing too, so a page that was
+                    # never open while the turn ran still reads the same as one that was.
+                    "label": "Read file",
+                    "label_plural": "Read {n} files",
                     "summary": "notes.txt",
                     "ok": True,
                     "first_line": "OK: notes.txt (2 lines)",

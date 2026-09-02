@@ -1,0 +1,100 @@
+<!-- Cagentic icon review board — exploration only; not product UI. -->
+<svg xmlns="http://www.w3.org/2000/svg" width="1600" height="1120" viewBox="0 0 1600 1120">
+  <defs>
+    <style>
+      .eyebrow { font: 600 18px -apple-system, BlinkMacSystemFont, "Segoe UI", sans-serif; letter-spacing: 2.4px; }
+      .title { font: 700 52px -apple-system, BlinkMacSystemFont, "Segoe UI", sans-serif; }
+      .body { font: 400 22px -apple-system, BlinkMacSystemFont, "Segoe UI", sans-serif; }
+      .name { font: 650 25px -apple-system, BlinkMacSystemFont, "Segoe UI", sans-serif; }
+      .meta { font: 400 18px -apple-system, BlinkMacSystemFont, "Segoe UI", sans-serif; }
+      .stroke { fill: none; stroke: currentColor; }
+    </style>
+    <symbol id="halo" viewBox="0 0 24 24">
+      <circle class="stroke" cx="12" cy="12" r="8.35" stroke-width="1.65"/>
+      <path class="stroke" d="M12 6.2c.47 3.53 2.27 5.33 5.8 5.8-3.53.47-5.33 2.27-5.8 5.8-.47-3.53-2.27-5.33-5.8-5.8 3.53-.47 5.33-2.27 5.8-5.8Z" stroke-width="1.45" stroke-linecap="round" stroke-linejoin="round"/>
+    </symbol>
+    <symbol id="core-c" viewBox="0 0 24 24">
+      <path class="stroke" d="M17.6 7.3A7.35 7.35 0 1 0 17.6 16.7" stroke-width="1.9" stroke-linecap="round"/>
+      <circle cx="12" cy="12" r="1.55" fill="currentColor"/>
+    </symbol>
+    <symbol id="faceted" viewBox="0 0 24 24">
+      <path d="m12 3.45 2.34 6.21 6.21 2.34-6.21 2.34L12 20.55l-2.34-6.21L3.45 12l6.21-2.34L12 3.45Zm0 4.75 1.72 3.8L12 15.8 10.28 12 12 8.2Z" fill="currentColor" fill-rule="evenodd"/>
+    </symbol>
+    <symbol id="relay" viewBox="0 0 24 24">
+      <path class="stroke" d="M12 3.55a8.46 8.46 0 0 1 7.35 4.24M20.45 12A8.46 8.46 0 0 1 16.2 19.35M12 20.45a8.46 8.46 0 0 1-7.35-4.24M3.55 12A8.46 8.46 0 0 1 7.8 4.65" stroke-width="1.75" stroke-linecap="round"/>
+      <path d="m12 8.75 3.25 3.25L12 15.25 8.75 12 12 8.75Z" fill="currentColor"/>
+    </symbol>
+    <symbol id="keystone" viewBox="0 0 24 24">
+      <path class="stroke" d="m12 3.75 7.15 4.13v8.24L12 20.25l-7.15-4.13V7.88L12 3.75Z" stroke-width="1.65" stroke-linejoin="round"/>
+      <path d="m12 8.45 3.55 3.55L12 15.55 8.45 12 12 8.45Z" fill="currentColor"/>
+    </symbol>
+  </defs>
+
+  <rect width="1600" height="1120" fill="#F7F9FB"/>
+  <text class="eyebrow" x="96" y="100" fill="#596675">CAGENTIC / ICON EXPLORATION</text>
+  <text class="title" x="96" y="168" fill="#111820">Five geometric directions</text>
+  <text class="body" x="96" y="212" fill="#46515D">Built for a calm local AI workspace — one blue, flat geometry, and legibility from 16px upward.</text>
+  <rect x="96" y="256" width="1408" height="1" fill="#D0D7DE"/>
+
+  <g transform="translate(96 314)">
+    <rect width="256" height="510" rx="20" fill="#FFFFFF" stroke="#D0D7DE"/>
+    <g color="#0969DA" style="--cutout:#FFFFFF"><use href="#halo" x="58" y="46" width="140" height="140"/></g>
+    <text class="name" x="28" y="234" fill="#111820">01 / Halo Spark</text>
+    <text class="meta" x="28" y="268" fill="#596675">Current spark, made orbital.</text>
+    <rect x="28" y="304" width="200" height="1" fill="#D0D7DE"/>
+    <text class="meta" x="28" y="346" fill="#596675">Best for</text><text class="body" x="28" y="380" fill="#111820">Safe evolution</text>
+    <g color="#0969DA" style="--cutout:#FFFFFF"><use href="#halo" x="28" y="420" width="16" height="16"/><use href="#halo" x="66" y="412" width="32" height="32"/><use href="#halo" x="124" y="396" width="64" height="64"/></g>
+  </g>
+
+  <g transform="translate(384 314)">
+    <rect width="256" height="510" rx="20" fill="#FFFFFF" stroke="#D0D7DE"/>
+    <g color="#0969DA" style="--cutout:#FFFFFF"><use href="#core-c" x="58" y="46" width="140" height="140"/></g>
+    <text class="name" x="28" y="234" fill="#111820">02 / Core C</text>
+    <text class="meta" x="28" y="268" fill="#596675">Name-led, circular, calm.</text>
+    <rect x="28" y="304" width="200" height="1" fill="#D0D7DE"/>
+    <text class="meta" x="28" y="346" fill="#596675">Best for</text><text class="body" x="28" y="380" fill="#111820">Recognition</text>
+    <g color="#0969DA" style="--cutout:#FFFFFF"><use href="#core-c" x="28" y="420" width="16" height="16"/><use href="#core-c" x="66" y="412" width="32" height="32"/><use href="#core-c" x="124" y="396" width="64" height="64"/></g>
+  </g>
+
+  <g transform="translate(672 314)">
+    <rect width="256" height="510" rx="20" fill="#FFFFFF" stroke="#D0D7DE"/>
+    <g color="#0969DA" style="--cutout:#FFFFFF"><use href="#faceted" x="58" y="46" width="140" height="140"/></g>
+    <text class="name" x="28" y="234" fill="#111820">03 / Faceted Spark</text>
+    <text class="meta" x="28" y="268" fill="#596675">Solid geometry, familiar soul.</text>
+    <rect x="28" y="304" width="200" height="1" fill="#D0D7DE"/>
+    <text class="meta" x="28" y="346" fill="#596675">Best for</text><text class="body" x="28" y="380" fill="#111820">App icon scale</text>
+    <g color="#0969DA" style="--cutout:#FFFFFF"><use href="#faceted" x="28" y="420" width="16" height="16"/><use href="#faceted" x="66" y="412" width="32" height="32"/><use href="#faceted" x="124" y="396" width="64" height="64"/></g>
+  </g>
+
+  <g transform="translate(960 314)">
+    <rect width="256" height="510" rx="20" fill="#FFFFFF" stroke="#D0D7DE"/>
+    <g color="#0969DA" style="--cutout:#FFFFFF"><use href="#relay" x="58" y="46" width="140" height="140"/></g>
+    <text class="name" x="28" y="234" fill="#111820">04 / Orbit Relay</text>
+    <text class="meta" x="28" y="268" fill="#596675">Coordination around a core.</text>
+    <rect x="28" y="304" width="200" height="1" fill="#D0D7DE"/>
+    <text class="meta" x="28" y="346" fill="#596675">Best for</text><text class="body" x="28" y="380" fill="#111820">Agent story</text>
+    <g color="#0969DA" style="--cutout:#FFFFFF"><use href="#relay" x="28" y="420" width="16" height="16"/><use href="#relay" x="66" y="412" width="32" height="32"/><use href="#relay" x="124" y="396" width="64" height="64"/></g>
+  </g>
+
+  <g transform="translate(1248 314)">
+    <rect width="256" height="510" rx="20" fill="#FFFFFF" stroke="#D0D7DE"/>
+    <g color="#0969DA" style="--cutout:#FFFFFF"><use href="#keystone" x="58" y="46" width="140" height="140"/></g>
+    <text class="name" x="28" y="234" fill="#111820">05 / Keystone</text>
+    <text class="meta" x="28" y="268" fill="#596675">Structured shell, live core.</text>
+    <rect x="28" y="304" width="200" height="1" fill="#D0D7DE"/>
+    <text class="meta" x="28" y="346" fill="#596675">Best for</text><text class="body" x="28" y="380" fill="#111820">Infrastructure</text>
+    <g color="#0969DA" style="--cutout:#FFFFFF"><use href="#keystone" x="28" y="420" width="16" height="16"/><use href="#keystone" x="66" y="412" width="32" height="32"/><use href="#keystone" x="124" y="396" width="64" height="64"/></g>
+  </g>
+
+  <rect x="96" y="880" width="1408" height="160" rx="20" fill="#0A0C10"/>
+  <text class="eyebrow" x="132" y="930" fill="#8F9BAA">DARK SURFACE / CURRENT BRAND BLUE</text>
+  <g color="#7CC4FF" style="--cutout:#0A0C10">
+    <use href="#halo" x="132" y="954" width="54" height="54"/>
+    <use href="#core-c" x="342" y="954" width="54" height="54"/>
+    <use href="#faceted" x="552" y="954" width="54" height="54"/>
+    <use href="#relay" x="762" y="954" width="54" height="54"/>
+    <use href="#keystone" x="972" y="954" width="54" height="54"/>
+  </g>
+  <g fill="#B9C2CE" class="meta"><text x="202" y="986">Halo Spark</text><text x="412" y="986">Core C</text><text x="622" y="986">Faceted Spark</text><text x="832" y="986">Orbit Relay</text><text x="1042" y="986">Keystone</text></g>
+  <text class="meta" x="1320" y="986" text-anchor="end" fill="#B9C2CE">Exploration only</text>
+</svg>

@@ -34,7 +34,8 @@ _RULES = _CSS[_CSS.index("* { box-sizing") :]
 class TestTypeScale(unittest.TestCase):
     def test_the_message_body_is_readable_size(self) -> None:
         """A chat product is a reading product. 12px is dashboard density."""
-        self.assertIn("--fs-base: 16px;", _CSS)
+        # 17px, matching the app's `.body` — a reply is the same size on both surfaces.
+        self.assertIn("--fs-base: 17px;", _CSS)
         body = re.search(r"^\.msg-body \{[^}]*\}", _CSS, re.M).group(0)
         self.assertIn("font-size: var(--fs-base)", body)
         self.assertIn("line-height: var(--lh-body)", body)
@@ -67,8 +68,17 @@ class TestTypeScale(unittest.TestCase):
 class TestNoHUDVocabulary(unittest.TestCase):
     def test_nothing_is_uppercased(self) -> None:
         """Uppercase letterspaced micro-labels are the sci-fi tell; both
-        competitors use essentially none."""
-        self.assertEqual(_CSS.count("text-transform: uppercase"), 0)
+        competitors use essentially none.
+
+        The one exception is a code block's language tag, which the iOS app also uppercases —
+        and which is not the tell, because the tell is uppercase *plus* tracking. That pairing is
+        still forbidden by `test_body_and_label_tracking_is_gone`.
+        """
+        uppercased = re.findall(r"([^{}]*)\{[^}]*text-transform: uppercase", _CSS)
+        self.assertEqual(
+            [selector.strip().splitlines()[-1].strip() for selector in uppercased],
+            [".cb-lang"],
+        )
 
     def test_body_and_label_tracking_is_gone(self) -> None:
         """112 rules carried positive tracking. Only negative tracking on

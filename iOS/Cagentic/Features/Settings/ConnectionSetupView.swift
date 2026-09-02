@@ -424,7 +424,7 @@ struct ConnectionSetupView: View {
         case .ollama:
             "Use the computer's LAN IP or .local hostname—not localhost or 0.0.0.0."
         case .gateway:
-            "Use the computer's LAN IP or .local hostname and the gateway's port. Port 8700 is assumed if you leave it out."
+            "The computer's LAN IP, .local hostname, or Tailscale name — plain, without https://. Port 8700 is assumed if you leave it out."
         }
     }
 
@@ -438,7 +438,7 @@ struct ConnectionSetupView: View {
     private var credentialFieldPrompt: String {
         switch kind {
         case .ollama: "Optional bearer token"
-        case .gateway: "gateway.token value"
+        case .gateway: "Six digits, or a token"
         }
     }
 
@@ -521,7 +521,7 @@ struct ConnectionSetupView: View {
             return "Leave this blank to keep the saved token. Enter a value only to replace it; credentials remain in Keychain."
         }
         if kind == .gateway {
-            return "Required. Copy the gateway.token value from ~/.config/cagentic/config.json on the computer. It is stored in Keychain on this device."
+            return "Run /token on the computer and enter the six digits it shows — they are exchanged for the real token, which is stored in Keychain. A gateway.token value works here too."
         }
         return "Direct local Ollama does not need a token. If you use an HTTPS proxy, the token is stored in Keychain."
     }

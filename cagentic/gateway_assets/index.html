@@ -6,7 +6,8 @@
 <meta name="cagentic-token" content="{{CAGENTIC_TOKEN}}" />
 <meta name="color-scheme" content="dark light" />
 <meta name="theme-color" content="#0a0c10" />
-<title>Cagentic</title>
+<link rel="icon" href="/favicon.svg" type="image/svg+xml">
+  <title>Cagentic</title>
 <link rel="stylesheet" href="/app.css" />
 </head>
 <body>
@@ -39,7 +40,7 @@
   <symbol id="i-more" viewBox="0 0 24 24"><circle cx="12" cy="5" r="1.2"/><circle cx="12" cy="12" r="1.2"/><circle cx="12" cy="19" r="1.2"/></symbol>
   <symbol id="i-arrow-down" viewBox="0 0 24 24"><path d="M12 5v14m0 0-6-6m6 6 6-6"/></symbol>
   <symbol id="i-warning" viewBox="0 0 24 24"><path d="M12 4 2.5 20h19zM12 10v4M12 17.5v.01"/></symbol>
-  <symbol id="i-spark" viewBox="0 0 24 24"><path d="M12 3c.7 5.1 3.9 8.3 9 9-5.1.7-8.3 3.9-9 9-.7-5.1-3.9-8.3-9-9 5.1-.7 8.3-3.9 9-9z"/></symbol>
+  <symbol id="i-mark" viewBox="0 0 24 24"><path d="M20.36 12.36A8.37 8.37 0 0 0 15.86 4.58M12.36 3.64A8.37 8.37 0 0 0 4.58 8.14M3.64 11.64A8.37 8.37 0 0 0 8.14 19.42M11.64 20.36A8.37 8.37 0 0 0 19.42 15.86"/></symbol>
 </defs></svg>
 
 <div id="app">
@@ -54,7 +55,7 @@
       <button class="icon-btn hdr-icon" id="logsBtn" type="button" title="Toggle chats (Ctrl+F)" aria-label="Toggle chats" aria-controls="sessionsPanel" aria-expanded="false">
         <svg class="ico" aria-hidden="true"><use href="#i-sidebar"/></svg>
       </button>
-      <span class="wordmark"><span class="brand-mark mini" aria-hidden="true"><svg class="ico"><use href="#i-spark"/></svg></span>Cagentic</span>
+      <span class="wordmark"><span class="brand-mark mini" aria-hidden="true"><svg class="ico"><use href="#i-mark"/></svg></span>Cagentic</span>
       <div class="model-control">
         <button class="model-switch" id="modelSwitch" type="button" title="Switch model" aria-haspopup="menu" aria-controls="modelMenu" aria-expanded="false">
           <span class="ms-dot" id="msDot" aria-hidden="true"></span>
@@ -176,7 +177,7 @@
 <aside id="sessionsPanel" class="sessions-panel" aria-label="Chats">
   <div class="sessions-head">
     <div class="brand-lockup">
-      <span class="brand-mark" aria-hidden="true"><svg class="ico"><use href="#i-spark"/></svg></span>
+      <span class="brand-mark" aria-hidden="true"><svg class="ico"><use href="#i-mark"/></svg></span>
       <span><strong>Cagentic</strong><small>Local AI workspace</small></span>
     </div>
     <button id="closeSessionsBtn" class="icon-btn" type="button" title="Collapse sidebar" aria-label="Collapse chats"><svg class="ico" aria-hidden="true"><use href="#i-sidebar"/></svg></button>
@@ -252,6 +253,13 @@
         <label class="toggle"><input id="setGwAuto" type="checkbox" /><span></span></label>
       </div>
       <div class="field-hint">Port takes effect next launch. Auto-start can be toggled anytime.</div>
+      <hr class="settings-divider" />
+      <div class="section-label">Visual panels</div>
+      <div class="field row">
+        <label class="field-label" for="setPanels">Charts and tables in replies</label>
+        <label class="toggle"><input id="setPanels" type="checkbox" /><span></span></label>
+      </div>
+      <div class="field-hint">Only this page draws panels. Turning them off keeps the model from producing them at all, which also frees up context.</div>
       <hr class="settings-divider" />
       <div class="section-label">Proactive assistant</div>
       <div class="field row">

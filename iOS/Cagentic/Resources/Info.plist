@@ -30,7 +30,11 @@
         <true/>
     </dict>
     <key>NSLocalNetworkUsageDescription</key>
-    <string>Cagentic connects directly to the Ollama server on your computer over your local network.</string>
+    <string>Cagentic finds and connects to the computer running Ollama or the Cagentic gateway on your local network.</string>
+    <key>NSBonjourServices</key>
+    <array>
+        <string>_cagentic._tcp</string>
+    </array>
     <key>UIApplicationSceneManifest</key>
     <dict>
         <key>UIApplicationSupportsMultipleScenes</key>
@@ -40,8 +44,16 @@
 	<true/>
 	<key>UIAppFonts</key>
 	<array>
-		<string>InterVariable.ttf</string>
-		<string>InterVariable-Italic.ttf</string>
+		<string>SpaceGrotesk-Regular.ttf</string>
+		<string>SpaceGrotesk-Medium.ttf</string>
+		<string>SpaceGrotesk-SemiBold.ttf</string>
+		<string>SpaceGrotesk-Bold.ttf</string>
+		<string>PlusJakartaSans-Regular.ttf</string>
+		<string>PlusJakartaSans-Medium.ttf</string>
+		<string>PlusJakartaSans-SemiBold.ttf</string>
+		<string>PlusJakartaSans-Bold.ttf</string>
+		<string>PlusJakartaSans-Italic.ttf</string>
+		<string>JetBrainsMono-Regular.ttf</string>
 	</array>
 	<key>UILaunchScreen</key>
     <dict>

@@ -120,7 +120,7 @@ class TestWebUIReasoning(unittest.TestCase):
     def test_the_live_block_is_reset_between_turns(self) -> None:
         """Otherwise turn 2's reasoning is written into turn 1's block."""
         reset = self.js[
-            self.js.index("function resetLive()") : self.js.index("function paintLiveBody()")
+            self.js.index("function resetLive()") : self.js.index("function ensureLiveAssistant")
         ]
         self.assertIn("thinkBox:null", reset)
         self.assertGreaterEqual(self.js.count("resetLive();"), 2)

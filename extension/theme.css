@@ -1,3 +1,85 @@
+/* The three faces the product is set in, shared byte-for-byte with the iOS app — they are
+   generated from the same files by design-system/brand/make-icons.py. Matching colours and
+   spacing count for nothing while the type is somebody else's, and this is the single thing that
+   made the app and the page read as different products.
+
+   Static weights rather than one variable file per family: a browser only fetches a source when
+   a glyph actually needs it, so ten small files cost less than three large ones downloaded
+   whether or not the page ever renders semibold.
+
+   `font-display: swap` — a local gateway serves these in milliseconds, and blocking first paint
+   on a font when the page is already on screen would be the wrong trade. */
+@font-face {
+  font-family: 'Space Grotesk';
+  src: url('fonts/SpaceGrotesk-Regular.woff2') format('woff2');
+  font-weight: 400;
+  font-style: normal;
+  font-display: swap;
+}
+@font-face {
+  font-family: 'Space Grotesk';
+  src: url('fonts/SpaceGrotesk-Medium.woff2') format('woff2');
+  font-weight: 500;
+  font-style: normal;
+  font-display: swap;
+}
+@font-face {
+  font-family: 'Space Grotesk';
+  src: url('fonts/SpaceGrotesk-SemiBold.woff2') format('woff2');
+  font-weight: 600;
+  font-style: normal;
+  font-display: swap;
+}
+@font-face {
+  font-family: 'Space Grotesk';
+  src: url('fonts/SpaceGrotesk-Bold.woff2') format('woff2');
+  font-weight: 700;
+  font-style: normal;
+  font-display: swap;
+}
+@font-face {
+  font-family: 'Plus Jakarta Sans';
+  src: url('fonts/PlusJakartaSans-Regular.woff2') format('woff2');
+  font-weight: 400;
+  font-style: normal;
+  font-display: swap;
+}
+@font-face {
+  font-family: 'Plus Jakarta Sans';
+  src: url('fonts/PlusJakartaSans-Medium.woff2') format('woff2');
+  font-weight: 500;
+  font-style: normal;
+  font-display: swap;
+}
+@font-face {
+  font-family: 'Plus Jakarta Sans';
+  src: url('fonts/PlusJakartaSans-SemiBold.woff2') format('woff2');
+  font-weight: 600;
+  font-style: normal;
+  font-display: swap;
+}
+@font-face {
+  font-family: 'Plus Jakarta Sans';
+  src: url('fonts/PlusJakartaSans-Bold.woff2') format('woff2');
+  font-weight: 700;
+  font-style: normal;
+  font-display: swap;
+}
+@font-face {
+  font-family: 'Plus Jakarta Sans';
+  src: url('fonts/PlusJakartaSans-Italic.woff2') format('woff2');
+  font-weight: 400;
+  font-style: italic;
+  font-display: swap;
+}
+@font-face {
+  font-family: 'JetBrains Mono';
+  src: url('fonts/JetBrainsMono-Regular.woff2') format('woff2');
+  font-weight: 400;
+  font-style: normal;
+  font-display: swap;
+}
+
 /* Shared Cagentic extension tokens. These mirror the live gateway palette in
    cagentic/gateway_assets/app.css. Keep this intentionally small: the popup
    and side panel remain native to their jobs while sharing one identity. */
@@ -20,8 +102,9 @@
   --cag-ok: #8ecf95;
   --cag-warn: #d9c069;
   --cag-error: #d98a87;
-  --cag-font: -apple-system, BlinkMacSystemFont, "Inter", "Segoe UI", Roboto, sans-serif;
-  --cag-code: ui-monospace, "SF Mono", "Cascadia Code", Consolas, monospace;
+  --cag-font: "Space Grotesk", -apple-system, BlinkMacSystemFont, "Segoe UI", sans-serif;
+  --cag-reading: "Plus Jakarta Sans", -apple-system, BlinkMacSystemFont, "Segoe UI", sans-serif;
+  --cag-code: "JetBrains Mono", ui-monospace, "SF Mono", Consolas, monospace;
   --cag-r-control: 8px;
   --cag-r-card: 12px;
   --cag-r-sheet: 16px;
@@ -97,6 +180,9 @@ input:focus-visible {
   line-height: 1.3;
 }
 
+/* The mark on its own, as the app and the web page draw it. It used to sit in a bordered,
+   tinted box that neither of the other two has, so the same mark read as a different element
+   depending on which surface you were looking at. */
 .cag-mark {
   display: inline-flex;
   width: 28px;
@@ -104,9 +190,6 @@ input:focus-visible {
   flex: 0 0 28px;
   align-items: center;
   justify-content: center;
-  border: 1px solid var(--cag-border-hover);
-  border-radius: var(--cag-r-control);
-  background: var(--cag-accent-layer);
   color: var(--cag-accent);
 }
 
@@ -115,7 +198,8 @@ input:focus-visible {
   height: 16px;
   fill: none;
   stroke: currentColor;
-  stroke-width: 1.8;
+  /* The mark is a ring of thin arcs; at the icon set's weight it reads as a hairline. */
+  stroke-width: 2.2;
   stroke-linecap: round;
   stroke-linejoin: round;
 }

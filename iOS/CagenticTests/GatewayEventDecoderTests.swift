@@ -153,11 +153,21 @@ struct GatewayEventDecoderTests {
         ])
     }
 
-    @Test("The per-turn token telemetry line is not shown as conversation content")
-    func suppressesInternalTelemetry() throws {
+    @Test("Context usage decodes as a measurement, not as conversation content")
+    func decodesContextUsage() throws {
+        // This used to arrive as an `info` line reading "sending ~12,004 tokens to qwen2.5:7b",
+        // which this client had to recognise by its wording and drop on the floor. It is a
+        // number now, and it drives the context meter.
         #expect(try decoder.decode(
-            frame: #"{"kind":"info","data":{"text":"sending ~12,004 tokens to qwen2.5:7b · 24 tools"}}"#
+            frame: #"{"kind":"context","data":{"used":12004,"limit":32768,"model":"qwen2.5:7b"}}"#
+        ) == [.contextUsage(used: 12_004, limit: 32_768)])
+
+        // A window of zero is meaningless and would render as a full meter.
+        #expect(try decoder.decode(
+            frame: #"{"kind":"context","data":{"used":12004,"limit":0}}"#
         ).isEmpty)
+
+        // Ordinary notices still reach the transcript.
         #expect(try decoder.decode(
             frame: #"{"kind":"info","data":{"text":"attached 2 file(s) to this turn"}}"#
         ) == [.notice(level: .info, text: "attached 2 file(s) to this turn")])

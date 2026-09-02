@@ -1,0 +1,5 @@
+<!-- Exploration only — not connected to a shipped surface. -->
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 24 24" fill="none">
+  <path d="M17.6 7.3A7.35 7.35 0 1 0 17.6 16.7" stroke="currentColor" stroke-width="1.9" stroke-linecap="round"/>
+  <circle cx="12" cy="12" r="1.55" fill="currentColor"/>
+</svg>

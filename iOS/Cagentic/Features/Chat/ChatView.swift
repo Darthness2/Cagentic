@@ -1,5 +1,4 @@
 import SwiftUI
-import UniformTypeIdentifiers
 
 struct ChatView: View {
     @Bindable var model: AppModel
@@ -13,13 +12,20 @@ struct ChatView: View {
     /// reader mid-answer with a Latest button they never asked for. Only a real drag stops the
     /// follow, and returning to the bottom resumes it.
     @State private var followsStream = true
+    /// Whether the Latest button is showing. Deliberately *not* `!isNearBottom`: that flips 120pt
+    /// off the bottom, which is a nudge rather than a decision to go read something, and a button
+    /// appearing every time the transcript settles a hair short of the end is noise.
+    @State private var showsJumpButton = false
+    /// A finger is on the transcript right now. Distinct from `isUserScrolling`, which stays true
+    /// through momentum — the difference decides whether a programmatic scroll is helping or
+    /// fighting the reader.
+    @State private var isTouchingScroll = false
+    @State private var jumpTask: Task<Void, Never>?
     @State private var isUserScrolling = false
     @State private var pendingDeletion: ChatDeletion?
     @State private var pendingRegenerationMessageID: UUID?
     @State private var messageEditor: MessageEditor?
     @State private var composerHeight: CGFloat = 0
-    @State private var isExportingConversation = false
-    @State private var exportDocument = MarkdownExportDocument(text: "")
 
     private let bottomID = "conversation-bottom"
 
@@ -58,11 +64,10 @@ struct ChatView: View {
             }
 
             ToolbarItem(placement: .topBarTrailing) {
+                // Only what acts on *this* chat. New chat, settings and the rest live in the
+                // drawer, and a menu that repeats them just makes the three that matter harder
+                // to find.
                 Menu("Chat actions", systemImage: "ellipsis") {
-                    Button("New chat", systemImage: "square.and.pencil") {
-                        model.createConversation()
-                    }
-                    .disabled(model.isGenerating)
                     Button("Rename", systemImage: "pencil") {
                         model.presentedSheet = .renameConversation(conversationID)
                     }
@@ -71,24 +76,6 @@ struct ChatView: View {
                         systemImage: "pin"
                     ) {
                         model.togglePinned(conversationID)
-                    }
-                    if let transcript = model.conversationExportText(id: conversationID) {
-                        ShareLink(item: transcript) {
-                            Label("Share", systemImage: "square.and.arrow.up")
-                        }
-                    }
-                    Button("Export Markdown", systemImage: "doc.badge.arrow.up") {
-                        prepareExport()
-                    }
-                    Button("Archive", systemImage: "archivebox") {
-                        model.setArchived(true, conversationID: conversationID)
-                    }
-                    Divider()
-                    Button("Manage chats", systemImage: "checklist") {
-                        model.presentedSheet = .conversationManager
-                    }
-                    Button("Settings", systemImage: "gearshape") {
-                        model.presentedSheet = .settings
                     }
                     Button("Delete chat", systemImage: "trash", role: .destructive) {
                         pendingDeletion = .chat
@@ -118,12 +105,14 @@ struct ChatView: View {
             titleVisibility: .visible
         ) {
             if let pendingRegenerationMessageID {
-                Button("Branch and regenerate") {
-                    model.branchAndRetryResponse(
-                        messageID: pendingRegenerationMessageID,
-                        in: conversationID
-                    )
-                    self.pendingRegenerationMessageID = nil
+                if canBranch() {
+                    Button("Branch and regenerate") {
+                        model.branchAndRetryResponse(
+                            messageID: pendingRegenerationMessageID,
+                            in: conversationID
+                        )
+                        self.pendingRegenerationMessageID = nil
+                    }
                 }
                 Button("Replace in this chat", role: .destructive) {
                     model.retryResponse(
@@ -137,7 +126,11 @@ struct ChatView: View {
                 pendingRegenerationMessageID = nil
             }
         } message: {
-            Text("Create a branch to keep this chat unchanged, or replace the later turns here. Replacements can be undone for a short time.")
+            Text(
+                canBranch()
+                    ? "Create a branch to keep this chat unchanged, or replace the later turns here. Replacements can be undone for a short time."
+                    : "This removes the later turns in this chat, on the computer as well. It can be undone for a short time."
+            )
         }
         .sheet(item: $messageEditor) { editor in
             EditMessageView(
@@ -148,19 +141,6 @@ struct ChatView: View {
             )
             .presentationDetents([.medium, .large])
             .presentationDragIndicator(.visible)
-        }
-        .fileExporter(
-            isPresented: $isExportingConversation,
-            document: exportDocument,
-            contentType: .cagenticMarkdown,
-            defaultFilename: exportFilename
-        ) { result in
-            if case .failure(let error) = result {
-                model.notice = AppNotice(
-                    title: "Couldn’t export chat",
-                    message: error.localizedDescription
-                )
-            }
         }
     }
 
@@ -188,6 +168,32 @@ struct ChatView: View {
             Divider()
         }
 
+        // Modes decide what a turn may do without asking, and only the gateway runs tools — on a
+        // direct Ollama connection there is nothing to approve, so offering the choice there
+        // would be a control that does nothing.
+        if model.isUsingGateway {
+            Menu {
+                modeMenuItems
+            } label: {
+                Label(
+                    "Mode: \(model.activeChatMode.title)",
+                    systemImage: model.activeChatMode.symbol
+                )
+            }
+            .disabled(model.isGenerating)
+        }
+
+        if !model.chatProfiles.isEmpty {
+            Menu {
+                profileMenuItems
+            } label: {
+                Label("Profile: \(profileMenuTitle)", systemImage: "person.crop.rectangle")
+            }
+            .disabled(model.isGenerating)
+        }
+
+        Divider()
+
         Button {
             Task {
                 await model.refreshConnection()
@@ -207,6 +213,45 @@ struct ChatView: View {
                 model.presentedSheet = .modelLibrary
             }
             .disabled(model.isGenerating)
+        }
+    }
+
+    private var profileMenuTitle: String {
+        model.activeChatProfile?.displayName ?? "None"
+    }
+
+    @ViewBuilder
+    private var modeMenuItems: some View {
+        ForEach(GatewayChatMode.allCases) { mode in
+            Button {
+                model.setChatMode(mode)
+            } label: {
+                // The same faked checkmark the model rows use, so the two lists read alike.
+                Label(
+                    mode.title,
+                    systemImage: mode == model.activeChatMode ? "checkmark" : mode.symbol
+                )
+            }
+        }
+    }
+
+    @ViewBuilder
+    private var profileMenuItems: some View {
+        ForEach(model.chatProfiles) { profile in
+            Button {
+                model.applyChatProfile(profile)
+            } label: {
+                Label(
+                    profile.displayName,
+                    systemImage: profile.id == model.activeChatProfile?.id
+                        ? "checkmark"
+                        : "person.crop.rectangle"
+                )
+            }
+        }
+        Divider()
+        Button("Edit profiles…", systemImage: "slider.horizontal.3") {
+            model.presentedSheet = .settings
         }
     }
 
@@ -301,10 +346,25 @@ struct ChatView: View {
                     followsStream = false
                 }
             }
+            .onScrollGeometryChange(for: ScrollBottomDistance.self) { geometry in
+                ScrollBottomDistance(
+                    fromBottom: geometry.contentSize.height
+                        - (geometry.contentOffset.y + geometry.containerSize.height),
+                    viewport: geometry.containerSize.height
+                )
+            } action: { _, distance in
+                showsJumpButton = distance.showsJumpButton(whenAlreadyShowing: showsJumpButton)
+            }
             .onScrollPhaseChange { _, phase in
                 isUserScrolling = phase == .tracking
                     || phase == .interacting
                     || phase == .decelerating
+                isTouchingScroll = phase == .tracking || phase == .interacting
+                if isTouchingScroll {
+                    // The reader has taken the wheel back; stop chasing the bottom.
+                    jumpTask?.cancel()
+                    jumpTask = nil
+                }
             }
             .onAppear {
                 proxy.scrollTo(bottomID, anchor: .bottom)
@@ -327,10 +387,13 @@ struct ChatView: View {
             // would grow the content, move the scroll position, flip `isNearBottom`, and hide it
             // again. That loop is what made the transcript jump while a reply streamed.
             .overlay(alignment: .bottom) {
-                if !isNearBottom, !conversation.messages.isEmpty {
+                // The animation has to live on a container that outlives the button; attached
+                // inside the `if` it belonged to a view that did not exist yet, so the transition
+                // never ran and the button simply blinked into place.
+                ZStack {
+                    if showsJumpButton, !conversation.messages.isEmpty {
                     Button {
-                        followsStream = true
-                        scrollToBottom(using: proxy, animated: true)
+                        jumpToLatest(using: proxy)
                     } label: {
                         Label("Latest", systemImage: "arrow.down")
                             .font(CagenticTheme.FontStyle.captionMedium)
@@ -346,9 +409,23 @@ struct ChatView: View {
                     .buttonStyle(.plain)
                     .accessibilityHint("Scrolls to the newest message")
                     .padding(.bottom, composerHeight + CagenticTheme.Spacing.xs)
-                    .transition(.opacity)
-                    .animation(reduceMotion ? nil : .easeOut(duration: 0.2), value: isNearBottom)
+                    .transition(
+                        .asymmetric(
+                            // Rises and settles from where the composer is, then leaves quickly
+                            // downward — it is going back to the thing it points at.
+                            insertion: .scale(scale: 0.82, anchor: .bottom)
+                                .combined(with: .opacity)
+                                .combined(with: .offset(y: 10)),
+                            removal: .scale(scale: 0.92, anchor: .bottom)
+                                .combined(with: .opacity)
+                        )
+                    )
+                    }
                 }
+                .animation(
+                    reduceMotion ? nil : .spring(response: 0.34, dampingFraction: 0.74),
+                    value: showsJumpButton
+                )
             }
             .overlay(alignment: .bottom) {
                 VStack(spacing: CagenticTheme.Spacing.xs) {
@@ -359,6 +436,14 @@ struct ChatView: View {
                             title: undo.title,
                             onUndo: model.undoLastConversationRewrite,
                             onDismiss: model.clearConversationUndo
+                        )
+                        .transition(.move(edge: .bottom).combined(with: .opacity))
+                    }
+
+                    if let question = model.pendingQuestion {
+                        QuestionCard(
+                            question: question,
+                            onAnswer: model.answerPendingQuestion
                         )
                         .transition(.move(edge: .bottom).combined(with: .opacity))
                     }
@@ -460,19 +545,25 @@ struct ChatView: View {
         }
     }
 
-    private func prepareExport() {
-        guard let transcript = model.conversationExportText(id: conversationID) else { return }
-        exportDocument = MarkdownExportDocument(text: transcript)
-        isExportingConversation = true
-    }
-
-    private var exportFilename: String {
-        let title = model.conversation(id: conversationID)?.title ?? "Cagentic Chat"
-        let cleaned = title
-            .components(separatedBy: CharacterSet.alphanumerics.inverted)
-            .filter { !$0.isEmpty }
-            .joined(separator: "-")
-        return cleaned.isEmpty ? "Cagentic-Chat" : cleaned
+    /// Sends the transcript to the newest message, even from a flick that is still coasting.
+    ///
+    /// A single `scrollTo` is not enough: tapping the button mid-scroll leaves the scroll view with
+    /// momentum, and that momentum overrides the programmatic offset a frame later — so the button
+    /// looked dead exactly when it was most useful. Re-issuing the scroll until the viewport
+    /// actually arrives is what makes the tap stick.
+    private func jumpToLatest(using proxy: ScrollViewProxy) {
+        followsStream = true
+        scrollToBottom(using: proxy, animated: true)
+        jumpTask?.cancel()
+        jumpTask = Task { @MainActor in
+            // Bounded: eight tries over about half a second, and it stops the moment it lands or
+            // the reader touches the transcript again.
+            for _ in 0..<8 {
+                try? await Task.sleep(for: .milliseconds(60))
+                if Task.isCancelled || isTouchingScroll || isNearBottom { return }
+                scrollToBottom(using: proxy, animated: false)
+            }
+        }
     }
 
     private func performDeletion(_ deletion: ChatDeletion) {
@@ -483,9 +574,11 @@ struct ChatView: View {
         pendingDeletion = nil
     }
 
+    /// Both of these work on either backend. They used to require locally-owned chats, which
+    /// greyed them out for every gateway conversation — but the gateway has always been able to
+    /// rewrite a turn and re-run it, which is what its own web page has used all along.
     private func canRegenerate(_ message: ChatMessage) -> Bool {
         message.role == .assistant
-            && model.conversationsAreLocallyOwned
             && model.connectionState.isConnected
             && !model.isGenerating
             && !model.activeModelName.isEmpty
@@ -493,10 +586,15 @@ struct ChatView: View {
 
     private func canEdit(_ message: ChatMessage) -> Bool {
         message.role == .user
-            && model.conversationsAreLocallyOwned
             && model.connectionState.isConnected
             && !model.isGenerating
             && !model.activeModelName.isEmpty
+    }
+
+    /// Branching forks a chat into a second one. The gateway owns its history and has no notion
+    /// of a fork, so this stays local — offering it there would promise something no route can do.
+    private func canBranch() -> Bool {
+        model.conversationsAreLocallyOwned
     }
 
     private var messageTransition: AnyTransition {
@@ -652,15 +750,24 @@ private struct EditMessageView: View {
                 isPresented: $isRewriteConfirmationPresented,
                 titleVisibility: .visible
             ) {
-                Button("Branch and send") {
-                    submitEdit(asBranch: true)
+                if model.conversationsAreLocallyOwned {
+                    Button("Branch and send") {
+                        submitEdit(asBranch: true)
+                    }
                 }
                 Button("Replace in this chat", role: .destructive) {
                     submitEdit(asBranch: false)
                 }
                 Button("Cancel", role: .cancel) {}
             } message: {
-                Text("A branch preserves the original chat. Replacing removes the later turns here, with Undo available briefly afterward.")
+                // Branching forks the chat, which only a locally-owned one can do — the gateway
+                // owns its history and has no fork. Saying so beats offering a button that
+                // cannot work.
+                Text(
+                    model.conversationsAreLocallyOwned
+                        ? "A branch preserves the original chat. Replacing removes the later turns here, with Undo available briefly afterward."
+                        : "This removes the later turns in this chat, on the computer as well. Undo is available briefly afterward."
+                )
             }
         }
     }
@@ -811,6 +918,92 @@ private struct ChatEmptyState: View {
 /// Presented inline above the composer rather than as a sheet: the gateway parks its turn thread
 /// here for up to five minutes, so the request has to stay visible with the transcript that
 /// explains it, and it must not collide with the settings sheets the app can already be showing.
+/// The model asking something, with the turn parked on the answer.
+///
+/// Options are shortcuts, never the whole answer — free text is always offered alongside them,
+/// because a list the model wrote may not contain the real answer and being unable to say so
+/// would leave the turn parked until it times out.
+private struct QuestionCard: View {
+    @Environment(\.accessibilityReduceMotion) private var reduceMotion
+    @State private var typed = ""
+    @FocusState private var isFieldFocused: Bool
+
+    let question: GatewayQuestion
+    let onAnswer: (String) -> Void
+
+    var body: some View {
+        VStack(alignment: .leading, spacing: CagenticTheme.Spacing.sm) {
+            Label("Question", systemImage: "questionmark.bubble")
+                .font(CagenticTheme.FontStyle.captionSemibold)
+                .foregroundStyle(CagenticTheme.accent)
+
+            Text(question.question)
+                .font(CagenticTheme.FontStyle.Message.body)
+                .foregroundStyle(CagenticTheme.textPrimary)
+                .fixedSize(horizontal: false, vertical: true)
+
+            ForEach(question.options, id: \.self) { option in
+                Button {
+                    onAnswer(option)
+                } label: {
+                    Text(option)
+                        .font(CagenticTheme.FontStyle.calloutMedium)
+                        .frame(maxWidth: .infinity, alignment: .leading)
+                        .frame(minHeight: 44)
+                        .padding(.horizontal, CagenticTheme.Spacing.sm)
+                        .background(CagenticTheme.surfaceRaised, in: .rect(cornerRadius: CagenticTheme.Radius.control))
+                        .overlay {
+                            RoundedRectangle(cornerRadius: CagenticTheme.Radius.control)
+                                .stroke(CagenticTheme.border, lineWidth: 0.75)
+                        }
+                        .contentShape(.rect)
+                }
+                .buttonStyle(.plain)
+            }
+
+            HStack(spacing: CagenticTheme.Spacing.xs) {
+                TextField(
+                    question.options.isEmpty ? "Your answer" : "Or answer in your own words",
+                    text: $typed,
+                    axis: .vertical
+                )
+                .lineLimit(1...4)
+                .textFieldStyle(.plain)
+                .focused($isFieldFocused)
+                .submitLabel(.send)
+                .onSubmit(submit)
+                .padding(.horizontal, CagenticTheme.Spacing.sm)
+                .frame(minHeight: 44)
+                .background(CagenticTheme.surface, in: .rect(cornerRadius: CagenticTheme.Radius.control))
+                .overlay {
+                    RoundedRectangle(cornerRadius: CagenticTheme.Radius.control)
+                        .stroke(CagenticTheme.border, lineWidth: 0.75)
+                }
+
+                Button("Answer", action: submit)
+                    .buttonStyle(.borderedProminent)
+                    .controlSize(.large)
+                    .disabled(typed.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty)
+            }
+        }
+        .padding(CagenticTheme.Spacing.sm)
+        .background(CagenticTheme.surface, in: .rect(cornerRadius: CagenticTheme.Radius.card))
+        .overlay {
+            RoundedRectangle(cornerRadius: CagenticTheme.Radius.card)
+                .stroke(CagenticTheme.accent.opacity(0.5), lineWidth: 0.75)
+        }
+        .padding(.horizontal, CagenticTheme.Spacing.sm)
+        .onAppear { isFieldFocused = question.options.isEmpty }
+    }
+
+    private func submit() {
+        let trimmed = typed.trimmingCharacters(in: .whitespacesAndNewlines)
+        guard !trimmed.isEmpty else { return }
+        typed = ""
+        onAnswer(trimmed)
+    }
+}
+
 private struct PermissionRequestCard: View {
     let request: GatewayPermissionRequest
     let onAnswer: (GatewayPermissionAnswer) -> Void
@@ -850,7 +1043,7 @@ private struct PermissionRequestCard: View {
             if let diff = request.diff {
                 ScrollView(.vertical) {
                     Text(diff)
-                        .font(.system(.caption2, design: .monospaced))
+                        .font(CagenticTheme.FontStyle.Code.detail)
                         .foregroundStyle(CagenticTheme.textSecondary)
                         .frame(maxWidth: .infinity, alignment: .leading)
                         .textSelection(.enabled)
@@ -944,33 +1137,6 @@ private struct ConversationUndoBanner: View {
     }
 }
 
-private struct MarkdownExportDocument: FileDocument {
-    static var readableContentTypes: [UTType] { [.cagenticMarkdown] }
-
-    var text: String
-
-    init(text: String) {
-        self.text = text
-    }
-
-    init(configuration: ReadConfiguration) throws {
-        guard let data = configuration.file.regularFileContents,
-              let text = String(data: data, encoding: .utf8)
-        else {
-            throw CocoaError(.fileReadCorruptFile)
-        }
-        self.text = text
-    }
-
-    func fileWrapper(configuration: WriteConfiguration) throws -> FileWrapper {
-        FileWrapper(regularFileWithContents: Data(text.utf8))
-    }
-}
-
-private extension UTType {
-    nonisolated static let cagenticMarkdown = UTType(filenameExtension: "md") ?? .plainText
-}
-
 private extension AvailableModel {
     var menuSymbol: String {
         if capabilities.contains("vision") {
@@ -987,5 +1153,27 @@ private extension AvailableModel {
     NavigationStack {
         let model = AppModel.preview()
         ChatView(model: model, conversationID: model.selectedConversationID!)
+    }
+}
+
+/// How far the transcript sits from its own end, with the viewport it is measured against.
+///
+/// Carrying both means the Latest button's threshold can scale with the device instead of being a
+/// magic number tuned on one phone, and the hysteresis can be applied where the previous state is
+/// known rather than inside the geometry closure.
+struct ScrollBottomDistance: Equatable {
+    let fromBottom: CGFloat
+    let viewport: CGFloat
+
+    /// Whether the Latest button belongs on screen, given whether it is already there.
+    ///
+    /// Two thresholds rather than one. It takes half a screen of deliberate scrolling to summon
+    /// the button — drifting 120pt off the bottom is a nudge, not a decision to go read something
+    /// — and it survives until the transcript is most of the way back, so a finger resting near
+    /// the boundary cannot flicker it on and off.
+    func showsJumpButton(whenAlreadyShowing showing: Bool) -> Bool {
+        let appearsAt = max(320, viewport * 0.5)
+        if showing { return fromBottom >= appearsAt * 0.4 }
+        return fromBottom > appearsAt
     }
 }

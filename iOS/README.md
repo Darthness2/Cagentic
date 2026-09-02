@@ -15,6 +15,7 @@ can read files, run commands, and search — asking your approval each time.
 - Persistent per-chat drafts, attachment drafts, branching, and a short-lived rewrite Undo
 - Pinned and archived chats with rename, bulk management, Markdown export, and sharing
 - Compact model selection, capability/context metadata, model installation, and token details
+- Profiles — named sets of instructions and dials — and per-chat approval modes on the gateway
 - Required first-launch guidance with actionable connection diagnostics
 - iPhone and iPad navigation, Dynamic Type, VoiceOver, Reduce Motion, and full
   light/dark appearance support
@@ -31,28 +32,37 @@ once and switched between.
 | Chats live | on this device | on the computer, mirrored here for display |
 | Credential | optional proxy bearer token | required access token |
 | Replies | text only | text plus plans, tool calls, and approvals |
-| Attachments | photos, PDFs, text, source code | not supported |
-| Edit, regenerate, branch | yes | no — the gateway owns its history |
+| Attachments | photos, PDFs, text, source code | uploaded to the computer, then referenced |
+| Edit and regenerate | yes | yes — the gateway re-runs the turn |
+| Branch a chat | yes | no — the gateway owns its history and has no fork |
 
 ## Connect the app to the Cagentic gateway
 
-The gateway listens only on the computer itself and mints a fresh token on every
-restart, so two settings in `~/.config/cagentic/config.json` are required before
-a phone can reach it:
+On the computer, in Cagentic's terminal or on its web page:
 
-```json
-{
-  "gateway": {
-    "lan": true,
-    "token": "a-long-random-string"
-  }
-}
+```text
+/token
 ```
 
-`lan` binds the gateway to all interfaces; without a pinned `token` a paired
-device breaks every time the gateway restarts. Restart the gateway, allow its
-port through the computer's private-network firewall, then enter the computer's
-LAN address and that token in the app.
+It asks once whether devices on your Wi-Fi may connect, turns on network access
+and pins an access token for you, then shows a six-digit code.
+
+On the phone, add a server and choose **Find on Wi-Fi**. The computer appears by
+name — it advertises itself over Bonjour as `_cagentic._tcp` — so there is no
+address to look up. Enter the six digits and the phone receives the real access
+token, which is stored in Keychain. The code is good for about two minutes, is
+usable once, and is refused after five wrong guesses; run `/token` again for a
+fresh one.
+
+If discovery is blocked on your network, **Enter an address** still works: type
+the computer's address and the same six digits — the app exchanges them for the
+token exactly as the Wi-Fi flow does. A `gateway.token` value works there too.
+
+Tailscale MagicDNS names are treated like LAN addresses, so
+`studio.tailnet-name.ts.net` reaches the gateway on port 8700 without a scheme.
+Enter the plain name rather than the `https://` URL Tailscale's interface shows:
+that URL goes to port 443, where `tailscale serve` may be proxying an entirely
+different program.
 
 > The gateway token grants full control of the computer — anything Cagentic can
 > run, read, or change. Cagentic sends it over plain HTTP only to private LAN
@@ -182,12 +192,24 @@ conversation, and whether a credential may cross the network unencrypted.
   capability, then send the preserved photo draft again.
 - **A PDF cannot be attached:** confirm it is unlocked and contains selectable
   text; scanned PDFs require OCR first.
-- **Gateway rejects the token:** confirm `gateway.token` in the computer's
-  `config.json` matches what was entered, and that the gateway was restarted
-  after the change.
-- **Gateway unreachable:** confirm `gateway.lan` is `true`, the gateway was
-  restarted, and the firewall allows its port. The gateway probes for a free
-  port when 8700 is taken, so check the port it actually reported.
+- **"a gateway is already running with an older access token":** the background
+  service started before a token was pinned. Restart it — if it runs at login,
+  `cagentic --uninstall-service && cagentic --install-service` — then run
+  `/token` again.
+- **The computer is not listed:** confirm `/token` reported the gateway as live,
+  that both devices are on the same Wi-Fi, and that the firewall allows the
+  gateway's port. Some networks block Bonjour between clients; use **Enter an
+  address** there.
+- **"that code is not right":** codes expire after about two minutes and are
+  single-use. Run `/token` again.
+- **Gateway rejects the token:** re-pair with `/token`. A gateway with no pinned
+  `gateway.token` mints a new one on every restart, which `/token` fixes by
+  pinning one for you.
+- **"this conversation is too long" / "little fits in … context":** the model's
+  context has to hold the tool definitions and the system prompt before any
+  conversation, and the enabled tools alone can be thousands of tokens. Raise the
+  model's context size on the computer (`/set ollama.num_ctx 32768`) or turn off
+  tool groups with `/groups`.
 - **"The gateway is busy":** it runs one turn at a time, shared with the terminal
   and the web UI, and its own background routines take the same lock. The message
   was not sent; the draft is restored so it can be sent again.

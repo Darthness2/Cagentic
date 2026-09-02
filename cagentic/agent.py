@@ -399,6 +399,11 @@ def render_event(event: Message, rs: _RenderState) -> None:
             _print_tool_line(name, short_summary, meta, ok=ok, count=1)
     elif k == "info":
         ui.info(d["text"])
+    elif k == "context":
+        # The status bar already carries the running context figure, so printing it per turn
+        # would repeat what is on screen. Kept as an event because the phone and the web page
+        # draw a meter from it.
+        pass
     elif k == "warn":
         ui.warn(d["text"])
     elif k == "error":

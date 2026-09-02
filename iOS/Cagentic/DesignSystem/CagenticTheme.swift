@@ -51,44 +51,76 @@ enum CagenticTheme {
         static let composer: CGFloat = 26
     }
 
+    /// Chrome type: navigation, settings, buttons, labels — everything that is
+    /// the app talking rather than the assistant. Space Grotesk.
     enum FontStyle {
-        static let display = Font.inter(.largeTitle, weight: .bold)
-        static let displaySmall = Font.inter(.title2, weight: .bold)
-        static let title = Font.inter(.title, weight: .bold)
-        static let title2 = Font.inter(.title2, weight: .bold)
-        static let title3 = Font.inter(.title3)
-        static let heading = Font.inter(.title3, weight: .semibold)
-        static let headline = Font.inter(.headline, weight: .semibold)
-        static let body = Font.inter(.body)
-        static let bodyMedium = Font.inter(.body, weight: .medium)
-        static let bodySemibold = Font.inter(.body, weight: .semibold)
-        static let callout = Font.inter(.callout)
-        static let calloutMedium = Font.inter(.callout, weight: .medium)
-        static let subheadline = Font.inter(.subheadline)
-        static let subheadlineMedium = Font.inter(.subheadline, weight: .medium)
-        static let subheadlineSemibold = Font.inter(.subheadline, weight: .semibold)
-        static let caption = Font.inter(.caption)
-        static let captionMedium = Font.inter(.caption, weight: .medium)
-        static let captionSemibold = Font.inter(.caption, weight: .semibold)
-        static let captionBold = Font.inter(.caption, weight: .bold)
-        static let caption2 = Font.inter(.caption2)
-        static let caption2Bold = Font.inter(.caption2, weight: .bold)
-        static let footnote = Font.inter(.footnote)
-        static let metadata = Font.inter(.caption).monospacedDigit()
+        static let display = Font.cagentic(.ui, .largeTitle, weight: .bold)
+        static let displaySmall = Font.cagentic(.ui, .title2, weight: .bold)
+        static let title = Font.cagentic(.ui, .title, weight: .bold)
+        static let title2 = Font.cagentic(.ui, .title2, weight: .bold)
+        static let title3 = Font.cagentic(.ui, .title3)
+        static let heading = Font.cagentic(.ui, .title3, weight: .semibold)
+        static let headline = Font.cagentic(.ui, .headline, weight: .semibold)
+        static let body = Font.cagentic(.ui, .body)
+        static let bodyMedium = Font.cagentic(.ui, .body, weight: .medium)
+        static let bodySemibold = Font.cagentic(.ui, .body, weight: .semibold)
+        static let callout = Font.cagentic(.ui, .callout)
+        static let calloutMedium = Font.cagentic(.ui, .callout, weight: .medium)
+        static let subheadline = Font.cagentic(.ui, .subheadline)
+        static let subheadlineMedium = Font.cagentic(.ui, .subheadline, weight: .medium)
+        static let subheadlineSemibold = Font.cagentic(.ui, .subheadline, weight: .semibold)
+        static let caption = Font.cagentic(.ui, .caption)
+        static let captionMedium = Font.cagentic(.ui, .caption, weight: .medium)
+        static let captionSemibold = Font.cagentic(.ui, .caption, weight: .semibold)
+        static let captionBold = Font.cagentic(.ui, .caption, weight: .bold)
+        static let caption2 = Font.cagentic(.ui, .caption2)
+        static let caption2Bold = Font.cagentic(.ui, .caption2, weight: .bold)
+        static let footnote = Font.cagentic(.ui, .footnote)
+        static let metadata = Font.cagentic(.ui, .caption).monospacedDigit()
+
+        /// Conversation type: what the user wrote and what the assistant said,
+        /// including the headings and lists inside an answer. Plus Jakarta Sans,
+        /// which is drawn for reading at length rather than for labels.
+        enum Message {
+            static let body = Font.cagentic(.reading, .body)
+            static let bodyItalic = Font.cagentic(.reading, .body, italic: true)
+            static let bodySemibold = Font.cagentic(.reading, .body, weight: .semibold)
+            static let callout = Font.cagentic(.reading, .callout)
+            static let captionMedium = Font.cagentic(.reading, .caption, weight: .medium)
+            /// Markdown heading levels, largest first.
+            static let heading1 = Font.cagentic(.reading, .title2, weight: .bold)
+            static let heading2 = Font.cagentic(.reading, .title3, weight: .semibold)
+            static let heading3 = Font.cagentic(.reading, .headline, weight: .semibold)
+        }
+
+        /// Code, command output, and anything else that is a payload rather
+        /// than prose. JetBrains Mono.
+        enum Code {
+            /// A `code span` inside a sentence.
+            static let inline = Font.cagentic(.code, .body)
+            /// Fenced code, command output, attached text files.
+            static let block = Font.cagentic(.code, .callout)
+            /// Dense payloads shown inside a control, such as a permission diff.
+            static let detail = Font.cagentic(.code, .caption2)
+            /// A field the user types a fixed-width value into.
+            static let entry = Font.cagentic(.code, .title2)
+        }
     }
 
     @MainActor
     static func configureUIKitTypography() {
         let navigationBar = UINavigationBar.appearance()
         var titleAttributes = navigationBar.titleTextAttributes ?? [:]
-        titleAttributes[.font] = UIFont.inter(
+        titleAttributes[.font] = UIFont.cagentic(
+            .ui,
             textStyle: .headline,
             weight: .semibold
         )
         navigationBar.titleTextAttributes = titleAttributes
 
         var largeTitleAttributes = navigationBar.largeTitleTextAttributes ?? [:]
-        largeTitleAttributes[.font] = UIFont.inter(
+        largeTitleAttributes[.font] = UIFont.cagentic(
+            .ui,
             textStyle: .largeTitle,
             weight: .bold
         )
@@ -96,18 +128,58 @@ enum CagenticTheme {
 
         let barButton = UIBarButtonItem.appearance()
         let barButtonAttributes: [NSAttributedString.Key: Any] = [
-            .font: UIFont.inter(textStyle: .body)
+            .font: UIFont.cagentic(.ui, textStyle: .body)
         ]
         barButton.setTitleTextAttributes(barButtonAttributes, for: .normal)
         barButton.setTitleTextAttributes(barButtonAttributes, for: .highlighted)
 
-        UITextField.appearance(whenContainedInInstancesOf: [UISearchBar.self]).font = UIFont.inter(
+        UITextField.appearance(whenContainedInInstancesOf: [UISearchBar.self]).font = UIFont.cagentic(
+            .ui,
             textStyle: .body
         )
     }
 }
 
-enum CagenticFontWeight {
+/// The three faces the app ships. Splitting them by role rather than by name
+/// keeps the choice at the call site about *what the text is*, so a family swap
+/// is one line here instead of a sweep through every view.
+enum CagenticFontFamily: CaseIterable {
+    /// Space Grotesk — chrome. Its wide, slightly geometric shapes read well as
+    /// labels and titles and badly as paragraphs, which is exactly the split.
+    case ui
+    /// Plus Jakarta Sans — conversation text, where line length is long and the
+    /// eye needs a humanist face.
+    case reading
+    /// JetBrains Mono — code and command output.
+    case code
+
+    fileprivate var postScriptFamily: String {
+        switch self {
+        case .ui: "SpaceGrotesk"
+        case .reading: "PlusJakartaSans"
+        case .code: "JetBrainsMono"
+        }
+    }
+
+    /// Only the roman weights each family actually ships in the bundle. Asking
+    /// for one that is not registered silently falls back to the system face,
+    /// so the theme is deliberately limited to what `UIAppFonts` lists.
+    fileprivate func resolved(_ weight: CagenticFontWeight, italic: Bool) -> CagenticFontWeight {
+        switch self {
+        // Only the regular italic is bundled: emphasis in an answer is common,
+        // bold emphasis inside it is not, and SwiftUI slants the semibold face
+        // acceptably for the rare case.
+        case .reading where italic: .regular
+        // Code is set at one weight; there is no bold monospace in the UI.
+        case .code: .regular
+        case .ui, .reading: weight
+        }
+    }
+
+    fileprivate var hasItalic: Bool { self == .reading }
+}
+
+enum CagenticFontWeight: CaseIterable {
     case regular
     case medium
     case semibold
@@ -115,7 +187,7 @@ enum CagenticFontWeight {
 
     fileprivate var postScriptSuffix: String {
         switch self {
-        case .regular: ""
+        case .regular: "-Regular"
         case .medium: "-Medium"
         case .semibold: "-SemiBold"
         case .bold: "-Bold"
@@ -124,20 +196,23 @@ enum CagenticFontWeight {
 }
 
 extension Font {
-    static func inter(
+    static func cagentic(
+        _ family: CagenticFontFamily,
         _ textStyle: Font.TextStyle,
         weight: CagenticFontWeight = .regular,
         italic: Bool = false
     ) -> Font {
-        let family = italic ? "InterVariableItalic" : "InterVariable"
-        return .custom(
-            family + weight.postScriptSuffix,
-            size: interPointSize(for: textStyle),
+        .custom(
+            CagenticFontName.postScript(family, weight: weight, italic: italic),
+            size: cagenticPointSize(for: textStyle),
             relativeTo: textStyle
         )
     }
 
-    private static func interPointSize(for textStyle: Font.TextStyle) -> CGFloat {
+    /// The point sizes the type scale is anchored to. `relativeTo:` then hands
+    /// Dynamic Type back the scaling, so these are the sizes at the default
+    /// content size rather than fixed ones.
+    private static func cagenticPointSize(for textStyle: Font.TextStyle) -> CGFloat {
         switch textStyle {
         case .largeTitle: 34
         case .title: 28
@@ -154,13 +229,31 @@ extension Font {
     }
 }
 
+/// Resolves a role to the PostScript name of a face that is actually bundled.
+/// Shared with the tests, which assert the name against `UIAppFonts` — a
+/// typo here is invisible at runtime because the system font quietly stands in.
+enum CagenticFontName {
+    static func postScript(
+        _ family: CagenticFontFamily,
+        weight: CagenticFontWeight = .regular,
+        italic: Bool = false
+    ) -> String {
+        let wantsItalic = italic && family.hasItalic
+        let resolved = family.resolved(weight, italic: italic)
+        // The italic face is the regular one; there is no PlusJakartaSans-RegularItalic.
+        let suffix = wantsItalic ? "-Italic" : resolved.postScriptSuffix
+        return family.postScriptFamily + suffix
+    }
+}
+
 extension UIFont {
-    fileprivate static func inter(
+    fileprivate static func cagentic(
+        _ family: CagenticFontFamily,
         textStyle: UIFont.TextStyle,
         weight: CagenticFontWeight = .regular
     ) -> UIFont {
         let baseSize = preferredFont(forTextStyle: textStyle).pointSize
-        let name = "InterVariable" + weight.postScriptSuffix
+        let name = CagenticFontName.postScript(family, weight: weight)
         let baseFont = UIFont(name: name, size: baseSize) ?? preferredFont(forTextStyle: textStyle)
         return UIFontMetrics(forTextStyle: textStyle).scaledFont(for: baseFont)
     }

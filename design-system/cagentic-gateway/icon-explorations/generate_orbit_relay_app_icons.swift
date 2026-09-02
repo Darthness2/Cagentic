@@ -1,5 +1,9 @@
 #!/usr/bin/env swift
 
+// Renders approved Orbit Relay app-icon deliverables without changing the
+// product asset catalog. Outputs live beside this script under
+// `final-orbit-relay-app-icons/` for deliberate adoption later.
+
 import CoreGraphics
 import Foundation
 import ImageIO
@@ -40,20 +44,18 @@ private struct IconAppearance {
 
 private let appearances = [
     IconAppearance(
-        filename: "AppIcon-Standard.png",
+        filename: "Cagentic-OrbitRelay-Standard.png",
         background: RGB(hex: 0xF7F9FB),
         mark: RGB(hex: 0x0969DA)
     ),
     IconAppearance(
-        filename: "AppIcon-Dark.png",
+        filename: "Cagentic-OrbitRelay-Dark.png",
         background: RGB(hex: 0x0A0C10),
         mark: RGB(hex: 0x7CC4FF)
     ),
-    // iOS applies the user's selected tint to this luminance artwork. Keep it
-    // deliberately neutral while retaining the light-background/dark-mark
-    // contrast of Cagentic's graphite palette.
+    // iOS applies the user's Home Screen tint to this luminance artwork.
     IconAppearance(
-        filename: "AppIcon-Tinted.png",
+        filename: "Cagentic-OrbitRelay-Tinted.png",
         background: RGB(hex: 0xF2F2F2),
         mark: RGB(hex: 0x242424)
     ),
@@ -71,47 +73,43 @@ private enum GenerationError: Error, CustomStringConvertible {
         case .cannotCreateColorSpace:
             "Could not create an sRGB color space."
         case .cannotCreateContext:
-            "Could not create the 1024px bitmap context."
+            "Could not create a 1024px bitmap context."
         case .cannotCreateImage:
             "Could not create an image from the bitmap context."
-        case .cannotCreateDestination(let url):
-            "Could not create a PNG destination at \(url.path)."
-        case .cannotWriteImage(let url):
-            "Could not finalize the PNG at \(url.path)."
+        case let .cannotCreateDestination(url):
+            "Could not create image destination: \(url.path)"
+        case let .cannotWriteImage(url):
+            "Could not finalize image: \(url.path)"
         }
     }
 }
 
-/// The exact 24-point Cagentic `i-spark` geometry from the gateway and browser
-/// extension. The source SVG lives beside this script for design-tool use.
-private func makeSparkPath(scale: CGFloat) -> CGPath {
-    func point(_ x: CGFloat, _ y: CGFloat) -> CGPoint {
-        CGPoint(x: x * scale, y: y * scale)
-    }
+private func scaledPoint(_ x: CGFloat, _ y: CGFloat, scale: CGFloat) -> CGPoint {
+    CGPoint(x: x * scale, y: y * scale)
+}
 
+private func makeOrbitRelayArcs(scale: CGFloat) -> CGPath {
     let path = CGMutablePath()
-    path.move(to: point(12, 3))
-    path.addCurve(
-        to: point(21, 12),
-        control1: point(12.7, 8.1),
-        control2: point(15.9, 11.3)
-    )
-    path.addCurve(
-        to: point(12, 21),
-        control1: point(15.9, 12.7),
-        control2: point(12.7, 15.9)
-    )
-    path.addCurve(
-        to: point(3, 12),
-        control1: point(11.3, 15.9),
-        control2: point(8.1, 12.7)
-    )
-    path.addCurve(
-        to: point(12, 3),
-        control1: point(8.1, 11.3),
-        control2: point(11.3, 8.1)
-    )
-    path.closeSubpath()
+    let center = scaledPoint(12, 12, scale: scale)
+    let radius: CGFloat = 8.45 * scale
+    let startAngles: [CGFloat] = [-.pi / 2, 0, .pi / 2, .pi]
+    let arcLength: CGFloat = .pi / 3
+
+    for startAngle in startAngles {
+        path.move(
+            to: CGPoint(
+                x: center.x + radius * cos(startAngle),
+                y: center.y + radius * sin(startAngle)
+            )
+        )
+        path.addArc(
+            center: center,
+            radius: radius,
+            startAngle: startAngle,
+            endAngle: startAngle + arcLength,
+            clockwise: false
+        )
+    }
     return path
 }
 
@@ -138,13 +136,12 @@ private func render(_ appearance: IconAppearance, to outputURL: URL) throws {
     context.fill(CGRect(x: 0, y: 0, width: canvasSize, height: canvasSize))
 
     let scale = CGFloat(canvasSize) / designGrid
-    context.addPath(makeSparkPath(scale: scale))
-    context.setStrokeColor(appearance.mark.color(in: colorSpace))
-    context.setLineWidth(1.7 * scale)
-    context.setLineCap(.round)
-    context.setLineJoin(.round)
     context.setAllowsAntialiasing(true)
     context.setShouldAntialias(true)
+    context.addPath(makeOrbitRelayArcs(scale: scale))
+    context.setStrokeColor(appearance.mark.color(in: colorSpace))
+    context.setLineWidth(2.1 * scale)
+    context.setLineCap(.round)
     context.strokePath()
 
     guard let image = context.makeImage() else {
@@ -166,20 +163,18 @@ private func render(_ appearance: IconAppearance, to outputURL: URL) throws {
 }
 
 private func main() throws {
-    let scriptURL = URL(fileURLWithPath: CommandLine.arguments[0])
-        .standardizedFileURL
-    let assetDirectory = scriptURL
+    let scriptURL = URL(fileURLWithPath: CommandLine.arguments[0]).standardizedFileURL
+    let outputDirectory = scriptURL
         .deletingLastPathComponent()
-        .deletingLastPathComponent()
-        .appendingPathComponent("Cagentic/Resources/Assets.xcassets/AppIcon.appiconset")
+        .appendingPathComponent("final-orbit-relay-app-icons")
 
     try FileManager.default.createDirectory(
-        at: assetDirectory,
+        at: outputDirectory,
         withIntermediateDirectories: true
     )
 
     for appearance in appearances {
-        let outputURL = assetDirectory.appendingPathComponent(appearance.filename)
+        let outputURL = outputDirectory.appendingPathComponent(appearance.filename)
         try render(appearance, to: outputURL)
         print("Wrote \(outputURL.path)")
     }

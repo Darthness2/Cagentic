@@ -144,7 +144,17 @@ public nonisolated struct GatewayEventDecoder: Sendable {
             return steps.isEmpty ? [] : [.plan(steps)]
         case "tool_call":
             guard let id = data.id, let name = data.name else { return [] }
-            return [.toolCall(GatewayToolCall(id: id, name: name, summary: data.summary ?? ""))]
+            return [
+                .toolCall(
+                    GatewayToolCall(
+                        id: id,
+                        name: name,
+                        summary: data.summary ?? "",
+                        label: data.label ?? "",
+                        labelPlural: data.labelPlural ?? ""
+                    )
+                )
+            ]
         case "tool_denied":
             // A denial is always followed by a matching failed `tool_result`, so rendering this too
             // would duplicate the row.
@@ -176,13 +186,27 @@ public nonisolated struct GatewayEventDecoder: Sendable {
                     )
                 )
             ]
-        case "info":
-            // The per-turn token/model routing line is live telemetry, not conversation content;
-            // the web client hides it for the same reason.
-            if text.isEmpty || Self.isInternalTelemetry(text) {
+        case "context":
+            // This used to arrive as an `info` line reading "sending ~N tokens to <model>", which
+            // every client had to recognise by its wording and drop. It is a measurement now, and
+            // it drives the context meter rather than being hidden.
+            guard let limit = data.limit, limit > 0 else { return [] }
+            return [.contextUsage(used: data.used ?? 0, limit: limit)]
+        case "question":
+            guard let id = data.id, let question = data.question, !question.isEmpty else {
                 return []
             }
-            return [.notice(level: .info, text: text)]
+            return [
+                .question(
+                    GatewayQuestion(
+                        id: id,
+                        question: question,
+                        options: (data.options ?? []).filter { !$0.isEmpty }
+                    )
+                )
+            ]
+        case "info":
+            return text.isEmpty ? [] : [.notice(level: .info, text: text)]
         case "warn":
             return text.isEmpty ? [] : [.notice(level: .warning, text: text)]
         case "error":
@@ -226,10 +250,6 @@ public nonisolated struct GatewayEventDecoder: Sendable {
         return .server(message: text.isEmpty ? "The turn ended unexpectedly." : text)
     }
 
-    static func isInternalTelemetry(_ text: String) -> Bool {
-        guard text.hasPrefix("sending ~") else { return false }
-        return text.contains(" tokens to ")
-    }
 }
 
 private nonisolated struct FramePayload: Decodable {
@@ -246,6 +266,8 @@ private nonisolated struct EventData: Decodable {
     var id: String?
     var name: String?
     var summary: String?
+    var label: String?
+    var labelPlural: String?
     var ok: Bool?
     var firstLine: String?
     var tool: String?
@@ -255,6 +277,10 @@ private nonisolated struct EventData: Decodable {
     var network: Bool?
     var before: Int?
     var after: Int?
+    var used: Int?
+    var limit: Int?
+    var question: String?
+    var options: [String]?
     var usage: UsagePayload?
     var turnUsage: UsagePayload?
 
@@ -266,6 +292,8 @@ private nonisolated struct EventData: Decodable {
         case id
         case name
         case summary
+        case label
+        case labelPlural = "label_plural"
         case ok
         case firstLine = "first_line"
         case tool
@@ -275,6 +303,10 @@ private nonisolated struct EventData: Decodable {
         case network
         case before
         case after
+        case used
+        case limit
+        case question
+        case options
         case usage
         case turnUsage = "turn_usage"
     }

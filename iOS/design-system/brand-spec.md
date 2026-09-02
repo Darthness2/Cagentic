@@ -43,14 +43,29 @@ always expressed with text or a symbol in addition to color.
 
 ## Typography and spacing
 
-- Display, UI, body, and metadata: Inter Variable through Dynamic Type-aware
-  semantic SwiftUI text styles.
+- Three faces, split by what the text *is* rather than by where it sits:
+  - **Space Grotesk** — chrome. Navigation, settings, labels, buttons: the app
+    talking. Its wide geometric shapes read well short and poorly long.
+  - **Plus Jakarta Sans** — conversation. Anything the user wrote or the
+    assistant said, including the headings and lists inside an answer. A
+    humanist face for text read at length.
+  - **JetBrains Mono** — payloads. Code blocks, command output, attached text
+    files, permission diffs, and fixed-width entry fields.
+- All three go through Dynamic Type-aware semantic SwiftUI text styles; the role
+  is chosen at the call site via `CagenticTheme.FontStyle`, `.FontStyle.Message`,
+  and `.FontStyle.Code`.
 - Weights: regular for reading, medium for labels, semibold for navigation and
   hierarchy, and bold only for major display text.
-- Code samples remain system monospaced because preserving code alignment is a
-  content requirement rather than app chrome.
-- Inter 4.1 is bundled under the SIL Open Font License 1.1; its license ships
+- Only the faces actually named are bundled — the variable sources are instanced
+  down to ten static weights (four chrome, four conversation, one conversation
+  italic, one mono), which `TypographyTests` asserts in both directions so an
+  unused weight cannot creep into the bundle and a missing one cannot silently
+  fall back to the system font.
+- All three are bundled under the SIL Open Font License 1.1; each license ships
   beside the font resources.
+- The same three faces are served by the gateway's web page and shipped in the browser
+  extension, converted to woff2 from these exact files by the same generator. The three
+  surfaces are one product, and type is what makes that legible before anything else does.
 - Spacing scale: 4, 8, 12, 16, 24, 32, 48 points.
 - Radii: 8 controls, 12 message surfaces, 16 composer and sheets.
 - Every interactive target is at least 44 by 44 points.
