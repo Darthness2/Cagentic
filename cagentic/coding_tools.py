@@ -642,6 +642,20 @@ def t_powershell(args: dict, ctx: ToolContext) -> str:
 # ============================================================================
 
 
+def _requested_groups(args: dict) -> set[str] | None:
+    """The `tools` argument as a set of group names, or None to inherit."""
+    from .tools import TOOL_GROUPS, resolve_groups
+
+    raw = args.get("tools")
+    if isinstance(raw, str):
+        raw = [part.strip() for part in raw.replace(",", " ").split()]
+    if not isinstance(raw, (list, tuple)) or not raw:
+        return None
+    wanted = resolve_groups(str(g) for g in raw)
+    known = {g for g in wanted if g in TOOL_GROUPS}
+    return known or None
+
+
 def t_agent_call(args: dict, ctx: ToolContext) -> str:
     engine = getattr(ctx, "engine", None)
     if engine is None:
@@ -650,8 +664,36 @@ def t_agent_call(args: dict, ctx: ToolContext) -> str:
 
     prompt = args["prompt"]
     model = args.get("model")
-    answer = fork_subagent(engine, prompt, model=model, title=args.get("title", "subagent"))
-    return _truncate(f"[sub-agent answer]\n{answer}")
+    groups = _requested_groups(args)
+
+    # What the child did, not just what it concluded. A sub-agent used to report
+    # a paragraph of prose with no way to tell whether it had read the right
+    # files, run anything, or simply made the answer up.
+    trace: list[str] = []
+
+    def _watch(kind: str, data: dict) -> None:
+        if kind != "tool_call":
+            return
+        summary = str(data.get("summary") or "").strip()
+        label = str(data.get("label") or data.get("name") or "").strip()
+        trace.append(f"  {label}  {summary}".rstrip())
+
+    answer = fork_subagent(
+        engine,
+        prompt,
+        model=model,
+        title=args.get("title", "subagent"),
+        tool_groups=groups,
+        on_event=_watch,
+    )
+    parts = [f"[sub-agent answer]\n{answer}"]
+    if trace:
+        shown = trace[:20]
+        more = len(trace) - len(shown)
+        parts.append(
+            "\n[what it did]\n" + "\n".join(shown) + (f"\n  … {more} more" if more > 0 else "")
+        )
+    return _truncate("\n".join(parts))
 
 
 def t_agent_call_async(args: dict, ctx: ToolContext) -> str:
@@ -663,9 +705,10 @@ def t_agent_call_async(args: dict, ctx: ToolContext) -> str:
 
     prompt = args["prompt"]
     model = args.get("model")
+    groups = _requested_groups(args)
 
     def _run(p):
-        return fork_subagent(engine, p, model=model)
+        return fork_subagent(engine, p, model=model, tool_groups=groups)
 
     job_id = bg.submit_dream(prompt, _run)
     return f"OK: dream {job_id} dispatched (will surface on completion)"
@@ -1067,8 +1110,11 @@ CODING_TOOL_SCHEMAS = [
             "description": (
                 "Fork a sub-agent on a FRESH conversation to handle a focused subtask "
                 "(e.g. 'find every file that imports requests and summarize'). Returns "
-                "the sub-agent's final answer. Inherits workspace, tokens, etc., but "
-                "its messages are isolated so the main context stays clean."
+                "its answer plus a short trace of what it actually did. Inherits "
+                "workspace, tokens and every restriction you are under, but its "
+                "messages are isolated so the main context stays clean. Pass `tools` "
+                "to narrow what it may use; several read-only sub-agents issued "
+                "together run in parallel."
             ),
             "parameters": {
                 "type": "object",
@@ -1079,6 +1125,16 @@ CODING_TOOL_SCHEMAS = [
                         "description": "Override model for this sub-agent. Default: same as parent.",
                     },
                     "title": {"type": "string"},
+                    "tools": {
+                        "type": "array",
+                        "items": {"type": "string"},
+                        "description": (
+                            "Tool groups the sub-agent may use, e.g. ['files','web']. "
+                            "Default: whatever you have. Narrowing to read-only groups "
+                            "(files, web, mcp, system) also lets several sub-agents run "
+                            "at once, since none of them can change anything."
+                        ),
+                    },
                 },
                 "required": ["prompt"],
             },
@@ -1094,6 +1150,7 @@ CODING_TOOL_SCHEMAS = [
                 "properties": {
                     "prompt": {"type": "string"},
                     "model": {"type": "string"},
+                    "tools": {"type": "array", "items": {"type": "string"}},
                 },
                 "required": ["prompt"],
             },

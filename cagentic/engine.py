@@ -432,7 +432,7 @@ _TOOL_SECTIONS: tuple[tuple[str, str], ...] = (
     # Sub-agents
     (
         "subagent",
-        "- **Sub-agents** (agent_call, agent_call_async): fork a focused helper on a\n  fresh conversation for a self-contained subtask (big searches, summaries)\n  so the main context stays clean. Use the async variant for long research.",
+        "- **Sub-agents** (agent_call, agent_call_async): fork a focused helper on a\n  fresh conversation for a self-contained subtask (big searches, summaries)\n  so the main context stays clean. Pass `tools` to narrow what it may use —\n  a researcher needs files and web, not a shell — and issuing several\n  read-only ones together runs them in parallel. Use the async variant for\n  long research.",
     ),
     # Persistent tasks
     (
@@ -780,6 +780,25 @@ def normalize_messages_for_api(messages: list[dict]) -> list[dict]:
     return out
 
 
+def _call_is_concurrent_safe(call) -> bool:
+    """Whether this specific call can share the pool with its neighbours.
+
+    Usually a property of the tool name alone. `agent_call` is the exception:
+    a sub-agent restricted to read-only groups cannot change anything, which
+    makes fanning several out no riskier than several greps — while an
+    unrestricted one inherits the parent's write access and must stay serial.
+    """
+    name, args = call[0], call[1]
+    if name in CONCURRENT_SAFE:
+        return True
+    if name == "agent_call" and isinstance(args, dict):
+        from .coding_tools import _requested_groups
+        from .subagent import subagent_is_read_only
+
+        return subagent_is_read_only(_requested_groups(args))
+    return False
+
+
 class StreamingToolExecutor:
     def __init__(
         self,
@@ -815,10 +834,10 @@ class StreamingToolExecutor:
         i = 0
         n = len(calls)
         while i < n:
-            if calls[i][0] in CONCURRENT_SAFE:
+            if _call_is_concurrent_safe(calls[i]):
                 # Gather the maximal adjacent run of concurrent-safe calls.
                 j = i
-                while j < n and calls[j][0] in CONCURRENT_SAFE:
+                while j < n and _call_is_concurrent_safe(calls[j]):
                     j += 1
                 group = calls[i:j]
                 if len(group) > 1:

@@ -28,7 +28,7 @@ Cagentic **remembers things about you** across sessions, keeps a persistent remi
   the approval gate. Push, fetch, reset and rebase are deliberately left to
   `run_bash`, so reaching a remote is always an explicit, visible decision.
 - **GitHub integration** (optional) — list repos, read files, browse issues/PRs with a personal access token.
-- **Full coding agent** (absorbed from Collama) — atomic `multi_edit` batches, parser-only `check_syntax` for 12+ languages, Jupyter `notebook_edit`, a workspace directory stack for sub-projects, PowerShell support, sub-agents (`agent_call` / `agent_call_async`), a persistent cross-session task graph, and an `/effort low|medium|high` dial for how hard the model works.
+- **Full coding agent** (absorbed from Collama) — atomic `multi_edit` batches, parser-only `check_syntax` for 12+ languages, Jupyter `notebook_edit`, a workspace directory stack for sub-projects, PowerShell support, sub-agents (`agent_call` / `agent_call_async`) that report what they did and can be narrowed to a toolset — several read-only ones run in parallel —, a persistent cross-session task graph, and an `/effort low|medium|high` dial for how hard the model works.
 - **Agent teams** (optional, `/groups enable teams`) — long-lived teammate personas with mailboxes; a coordinator processes each teammate's mail by forking sub-agents and can auto-claim matching tasks from the task graph.
 - **Lifecycle hooks** — deterministic scripts that run on agent events, declared
   under `"hooks"` in `config.json`. A `PreToolUse` handler exiting 2 blocks the

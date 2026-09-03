@@ -1,16 +1,28 @@
 """Sub-agents (forkSubagent).
 
 Forks a child QueryEngine with a FRESH messages[] but inherited state
-(workspace, github_token, yolo, …). The child runs an isolated turn —
-its own plan, tools, loop — and returns a single string answer to the
-parent. The parent's main conversation stays focused; the sub-agent
-acts as a black-box research/specialist call.
+(workspace, github_token, yolo, …). The child runs an isolated turn — its own
+plan, tools, loop — and returns a single string answer to the parent, so the
+parent's main conversation stays focused.
+
+Three things it deliberately does NOT do any more:
+
+* run silently. The child used to be a true black box: whatever it read, ran or
+  wrote was invisible, and the only evidence was a paragraph of prose. `on_event`
+  reports each tool call as it happens so the caller can show its work.
+* share the parent's HTTP client. `requests.Session` is not thread-safe and the
+  background executor already runs up to eight sub-agents at once, so the shared
+  session was a real hazard before anything asked for fan-out. Each child now
+  builds its own where it can.
+* get the full toolset regardless. `tool_groups` narrows what the child is even
+  offered — a researcher that only needs to read has no business holding
+  `run_bash`, and a child that cannot write is safe to run in parallel.
 """
 
 from __future__ import annotations
 
 import logging
-from typing import TYPE_CHECKING
+from typing import TYPE_CHECKING, Callable
 
 from .permissions import auto_deny_resolver
 from .state import AppState
@@ -21,6 +33,47 @@ if TYPE_CHECKING:  # pragma: no cover
 logger = logging.getLogger(__name__)
 
 
+# Groups a sub-agent may be restricted to. Anything outside these can change
+# the world, which is what makes a restricted child safe to fan out.
+READ_ONLY_GROUPS = frozenset({"files", "web", "mcp", "system"})
+
+
+def subagent_is_read_only(tool_groups) -> bool:
+    """Whether a child limited to these groups can only look, never touch."""
+    if not tool_groups:
+        return False
+    return set(tool_groups).issubset(READ_ONLY_GROUPS)
+
+
+def _client_for(parent: "QueryEngine", model_spec: str | None):
+    """The client this sub-agent should use — usually the parent's.
+
+    Its own only when sharing would actually hurt: the cloud clients keep a
+    single `requests.Session`, which is not thread-safe, and sub-agents already
+    run concurrently through the background executor. Ollama posts per request
+    and shares fine.
+
+    Deliberately not "always build a fresh one". A caller that handed
+    QueryEngine a particular client — a test, an embedder, a gateway actor —
+    means it, and quietly substituting one built from config would ignore that.
+    """
+    needs_own = getattr(parent.client, "_session", None) is not None
+    if not needs_own and not model_spec:
+        return parent.client
+
+    from .providers import build_client, parse_model
+
+    spec = model_spec or getattr(parent.state, "active_model_spec", None) or parent.model
+    try:
+        provider, _name = parse_model(str(spec))
+        return build_client(parent.config or {}, provider)
+    except Exception:
+        # A missing key or an unknown provider is not worth failing the call
+        # over — the parent's client already works, shared session and all.
+        logger.debug("sub-agent could not build its own client for %r", spec, exc_info=True)
+        return parent.client
+
+
 def fork_subagent(
     parent: "QueryEngine",
     prompt: str,
@@ -28,12 +81,18 @@ def fork_subagent(
     model: str | None = None,
     title: str = "subagent",
     role: str | None = None,
+    tool_groups: set[str] | None = None,
+    on_event: "Callable[[str, dict], None] | None" = None,
 ) -> str:
     """Run a sub-agent and return its final answer.
 
     `role` (optional) is appended to the system prompt — used by the team
     coordinator to give each teammate a persistent persona without
     rewriting the engine's system-prompt builder.
+
+    `tool_groups` narrows what the child is offered; None inherits the parent's.
+    `on_event` is called with (kind, data) for each of the child's events, so a
+    caller can render what it is doing instead of waiting on a silent string.
     """
     from .engine import QueryEngine  # local import — avoids circular at module load
 
@@ -58,7 +117,11 @@ def fork_subagent(
         approval_mode=parent.state.approval_mode,
         ask_all=parent.state.ask_all,
         permission_rules=dict(parent.state.permission_rules),
-        tool_groups=set(parent.state.tool_groups) if parent.state.tool_groups else None,
+        tool_groups=(
+            set(tool_groups)
+            if tool_groups
+            else (set(parent.state.tool_groups) if parent.state.tool_groups else None)
+        ),
         # Fresh permission cache — a black-box sub-agent must not inherit or
         # mutate the parent's approvals. Unlike the fields above this one is a
         # record of answers already given, not a restriction, so starting empty
@@ -66,7 +129,7 @@ def fork_subagent(
         permissions={},
     )
     sub = QueryEngine(
-        client=parent.client,
+        client=_client_for(parent, model),
         state=sub_state,
         model=model or parent.model,
         temperature=parent.temperature,
@@ -85,6 +148,12 @@ def fork_subagent(
     final = ""
     try:
         for ev in sub.submit_message(prompt):
+            if on_event is not None:
+                try:
+                    on_event(ev.kind, ev.data)
+                except Exception:
+                    # Reporting progress must never be what kills the child.
+                    logger.debug("sub-agent '%s' on_event raised", title, exc_info=True)
             if ev.kind in ("assistant", "done"):
                 text = ev.data.get("text") or ""
                 if text:
