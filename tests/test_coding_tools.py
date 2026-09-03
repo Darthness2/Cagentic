@@ -33,6 +33,7 @@ from cagentic.tools import (
     _all_tools,
     all_tool_schemas,
     dispatch,
+    mark_file_seen,
     t_config_get,
     t_task_get,
     t_task_list,
@@ -128,6 +129,7 @@ def test_check_syntax_inline_json(ctx):
 def test_multi_edit_applies_in_order(ctx, tmp_path):
     p = tmp_path / "f.txt"
     p.write_text("one\ntwo\nthree\n")
+    mark_file_seen(ctx, p)
     out = t_multi_edit(
         {
             "path": "f.txt",
@@ -145,6 +147,7 @@ def test_multi_edit_applies_in_order(ctx, tmp_path):
 def test_multi_edit_is_atomic_on_failure(ctx, tmp_path):
     p = tmp_path / "f.txt"
     p.write_text("one\ntwo\n")
+    mark_file_seen(ctx, p)
     out = t_multi_edit(
         {
             "path": "f.txt",

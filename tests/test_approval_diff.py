@@ -18,6 +18,7 @@ from cagentic.state import AppState
 from cagentic.tools import (
     ToolContext,
     _read_text_robust,
+    mark_file_seen,
     preview_change,
     t_edit_file,
     t_write_file,
@@ -42,6 +43,10 @@ class _Workspace(unittest.TestCase):
         p = self.root / name
         with p.open("w", encoding="utf-8", newline="") as f:
             f.write(body)
+        # An edit tool refuses a file the agent has not seen — every edit
+        # rewrites the whole file from what the model is holding. A real turn
+        # gets there via read_file; setup says so directly.
+        mark_file_seen(self.ctx, p)
         return p
 
 

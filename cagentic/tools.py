@@ -273,21 +273,48 @@ def _note_file_version(ctx: ToolContext, p: Path) -> None:
     state.update(file_versions=versions)
 
 
-def _stale_file_error(ctx: ToolContext, p: Path, path: str) -> str | None:
-    """Refuse to edit a file that changed underneath us since we last saw it.
+def mark_file_seen(ctx: ToolContext, p: Path) -> None:
+    """Record that the caller knows this file's current contents.
 
-    Without this the agent happily overwrote work somebody did in their editor
-    while a turn was running: it had the old contents in context, and every edit
-    path writes the whole file back. The check is deliberately one-directional —
-    a file we have never read has no recorded version and is not blocked, so
-    this adds a guard rather than a new precondition.
+    Public because tests and front ends sometimes hand the agent a file it did
+    not open itself; everything inside the tools goes through read_file or an
+    edit, both of which call this already.
+    """
+    _note_file_version(ctx, p)
+
+
+def _edit_precondition(ctx: ToolContext, p: Path, path: str) -> str | None:
+    """Why this file must not be edited right now, or None.
+
+    Two refusals, both about the same thing — whether we actually know what the
+    file says:
+
+    * never read. Every edit path rewrites the file from text the model is
+      holding, so editing one it has not opened means editing from a guess.
+      `replace_lines` is the sharp case: it splices by line number and cannot
+      notice that the numbers refer to a file it never saw.
+    * read, but changed since. Somebody saved it in their editor while the turn
+      was running, and writing now discards their work.
+
+    Creating a new file is neither, and is not blocked.
     """
     state = getattr(ctx, "state", None)
     if state is None:
         return None
+    try:
+        exists = p.is_file()
+    except OSError:
+        exists = False
+    if not exists:
+        return None
+
     known = (getattr(state, "file_versions", {}) or {}).get(str(p.resolve()))
     if known is None:
-        return None
+        return (
+            f"ERROR: read {path} before editing it. Every edit rewrites the file "
+            f"from what you are holding, so editing one you have not opened "
+            f"means editing from a guess."
+        )
     current = _fingerprint(p)
     if current is None or current == known:
         return None
@@ -296,6 +323,11 @@ def _stale_file_error(ctx: ToolContext, p: Path, path: str) -> str | None:
         f"has edited it. Read it again before writing, or your edit will "
         f"discard their change."
     )
+
+
+# The old name, kept because it reads better at the write_file call site, where
+# the "stale" half is the only one that applies to an overwrite.
+_stale_file_error = _edit_precondition
 
 
 def _record_edit(ctx: ToolContext, path: Path, before: str, after: str, op: str) -> None:

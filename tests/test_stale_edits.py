@@ -6,9 +6,9 @@ the next edit silently discards their work — the agent has no idea anything
 moved. `_stale_file_error` compares the file's fingerprint against the one
 recorded when we last read or wrote it.
 
-The guard is deliberately one-directional: a file we have never read has no
-recorded version and is not blocked. It adds a safety net, not a precondition —
-requiring a read before every edit is a separate change with its own migration.
+Both halves of the same question — whether we actually know what the file says:
+a file never read is refused, and so is one that changed since we read it. What
+is not refused is creating a file, which is neither.
 """
 
 from __future__ import annotations
@@ -112,13 +112,58 @@ def test_our_own_edits_do_not_trip_the_guard(ctx, sample):
     assert sample.read_text() == "alpha = 0\nbeta = 20\ngamma = 30\n"
 
 
-def test_a_file_we_never_read_is_not_blocked(ctx, sample):
-    # No recorded version, so nothing to compare against — the guard stays out
-    # of the way rather than becoming a read-before-edit requirement.
+def test_a_file_we_never_read_is_refused(ctx, sample):
+    """`replace_lines` is the sharp version of this — it splices by line number
+    and cannot notice the numbers refer to a file it never opened."""
+    out = t_edit_file(
+        {"path": "sample.py", "old_string": "alpha = 1", "new_string": "alpha = 0"}, ctx
+    )
+    assert out.startswith("ERROR:")
+    assert "read sample.py before editing" in out
+    assert sample.read_text() == "alpha = 1\nbeta = 2\ngamma = 3\n"
+
+
+def test_reading_it_first_is_all_it_takes(ctx, sample):
+    t_read_file({"path": "sample.py"}, ctx)
     out = t_edit_file(
         {"path": "sample.py", "old_string": "alpha = 1", "new_string": "alpha = 0"}, ctx
     )
     assert out.startswith("OK:")
+
+
+def test_writing_a_file_counts_as_knowing_it(ctx, tmp_path):
+    """A file the agent created this session needs no separate read — it has
+    the contents by construction."""
+    assert t_write_file({"path": "made.py", "content": "x = 1\n"}, ctx).startswith("OK:")
+    out = t_edit_file({"path": "made.py", "old_string": "x = 1", "new_string": "x = 2"}, ctx)
+    assert out.startswith("OK:")
+    assert (tmp_path / "made.py").read_text() == "x = 2\n"
+
+
+def test_the_requirement_survives_across_turns(ctx, sample):
+    """file_versions is deliberately not reset per turn: having read a file in
+    turn one, the agent should not be made to re-read it in turn two."""
+    t_read_file({"path": "sample.py"}, ctx)
+    ctx.state.update(files_read=set())  # what the engine clears between turns
+    out = t_edit_file(
+        {"path": "sample.py", "old_string": "beta = 2", "new_string": "beta = 20"}, ctx
+    )
+    assert out.startswith("OK:")
+
+
+def test_every_edit_path_enforces_it(ctx, sample):
+    from cagentic.coding_tools import t_multi_edit
+
+    assert t_edit_file(
+        {"path": "sample.py", "old_string": "alpha = 1", "new_string": "a"}, ctx
+    ).startswith("ERROR:")
+    assert t_replace_lines(
+        {"path": "sample.py", "start_line": 1, "end_line": 1, "new_content": "X"}, ctx
+    ).startswith("ERROR:")
+    assert t_multi_edit(
+        {"path": "sample.py", "edits": [{"old_string": "alpha = 1", "new_string": "a"}]}, ctx
+    ).startswith("ERROR:")
+    assert t_write_file({"path": "sample.py", "content": "clobber\n"}, ctx).startswith("ERROR:")
 
 
 def test_creating_a_new_file_is_never_blocked(ctx, tmp_path):

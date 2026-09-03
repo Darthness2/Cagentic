@@ -18,6 +18,7 @@ from cagentic.tools import (
     ToolContext,
     _as_tag_list,
     _restore_eol,
+    mark_file_seen,
     t_edit_file,
     t_read_file,
     t_replace_lines,
@@ -182,6 +183,7 @@ class TestLineEndingsSurviveEdits(_PrivateConfigDir):
         target = self.tmp / "crlf.txt"
         target.write_bytes(b"alpha\r\nbravo\r\ncharlie\r\n")
         ctx = ToolContext(root=self.tmp, state=AppState(workspace=self.tmp, home=self.tmp))
+        mark_file_seen(ctx, target)
 
         # old_string spans a line break with a bare LF, so the exact-match path
         # misses and the EOL-normalizing recovery path handles it.
@@ -197,6 +199,7 @@ class TestLineEndingsSurviveEdits(_PrivateConfigDir):
         target = self.tmp / "lf.txt"
         target.write_bytes(b"alpha\nbravo\ncharlie\n")
         ctx = ToolContext(root=self.tmp, state=AppState(workspace=self.tmp, home=self.tmp))
+        mark_file_seen(ctx, target)
 
         t_edit_file(
             {"path": str(target), "old_string": "alpha\nbravo", "new_string": "alpha\nBRAVO"},
@@ -208,6 +211,7 @@ class TestLineEndingsSurviveEdits(_PrivateConfigDir):
         target = self.tmp / "crlf-lines.txt"
         target.write_bytes(b"one\r\ntwo\r\nthree\r\n")
         ctx = ToolContext(root=self.tmp, state=AppState(workspace=self.tmp, home=self.tmp))
+        mark_file_seen(ctx, target)
 
         t_replace_lines(
             {"path": str(target), "start_line": 2, "end_line": 2, "new_content": "TWO"},
@@ -219,6 +223,7 @@ class TestLineEndingsSurviveEdits(_PrivateConfigDir):
         target = self.tmp / "crlf-write.txt"
         target.write_bytes(b"one\r\ntwo\r\n")
         ctx = ToolContext(root=self.tmp, state=AppState(workspace=self.tmp, home=self.tmp))
+        mark_file_seen(ctx, target)
 
         t_write_file({"path": str(target), "content": "uno\ndos\n"}, ctx)
         self.assertEqual(target.read_bytes(), b"uno\r\ndos\r\n")
@@ -234,6 +239,7 @@ class TestReplaceLinesDeletion(_PrivateConfigDir):
         target = self.tmp / "trim.txt"
         target.write_text("keep1\ndrop\nkeep2\n")
         ctx = ToolContext(root=self.tmp, state=AppState(workspace=self.tmp, home=self.tmp))
+        mark_file_seen(ctx, target)
 
         out = t_replace_lines(
             {"path": str(target), "start_line": 2, "end_line": 2, "new_content": ""}, ctx

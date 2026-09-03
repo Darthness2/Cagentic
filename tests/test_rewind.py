@@ -23,7 +23,7 @@ from cagentic.cli import (
     _user_message_indices,
 )
 from cagentic.state import AppState
-from cagentic.tools import ToolContext, _read_text_robust, t_edit_file, t_write_file
+from cagentic.tools import ToolContext, _read_text_robust, mark_file_seen, t_edit_file, t_write_file
 
 
 class _FakeAgent:
@@ -105,6 +105,7 @@ class TestRevertEdits(unittest.TestCase):
 
     def test_reverts_an_edit_back_to_its_before_text(self) -> None:
         (self.root / "a.py").write_text("one\ntwo\n", encoding="utf-8")
+        mark_file_seen(self.ctx, self.root / "a.py")
         t_edit_file({"path": "a.py", "old_string": "two", "new_string": "TWO"}, self.ctx)
         reverted, problems = _revert_edits(list(reversed(self.state.edit_history)))
         self.assertEqual((reverted, problems), (1, []))
@@ -119,6 +120,7 @@ class TestRevertEdits(unittest.TestCase):
         """Applying them oldest-first would restore the first edit's 'before'
         and then immediately overwrite it with the second's."""
         (self.root / "a.py").write_text("v0\n", encoding="utf-8")
+        mark_file_seen(self.ctx, self.root / "a.py")
         t_edit_file({"path": "a.py", "old_string": "v0", "new_string": "v1"}, self.ctx)
         t_edit_file({"path": "a.py", "old_string": "v1", "new_string": "v2"}, self.ctx)
         reverted, problems = _revert_edits(list(reversed(self.state.edit_history)))
@@ -128,8 +130,10 @@ class TestRevertEdits(unittest.TestCase):
     def test_refuses_a_file_the_user_changed_afterwards(self) -> None:
         """Reverting would silently discard the user's own work."""
         (self.root / "a.py").write_text("one\n", encoding="utf-8")
+        mark_file_seen(self.ctx, self.root / "a.py")
         t_edit_file({"path": "a.py", "old_string": "one", "new_string": "ONE"}, self.ctx)
         (self.root / "a.py").write_text("hand-edited by me\n", encoding="utf-8")
+        mark_file_seen(self.ctx, self.root / "a.py")
         reverted, problems = _revert_edits(list(reversed(self.state.edit_history)))
         self.assertEqual(reverted, 0)
         self.assertIn("changed after Cagentic's edit", problems[0])
@@ -137,6 +141,7 @@ class TestRevertEdits(unittest.TestCase):
 
     def test_reports_a_vanished_file_instead_of_recreating_it(self) -> None:
         (self.root / "a.py").write_text("one\n", encoding="utf-8")
+        mark_file_seen(self.ctx, self.root / "a.py")
         t_edit_file({"path": "a.py", "old_string": "one", "new_string": "ONE"}, self.ctx)
         (self.root / "a.py").unlink()
         reverted, problems = _revert_edits(list(reversed(self.state.edit_history)))
