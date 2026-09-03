@@ -3246,10 +3246,21 @@ def t_skill(args: dict, ctx: ToolContext) -> str:
             # Nothing to attach to — reporting OK here made an attach that
             # never happened look successful.
             return "ERROR: no system prompt to attach the skill to"
-        marker = f"=== SKILL: {name} ==="
-        if marker in (engine.messages[0].get("content") or ""):
+        attached = getattr(engine, "attached_skills", None)
+        if attached is None:
+            # An engine without the field is an embedder's own object; fall back
+            # to the old in-place append rather than refusing outright.
+            marker = f"=== SKILL: {name} ==="
+            if marker in (engine.messages[0].get("content") or ""):
+                return f"OK: skill '{name}' is already attached"
+            engine.messages[0]["content"] += f"\n\n{marker}\n{body}"
+            return f"OK: skill '{name}' attached ({len(body)} chars)"
+        if any(existing == name for existing, _body in attached):
             return f"OK: skill '{name}' is already attached"
-        engine.messages[0]["content"] += f"\n\n{marker}\n{body}"
+        attached.append((name, body))
+        # Rebuild rather than append, so the skill is in the prompt the same way
+        # it will be after any later refresh.
+        engine.refresh_system_prompt()
         return f"OK: skill '{name}' attached ({len(body)} chars)"
     return f"ERROR: unknown op '{op}'"
 

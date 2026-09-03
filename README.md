@@ -36,12 +36,13 @@ Cagentic **remembers things about you** across sessions, keeps a persistent remi
   and anything the handler prints on stdout reaches the model as context. A hook
   that crashes, hangs or is missing fails open — it can never be the reason the
   agent stops working. `/hooks` shows what's configured.
-- **Project settings** — a repo can check in `.cagentic/settings.json` with its
-  own `permissions`, `tool_groups` and `model`; `.cagentic/commands/*.md` become
-  slash commands and `.cagentic/skills/*.md` become skills, both shadowing your
-  personal copies. MCP servers are honoured only from the gitignored
-  `settings.local.json`, never the committed file — an MCP server is a command
-  Cagentic spawns, and `git clone` should not be able to choose it.
+- **Project settings** — a repo can check in `.cagentic/settings.json` with its own
+  `permissions`, `tool_groups` and `model`; `.cagentic/commands/*.md` become slash
+  commands and `.cagentic/skills/*.md` become skills, both shadowing your personal
+  copies. Two things a *committed* file may never do, because it arrives with a
+  `git clone`: grant a permission (an allow rule skips the approval prompt
+  entirely) or declare an MCP server (which is a command Cagentic spawns). Both are
+  honoured only from the gitignored `settings.local.json`. Denies work from either.
 - **Multi-provider** — use Ollama locally, or connect OpenAI and Anthropic for cloud models when you need more power.
 - **LAN access** — to reach the web UI from another machine, set `"gateway": {"lan": true, "token": "<secret>"}` in `~/.config/cagentic/config.json` (LAN exposure is off by default; the token is required on every request).
 

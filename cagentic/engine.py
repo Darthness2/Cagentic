@@ -795,7 +795,12 @@ def _call_is_concurrent_safe(call) -> bool:
         from .coding_tools import _requested_groups
         from .subagent import subagent_is_read_only
 
-        return subagent_is_read_only(_requested_groups(args))
+        try:
+            return subagent_is_read_only(_requested_groups(args))
+        except Exception:
+            # A malformed `tools=` is the tool's problem to report, not a
+            # reason to guess here. Serial is the safe answer either way.
+            return False
     return False
 
 
@@ -1042,6 +1047,9 @@ class QueryEngine:
         # that belongs to a project.
         self.project_system_prompt: str = ""
         self.project_context: str = ""
+        # (name, body) per skill loaded this session. Must exist before the
+        # first _system_content(), which rebuilds the prompt from it.
+        self.attached_skills: list[tuple[str, str]] = []
         self.messages: list[dict] = [{"role": "system", "content": self._system_content()}]
         self._recent_calls: list[tuple[str, str]] = []
         self._recent_results: list[tuple[str, str]] = []
@@ -1163,6 +1171,13 @@ class QueryEngine:
 
     def _system_content(self) -> str:
         prompt = fetch_system_prompt_parts(self.state)
+        # Rebuilt from the list, not carried in the string. A skill used to be
+        # concatenated onto messages[0] by the tool, and refresh_system_prompt
+        # replaces that content wholesale — so entering plan mode, changing
+        # /effort or switching model silently detached whatever was loaded,
+        # with no message and no way for the model to notice.
+        for name, body in self.attached_skills:
+            prompt += f"\n\n=== SKILL: {name} ===\n{body}"
         if self.project_system_prompt:
             prompt += "\n\n=== PROJECT INSTRUCTIONS ===\n" + self.project_system_prompt
         if self.project_context:

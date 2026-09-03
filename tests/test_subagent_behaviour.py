@@ -106,13 +106,23 @@ def test_a_child_that_used_no_tools_gets_no_trace_section(workspace):
         ("files web", {"files", "web"}),
         ("files,web", {"files", "web"}),
         (["worktree"], {"workspace"}),  # renamed group still resolves
-        (["not_a_group"], None),
         ([], None),
         (None, None),
     ],
 )
 def test_the_tools_argument_is_read_forgivingly(raw, expected):
     assert _requested_groups({"tools": raw} if raw is not None else {}) == expected
+
+
+@pytest.mark.parametrize("raw", [["not_a_group"], ["read-only"], ["file"], ["files", "typo"]])
+def test_an_unrecognised_group_fails_closed(raw):
+    """This used to drop unknown names and return None for "nothing left" —
+    and None means *inherit everything*. So any plausible name a model invented
+    silently granted the full toolset instead of narrowing it."""
+    from cagentic.coding_tools import UnknownToolGroup
+
+    with pytest.raises(UnknownToolGroup):
+        _requested_groups({"tools": raw})
 
 
 def test_a_restricted_child_only_gets_what_it_asked_for(workspace, monkeypatch):
@@ -145,8 +155,13 @@ def test_a_restricted_child_only_gets_what_it_asked_for(workspace, monkeypatch):
 @pytest.mark.parametrize(
     "groups,parallel",
     [
-        ({"files", "web"}, True),
-        ({"files", "mcp", "system"}, True),
+        ({"web"}, True),
+        ({"web", "interaction"}, True),
+        # files writes, mcp calls arbitrary server tools, system has config_set.
+        ({"files"}, False),
+        ({"mcp"}, False),
+        ({"system"}, False),
+        ({"web", "files"}, False),
         ({"files", "shell"}, False),
         ({"git"}, False),
         (None, False),
@@ -157,9 +172,26 @@ def test_only_a_child_that_cannot_change_anything_runs_in_parallel(groups, paral
     assert subagent_is_read_only(groups) is parallel
 
 
+def test_the_parallel_safe_set_is_derived_not_listed():
+    """It was a hand-written literal containing three groups that write. Deriving
+    it from CONCURRENT_SAFE means a tool added to a group cannot quietly
+    re-introduce that — the group just stops qualifying."""
+    from cagentic.permissions import CONCURRENT_SAFE
+    from cagentic.subagent import parallel_safe_groups
+    from cagentic.tools import TOOL_GROUPS
+
+    for group in parallel_safe_groups():
+        writers = [t for t in TOOL_GROUPS[group] if t not in CONCURRENT_SAFE]
+        assert not writers, f"{group} is called parallel-safe but contains {writers}"
+
+
 def test_the_executor_agrees():
-    assert _call_is_concurrent_safe(("agent_call", {"tools": ["files"]}, "tool"))
+    assert _call_is_concurrent_safe(("agent_call", {"tools": ["web"]}, "tool"))
+    assert not _call_is_concurrent_safe(("agent_call", {"tools": ["files"]}, "tool"))
     assert not _call_is_concurrent_safe(("agent_call", {"tools": ["shell"]}, "tool"))
+    # A malformed restriction is the tool's problem to report; serial is the
+    # safe answer here either way.
+    assert not _call_is_concurrent_safe(("agent_call", {"tools": ["nonsense"]}, "tool"))
     assert not _call_is_concurrent_safe(("agent_call", {}, "tool"))
     # Unchanged for everything else.
     assert _call_is_concurrent_safe(("read_file", {}, "tool"))
@@ -169,7 +201,7 @@ def test_the_executor_agrees():
 def test_read_only_children_actually_overlap(executor):
     """The point of the whole exercise: three independent lookups should not
     cost three round trips in sequence."""
-    calls = [("agent_call", {"prompt": f"f{i}", "tools": ["files"]}, "tool") for i in range(3)]
+    calls = [("agent_call", {"prompt": f"f{i}", "tools": ["web"]}, "tool") for i in range(3)]
     started = time.time()
     events = list(executor.execute(calls))
     elapsed = time.time() - started
@@ -188,7 +220,7 @@ def test_unrestricted_children_stay_in_line(executor):
 
 
 def test_every_call_still_gets_exactly_one_result(executor):
-    calls = [("agent_call", {"prompt": f"f{i}", "tools": ["files"]}, "tool") for i in range(3)]
+    calls = [("agent_call", {"prompt": f"f{i}", "tools": ["web"]}, "tool") for i in range(3)]
     assert len(results(list(executor.execute(calls)))) == 3
 
 

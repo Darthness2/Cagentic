@@ -6,6 +6,46 @@ publishes a release.
 
 ## Unreleased
 
+### Fixed — safety properties that were claimed but not true
+
+Found by re-auditing the session's own work rather than trusting its commit
+messages. Each was reproduced before being fixed.
+
+- **A cloned repo could grant itself unattended shell.** `permissions.allow` was
+  read from `.cagentic/settings.json` — the *committed* file — and an allow rule
+  returns True above yolo and above the resolver, so it skips the prompt
+  entirely. A repo shipping `{"allow": ["run_bash(*)"]}` got shell the moment
+  you opened the directory. Allow rules now come only from the gitignored
+  `settings.local.json`; deny rules still work from either, since they can only
+  restrict. This is the same reasoning already used to refuse `mcp.servers` from
+  a committed file — it had not been applied one module over.
+- **A sub-agent's `tools=` restriction did not restrict.** `tool_groups` was a
+  schema filter only; neither the executor nor `dispatch` consulted it. A child
+  told "files only" that emitted `run_bash` anyway ran it, and under an inherited
+  yolo it was approved. Enforced at the gate now, with aliases resolved first so
+  `bash` cannot walk around a check on `run_bash`.
+- **Groups declared parallel-safe could write.** The hand-written list was
+  `{files, web, mcp, system}`; `files` holds `write_file`/`edit_file`, `mcp` holds
+  `mcp_call`, `system` holds `config_set`. That list gated parallel fan-out, so
+  children that could write ran concurrently against one tree — each with a
+  private staleness map that could not see its siblings. The set is now derived
+  from `CONCURRENT_SAFE`, so a tool added to a group cannot silently re-introduce
+  it.
+- **An unknown group name granted everything.** `tools=["read-only"]` — or any
+  plausible name a model invented — dropped the unknown entry and returned "no
+  groups", which means *inherit the parent's full toolset*. It now fails closed.
+- **A malformed hook timeout killed every turn.** `float()` sat outside the
+  guard, so `{"timeout": "ten"}` raised through `decision()` — which, unlike
+  `emit()`, has none of its own — breaking the one thing the module promises.
+- **Loading a skill then entering plan mode silently dropped it.**
+  `refresh_system_prompt` replaces the system message wholesale and is called
+  from ~20 places; the skill had been concatenated into that string. Skills are
+  now held in a list the prompt is rebuilt from.
+- **`notebook_edit` had none of the edit safety.** The only write path outside
+  the precondition, and it deletes by cell index — while being in `EDIT_TOOLS`
+  (so `accept_edits` waved it through) and not in `DIFFABLE` (so the prompt
+  showed no diff).
+
 ### Fixed — the shipped defaults could not hold a conversation
 
 Tool schemas and the system prompt are a fixed cost on every request that no
@@ -32,9 +72,10 @@ window**, before a word of conversation. A fresh install tripped the engine's ow
   defaults, so a parent in yolo with a standing `deny run_bash` rule forked a
   child that approved `rm -rf /` with reason "yolo mode". `dry_run` is
   documented as a gate yolo cannot open; a sub-agent bypassed it.
-- **Edits could silently discard concurrent work.** An edit now refuses a file
-  whose fingerprint changed since we last read or wrote it. Deliberately a
-  guard, not a precondition — a file never read is not blocked.
+- **Edits could silently discard concurrent work, or be made blind.** An edit
+  now refuses a file it has not read, and refuses one whose fingerprint changed
+  since it last read or wrote it. Enforced on every write path, notebooks
+  included.
 - **Leaving plan mode is now the user's decision.** `exit_plan_mode` took no
   argument and gated on nothing. It now carries the plan, renders it at the
   approval prompt, and a refusal leaves plan mode on.
@@ -65,6 +106,16 @@ window**, before a word of conversation. A fresh install tripped the engine's ow
   `mcp.servers` is honoured only from the gitignored `settings.local.json`: an
   MCP server is a command Cagentic spawns, so a committed file must not choose
   it.
+- **MCP over Streamable HTTP**, alongside stdio — `url` in a server's config
+  reaches a hosted server, which a subprocess transport could not do at all. The
+  session id handed out at initialize is echoed on later calls, a POST is
+  answered with either a JSON body or an SSE stream and the client branches on
+  Content-Type, and the protocol revision is negotiated with a fallback for
+  older servers. Adds `prompts/list` and `prompts/get` as `mcp_list_prompts` /
+  `mcp_get_prompt`.
+- **Sub-agents report what they did** rather than returning a paragraph with no
+  evidence, can be narrowed to a toolset, and build their own HTTP client
+  (`requests.Session` is not thread-safe and up to eight run at once).
 - **Skills are discoverable** — they carry a summary, are named in the system
   prompt, and `/skill` lists or loads one.
 - **Project slash commands appear in the completion popup**, not only `/help`.

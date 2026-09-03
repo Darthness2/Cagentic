@@ -133,21 +133,50 @@ class TestProjectRules(_Base):
         d.mkdir(exist_ok=True)
         (d / filename).write_text(json.dumps(payload), encoding="utf-8")
 
-    def test_workspace_settings_contribute_rules(self) -> None:
-        self._write_settings("settings.json", {"permissions": {"allow": ["run_bash(pytest*)"]}})
+    def test_the_committed_file_can_restrict_but_not_grant(self) -> None:
+        """settings.json arrives with `git clone`, and an allow rule returns
+        True above yolo and above the resolver — no prompt at all. Honouring one
+        from the committed file would mean a repository could ship
+        `{"allow": ["run_bash(*)"]}` and get unattended shell the moment somebody
+        opened the directory. Deny rules are safe from either file; they can only
+        ever restrict."""
+        self._write_settings(
+            "settings.json",
+            {"permissions": {"allow": ["run_bash(*)"], "deny": ["run_bash(curl*)"]}},
+        )
+        rules = effective_rules(self.state)
+        self.assertEqual(rules["allow"], [], "a committed file must not grant")
+        self.assertIn("run_bash(curl*)", rules["deny"], "but it may still restrict")
+
+        ok, _why = can_use_tool("run_bash", {"command": "rm -rf /"}, self.state, _deny)
+        self.assertFalse(ok)
+
+    def test_the_gitignored_file_may_grant(self) -> None:
+        """settings.local.json is the developer's own and is not committed, so
+        it is the right home for a standing approval."""
+        self._write_settings(
+            "settings.local.json", {"permissions": {"allow": ["run_bash(pytest*)"]}}
+        )
         ok, why = can_use_tool("run_bash", {"command": "pytest -q"}, self.state, _deny)
         self.assertTrue(ok, why)
 
     def test_local_layer_stacks_on_the_shared_one(self) -> None:
-        self._write_settings("settings.json", {"permissions": {"allow": ["run_bash(pytest*)"]}})
+        self._write_settings("settings.json", {"permissions": {"deny": ["run_bash(curl*)"]}})
         self._write_settings(
-            "settings.local.json", {"permissions": {"deny": ["run_bash(pytest --runslow*)"]}}
+            "settings.local.json",
+            {
+                "permissions": {
+                    "allow": ["run_bash(pytest*)"],
+                    "deny": ["run_bash(pytest --runslow*)"],
+                }
+            },
         )
         rules = effective_rules(self.state)
         self.assertIn("run_bash(pytest*)", rules["allow"])
+        self.assertIn("run_bash(curl*)", rules["deny"])
         self.assertIn("run_bash(pytest --runslow*)", rules["deny"])
         ok, _ = can_use_tool("run_bash", {"command": "pytest --runslow"}, self.state, _approve)
-        self.assertFalse(ok)
+        self.assertFalse(ok, "deny still outranks a matching allow")
 
     def test_malformed_settings_do_not_break_the_gate(self) -> None:
         d = self.root / ".cagentic"
@@ -159,16 +188,16 @@ class TestProjectRules(_Base):
 
     def test_edited_settings_are_picked_up_without_a_restart(self) -> None:
         """Rules resolve per call, so /cd and file edits take effect at once."""
-        self._write_settings("settings.json", {"permissions": {"allow": []}})
+        self._write_settings("settings.local.json", {"permissions": {"allow": []}})
         ok, _ = can_use_tool("run_bash", {"command": "ls"}, self.state, _deny)
         self.assertFalse(ok)
         import os
         import time
 
-        self._write_settings("settings.json", {"permissions": {"allow": ["run_bash(ls*)"]}})
+        self._write_settings("settings.local.json", {"permissions": {"allow": ["run_bash(ls*)"]}})
         # Bump mtime explicitly: two writes inside one filesystem timestamp
         # tick would otherwise look unchanged to the cache.
-        path = self.root / ".cagentic" / "settings.json"
+        path = self.root / ".cagentic" / "settings.local.json"
         os.utime(path, (time.time() + 2, time.time() + 2))
         ok, why = can_use_tool("run_bash", {"command": "ls -la"}, self.state, _deny)
         self.assertTrue(ok, why)

@@ -545,6 +545,16 @@ def t_notebook_edit(args: dict, ctx: ToolContext) -> str:
             return f"ERROR: cell_index {i} out of range"
         del cells[i]
 
+    # The same precondition every other write path has; this was the one tool
+    # left outside it, and `op=delete, cell_index=3` on a notebook never opened
+    # is exactly the edit-from-a-guess it exists for. Checked here rather than
+    # before the parse so a malformed cell_index still reports itself instead of
+    # being masked by "read it first".
+    if existed:
+        blocked = _stale_file_error(ctx, p, path)
+        if blocked:
+            return blocked
+
     rendered = _json.dumps(nb, indent=1) + "\n"
     _write_text_raw(p, rendered)
     _record_edit(ctx, p, raw, rendered, "edit" if existed else "create")
@@ -642,8 +652,19 @@ def t_powershell(args: dict, ctx: ToolContext) -> str:
 # ============================================================================
 
 
+class UnknownToolGroup(ValueError):
+    """A `tools=` argument naming something that is not a group."""
+
+
 def _requested_groups(args: dict) -> set[str] | None:
-    """The `tools` argument as a set of group names, or None to inherit."""
+    """The `tools` argument as a set of group names, or None to inherit.
+
+    Raises on an unrecognised name rather than falling back. This used to drop
+    unknown entries and return None for "nothing left", which meant *inherit
+    everything* — so `tools=["read-only"]`, `tools=["file"]`, or any plausible
+    name a model invented silently granted the full toolset instead of
+    narrowing. A restriction argument has to fail closed.
+    """
     from .tools import TOOL_GROUPS, resolve_groups
 
     raw = args.get("tools")
@@ -652,8 +673,13 @@ def _requested_groups(args: dict) -> set[str] | None:
     if not isinstance(raw, (list, tuple)) or not raw:
         return None
     wanted = resolve_groups(str(g) for g in raw)
-    known = {g for g in wanted if g in TOOL_GROUPS}
-    return known or None
+    unknown = sorted(g for g in wanted if g not in TOOL_GROUPS)
+    if unknown:
+        raise UnknownToolGroup(
+            f"unknown tool group(s): {', '.join(unknown)}. "
+            f"Valid groups: {', '.join(sorted(TOOL_GROUPS))}"
+        )
+    return set(wanted)
 
 
 def t_agent_call(args: dict, ctx: ToolContext) -> str:
@@ -664,7 +690,10 @@ def t_agent_call(args: dict, ctx: ToolContext) -> str:
 
     prompt = args["prompt"]
     model = args.get("model")
-    groups = _requested_groups(args)
+    try:
+        groups = _requested_groups(args)
+    except UnknownToolGroup as exc:
+        return f"ERROR: {exc}"
 
     # What the child did, not just what it concluded. A sub-agent used to report
     # a paragraph of prose with no way to tell whether it had read the right
@@ -705,7 +734,10 @@ def t_agent_call_async(args: dict, ctx: ToolContext) -> str:
 
     prompt = args["prompt"]
     model = args.get("model")
-    groups = _requested_groups(args)
+    try:
+        groups = _requested_groups(args)
+    except UnknownToolGroup as exc:
+        return f"ERROR: {exc}"
 
     def _run(p):
         return fork_subagent(engine, p, model=model, tool_groups=groups)
@@ -1130,8 +1162,8 @@ CODING_TOOL_SCHEMAS = [
                         "items": {"type": "string"},
                         "description": (
                             "Tool groups the sub-agent may use, e.g. ['files','web']. "
-                            "Default: whatever you have. Narrowing to read-only groups "
-                            "(files, web, mcp, system) also lets several sub-agents run "
+                            "Default: whatever you have. Narrowing to groups whose tools are "
+                            "all read-only (web, interaction, widgets) also lets several run "
                             "at once, since none of them can change anything."
                         ),
                     },

@@ -114,25 +114,27 @@ class TestDroppedToolCallsStayAnswered(_PrivateConfigDir):
 
     def test_abort_answers_the_calls_it_never_ran(self) -> None:
         eng = self._engine()
-        # note_search is read-only, inert against the temp config dir, and NOT
-        # in the engine's loop-exempt set, so a repeated result counts.
-        args = {"query": "nothing-matches-this"}
-        result = "(no notes match 'nothing-matches-this')"
+        # glob is read-only, inert, in the default tool groups, and NOT in the
+        # engine's loop-exempt set, so a repeated result counts. (It used to be
+        # note_search, which left the default groups when the context floor was
+        # cut and so is now refused before the loop guard ever sees it.)
+        args = {"pattern": "nothing-matches-this-*"}
+        result = "(no matches)"
         # Pre-load the result-loop history so the first result of this batch
         # crosses the hard-abort threshold.
-        eng._recent_results = [("note_search", result)] * (LOOP_THRESHOLD * 2 - 1)
+        eng._recent_results = [("glob", result)] * (LOOP_THRESHOLD * 2 - 1)
 
         eng.messages.append(
             {
                 "role": "assistant",
                 "content": "",
                 "tool_calls": [
-                    {"function": {"name": "note_search", "arguments": args}},
-                    {"function": {"name": "note_search", "arguments": args}},
+                    {"function": {"name": "glob", "arguments": args}},
+                    {"function": {"name": "glob", "arguments": args}},
                 ],
             }
         )
-        calls = [("note_search", args, "tool"), ("note_search", args, "tool")]
+        calls = [("glob", args, "tool"), ("glob", args, "tool")]
         list(eng._execute_and_record(calls))
 
         self.assertTrue(eng._abort_turn, "expected the repeated result to abort")

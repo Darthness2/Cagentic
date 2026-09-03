@@ -33,16 +33,36 @@ if TYPE_CHECKING:  # pragma: no cover
 logger = logging.getLogger(__name__)
 
 
-# Groups a sub-agent may be restricted to. Anything outside these can change
-# the world, which is what makes a restricted child safe to fan out.
-READ_ONLY_GROUPS = frozenset({"files", "web", "mcp", "system"})
+def parallel_safe_groups() -> frozenset[str]:
+    """Groups in which *every* tool is safe to run concurrently.
+
+    Computed rather than listed. The hand-written list said
+    `{"files", "web", "mcp", "system"}`, and three of those four were wrong:
+    `files` holds write_file/edit_file/replace_lines/set_workspace, `mcp` holds
+    mcp_call (arbitrary side effects on any connected server) and mcp_restart,
+    `system` holds config_set. That list gated parallel fan-out, so children
+    that could write were being run concurrently against one tree — each with
+    its own AppState, so each with a private file_versions map that could not
+    see its siblings' writes.
+
+    Deriving it from CONCURRENT_SAFE means a tool added to a group cannot
+    quietly re-introduce that: the group simply stops qualifying.
+    """
+    from .permissions import CONCURRENT_SAFE
+    from .tools import TOOL_GROUPS
+
+    return frozenset(
+        group
+        for group, names in TOOL_GROUPS.items()
+        if names and set(names).issubset(CONCURRENT_SAFE)
+    )
 
 
 def subagent_is_read_only(tool_groups) -> bool:
-    """Whether a child limited to these groups can only look, never touch."""
+    """Whether children limited to these groups are safe to run at once."""
     if not tool_groups:
         return False
-    return set(tool_groups).issubset(READ_ONLY_GROUPS)
+    return set(tool_groups).issubset(parallel_safe_groups())
 
 
 def _client_for(parent: "QueryEngine", model_spec: str | None):

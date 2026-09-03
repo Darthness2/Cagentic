@@ -47,7 +47,17 @@ def _handlers(cfg: dict | None, event: str) -> list[dict]:
     return [h for h in entries if isinstance(h, dict) and h.get("command")]
 
 
-def _run_command(command: str, payload: dict, timeout: float) -> dict:
+def _run_command(command: str, payload: dict, timeout: object) -> dict:
+    try:
+        # Coerced in here, not at the call site. A config carrying
+        # {"timeout": "ten"} used to raise ValueError out of run_event, past
+        # decision() (which has no guard of its own, unlike emit), and into
+        # the turn — breaking the one thing this module promises, that a hook
+        # can never be the reason the agent stops working.
+        seconds = float(timeout)  # type: ignore[arg-type]  # any config value
+    except (TypeError, ValueError):
+        logger.warning("hook timeout %r is not a number; using 10s", timeout)
+        seconds = 10.0
     try:
         proc = subprocess.run(
             command,
@@ -55,7 +65,7 @@ def _run_command(command: str, payload: dict, timeout: float) -> dict:
             input=json.dumps(payload),
             capture_output=True,
             text=True,
-            timeout=timeout,
+            timeout=seconds,
             env=dict(os.environ),
         )
         return {
@@ -74,7 +84,7 @@ def _run_command(command: str, payload: dict, timeout: float) -> dict:
         return {
             "exit": -1,
             "stdout": stdout,
-            "stderr": stderr + f"\nhook timed out after {timeout}s",
+            "stderr": stderr + f"\nhook timed out after {seconds}s",
             "timed_out": True,
         }
     except Exception as e:  # never raise out of the agent loop
@@ -86,8 +96,7 @@ def run_event(event: str, payload: dict, cfg: dict | None) -> list[dict]:
     """Run every command handler for ``event``. Returns one result dict per
     handler (never raises)."""
     return [
-        _run_command(h["command"], payload, float(h.get("timeout", 10)))
-        for h in _handlers(cfg, event)
+        _run_command(h["command"], payload, h.get("timeout", 10)) for h in _handlers(cfg, event)
     ]
 
 

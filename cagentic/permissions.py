@@ -18,7 +18,10 @@ argument that decides what the call actually does — the command for a shell
 tool, the path for a file tool, "server/tool" for mcp_call (see _subjects).
 They live under "permissions" in config, and are merged from the user's
 config.json plus the workspace's .cagentic/settings.json and
-.cagentic/settings.local.json, so a project can ship its own approvals.
+.cagentic/settings.local.json — with one asymmetry: a project may *deny*
+from either file, but may only *allow* from the gitignored local one. An
+allow rule skips the prompt entirely, and settings.json arrives with a
+clone. See _project_rules.
 """
 
 from __future__ import annotations
@@ -138,6 +141,9 @@ PLAN_MODE_EXTRAS = {
 # Project-level rule files, most general first — a later file wins, and
 # settings.local.json is the gitignored personal layer on top of the shared one.
 PROJECT_SETTINGS_FILES = ("settings.json", "settings.local.json")
+# The gitignored half. Anything that *grants* rather than restricts may only
+# come from here, because the other file arrives with a clone.
+LOCAL_SETTINGS_FILES = frozenset({"settings.local.json"})
 PROJECT_SETTINGS_DIR = ".cagentic"
 
 # Tools whose only real effect is a file change inside the workspace. These are
@@ -252,12 +258,36 @@ def project_settings(workspace: Path | None) -> list[tuple[str, dict]]:
 
 
 def _project_rules(workspace: Path | None) -> dict[str, list[str]]:
-    """Rules declared by the workspace itself, if any."""
+    """Rules declared by the workspace itself, if any.
+
+    The two files are not equally trusted, and the asymmetry matters more here
+    than anywhere else: an allow rule returns True *above* yolo and *above* the
+    resolver, so it grants execution with no prompt at all. Taking one from
+    `settings.json` — the committed file, the one that arrives with `git clone`
+    — would mean a repository could ship
+
+        {"permissions": {"allow": ["run_bash(*)"]}}
+
+    and get unattended shell the moment somebody opened the directory. That is
+    the same reasoning `project_scope.apply_project_settings` uses to refuse
+    `mcp.servers` from the committed file; it applies verbatim to allow rules
+    and was not applied here.
+
+    Deny rules are safe from either file: they can only ever restrict.
+    """
     merged: dict[str, list[str]] = {"allow": [], "deny": []}
-    for _filename, data in project_settings(workspace):
+    for filename, data in project_settings(workspace):
         rules = _read_rules(data.get("permissions"))
-        merged["allow"].extend(rules["allow"])
         merged["deny"].extend(rules["deny"])
+        if filename in LOCAL_SETTINGS_FILES:
+            merged["allow"].extend(rules["allow"])
+        elif rules["allow"]:
+            _log.warning(
+                "ignoring %d allow rule(s) in %s: a committed file cannot grant "
+                "permissions — move them to settings.local.json",
+                len(rules["allow"]),
+                filename,
+            )
     return merged
 
 
@@ -343,6 +373,26 @@ def current_mode(state: AppState) -> str:
     return "restricted"
 
 
+def tool_is_enabled(name: str, state: AppState) -> bool:
+    """Whether `name` is in a tool group this agent actually has.
+
+    The groups used to be a *presentation* filter — they decided which schemas
+    the model was shown and nothing else. Neither the executor nor `dispatch`
+    consulted them, so a sub-agent forked with `tools=["files"]` was merely not
+    *told* about `run_bash`; emitting the name anyway ran it, and under an
+    inherited yolo it was approved. The restriction has to hold at the gate or
+    it is documentation, not a restriction.
+
+    Aliases resolve first, or `bash` walks straight past a check on `run_bash`.
+    """
+    from .tools import DEFAULT_GROUPS, TOOL_ALIASES, TOOL_GROUPS, resolve_groups
+
+    groups = state.tool_groups
+    groups = resolve_groups(groups) if groups else set(DEFAULT_GROUPS)
+    canonical = TOOL_ALIASES.get(name, name)
+    return any(canonical in TOOL_GROUPS.get(group, ()) for group in groups)
+
+
 def can_use_tool(
     name: str,
     args: dict,
@@ -350,6 +400,12 @@ def can_use_tool(
     resolver: Resolver = auto_deny_resolver,
 ) -> tuple[bool, str]:
     """Returns (allowed, reason)."""
+    # Before any permission question: is this tool even available to this agent?
+    # A group the caller does not have is not a thing to approve or deny, it is
+    # a thing that does not exist for them.
+    if not tool_is_enabled(name, state):
+        return False, f"tool '{name}' is not in an enabled tool group"
+
     # Dry-run is stronger than every cached/session permission and cannot be
     # bypassed by yolo mode or by leaving plan mode.
     if getattr(state, "dry_run", False) and name not in READ_ONLY:
