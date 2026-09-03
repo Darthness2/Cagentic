@@ -77,6 +77,7 @@ READ_ONLY: set[str] = {
     # mcp inspection
     "mcp_list_servers",
     "mcp_list_tools",
+    "mcp_list_prompts",
     "mcp_list_resources",
     "mcp_read_resource",
     # browser inspection (acting in the browser is gated; looking is not)

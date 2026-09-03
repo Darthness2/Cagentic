@@ -1,14 +1,27 @@
-"""Model Context Protocol (MCP) client — stdio JSON-RPC.
+"""Model Context Protocol (MCP) client — stdio and Streamable HTTP.
 
-MCP servers are launched as subprocesses; we speak JSON-RPC 2.0 over their
-stdin/stdout. The protocol is documented at https://modelcontextprotocol.io
-— here we implement just the surface area a personal assistant needs:
+Two transports, chosen by what the server config declares:
+
+    command: [...]   launch a subprocess, JSON-RPC over its stdin/stdout
+    url: "https://…"  Streamable HTTP — POST JSON-RPC, read back either a
+                      JSON body or an SSE stream, carrying the session id
+                      the server hands out at initialize
+
+HTTP was the larger of the two gaps: hosted MCP servers do not ship a
+command line to run, so a stdio-only client simply cannot reach them.
+Both speak the same JSON-RPC above the transport, so everything from
+`MCPServer._send_request` up is shared.
+
+The protocol is documented at https://modelcontextprotocol.io — here we
+implement the surface area a personal assistant needs:
 
     initialize          handshake
     tools/list          discover what the server exposes
     tools/call          run one
     resources/list      list URI-addressable resources
     resources/read      fetch one
+    prompts/list        discover server-authored prompt templates
+    prompts/get         render one
 
 Each server is configured in config.json under `mcp.servers.<name>`:
 
@@ -23,6 +36,11 @@ Each server is configured in config.json under `mcp.servers.<name>`:
           "gdrive": {
             "command": ["npx", "-y", "@modelcontextprotocol/server-gdrive"],
             "env": {},
+            "enabled": true
+          },
+          "hosted": {
+            "url": "https://example.com/mcp",
+            "headers": {"Authorization": "Bearer ..."},
             "enabled": true
           }
         }
@@ -52,7 +70,12 @@ from . import __version__
 logger = logging.getLogger(__name__)
 
 
-PROTOCOL_VERSION = "2024-11-05"  # mcp protocol revision string
+# The revision we ask for. Servers answer `initialize` with the revision they
+# actually speak, and that answer is what we use from then on — so asking for a
+# newer one costs nothing against an older server. FALLBACK exists for the
+# stricter servers that error on an unknown revision rather than negotiating.
+PROTOCOL_VERSION = "2025-06-18"
+FALLBACK_PROTOCOL_VERSION = "2024-11-05"
 CLIENT_INFO = {"name": "cagentic", "version": __version__}
 
 
@@ -60,16 +83,154 @@ class MCPError(RuntimeError):
     pass
 
 
+class _HttpTransport:
+    """Streamable HTTP: one POST per JSON-RPC message.
+
+    The server may answer a POST with either a JSON body (one response) or an
+    SSE stream (a run of messages, of which one carries our id). Both are
+    legal for the same endpoint and the server picks per request, so we read
+    the Content-Type and branch rather than assuming.
+
+    A session id, if the server issues one at initialize, comes back in the
+    `Mcp-Session-Id` header and has to be echoed on everything afterwards —
+    without it a stateful server treats each call as a new, uninitialised
+    client and rejects it.
+    """
+
+    def __init__(self, name: str, url: str, headers: dict[str, str]) -> None:
+        self.name = name
+        self.url = url
+        self.extra_headers = dict(headers or {})
+        self.session_id: str | None = None
+        self.protocol_version: str | None = None
+        self._session: Any = None
+
+    def start(self) -> None:
+        import requests
+
+        self._session = requests.Session()
+
+    def _headers(self) -> dict[str, str]:
+        headers = {
+            "Content-Type": "application/json",
+            # Both are advertised because the server chooses which to send.
+            "Accept": "application/json, text/event-stream",
+        }
+        if self.session_id:
+            headers["Mcp-Session-Id"] = self.session_id
+        if self.protocol_version:
+            headers["MCP-Protocol-Version"] = self.protocol_version
+        headers.update(self.extra_headers)
+        return headers
+
+    def send(self, payload: dict, timeout: float, *, expect_reply: bool) -> dict | None:
+        import requests
+
+        if self._session is None:
+            raise MCPError(f"server '{self.name}' is not connected")
+        try:
+            response = self._session.post(
+                self.url,
+                data=json.dumps(payload),
+                headers=self._headers(),
+                timeout=timeout,
+                stream=True,
+            )
+        except requests.RequestException as exc:
+            raise MCPError(f"server '{self.name}' request failed: {exc}") from exc
+
+        # Handed out at initialize; required on every later call.
+        issued = response.headers.get("Mcp-Session-Id")
+        if issued:
+            self.session_id = issued
+
+        if response.status_code == 404 and self.session_id:
+            self.session_id = None
+            raise MCPError(f"server '{self.name}' session expired — reconnect and retry")
+        if response.status_code >= 400:
+            detail = (response.text or "")[:300]
+            raise MCPError(f"server '{self.name}' HTTP {response.status_code}: {detail}")
+        if not expect_reply or response.status_code == 202:
+            # A notification is accepted with no body.
+            response.close()
+            return None
+
+        content_type = (response.headers.get("Content-Type") or "").split(";")[0].strip()
+        want_id = payload.get("id")
+        if content_type == "text/event-stream":
+            return self._read_sse(response, want_id)
+        try:
+            body = response.json()
+        except ValueError as exc:
+            raise MCPError(f"server '{self.name}' sent a non-JSON reply: {exc}") from exc
+        finally:
+            response.close()
+        # A batch is legal; pick the message that answers us.
+        if isinstance(body, list):
+            for message in body:
+                if isinstance(message, dict) and message.get("id") == want_id:
+                    return message
+            return None
+        return body if isinstance(body, dict) else None
+
+    def _read_sse(self, response: Any, want_id: Any) -> dict | None:
+        """Pull `data:` frames off the stream until one answers our id.
+
+        Anything else on the stream is a server-initiated message we have no
+        handler for yet (logging, progress, sampling); skipping is the correct
+        behaviour for a client that did not advertise those capabilities.
+        """
+        try:
+            for raw in response.iter_lines(decode_unicode=True):
+                if not raw or not raw.startswith("data:"):
+                    continue
+                chunk = raw[len("data:") :].strip()
+                if not chunk:
+                    continue
+                try:
+                    message = json.loads(chunk)
+                except json.JSONDecodeError:
+                    continue
+                if isinstance(message, dict) and message.get("id") == want_id:
+                    return message
+        except Exception as exc:
+            raise MCPError(f"server '{self.name}' stream failed: {exc}") from exc
+        finally:
+            response.close()
+        raise MCPError(f"server '{self.name}' stream ended without answering")
+
+    def stop(self) -> None:
+        session, self._session = self._session, None
+        self.session_id = None
+        if session is not None:
+            try:
+                session.close()
+            except Exception:
+                logger.warning("mcp '%s' session close failed", self.name, exc_info=True)
+
+    def is_running(self) -> bool:
+        return self._session is not None
+
+
 @dataclass
 class MCPServer:
     name: str
-    command: list[str]
+    # Exactly one of these decides the transport: a command to launch, or a URL
+    # to POST to. A hosted server has no command line to run, which is why
+    # stdio-only could not reach one at all.
+    command: list[str] = field(default_factory=list)
+    url: str = ""
     env: dict[str, str] = field(default_factory=dict)
+    headers: dict[str, str] = field(default_factory=dict)
     proc: subprocess.Popen | None = None
+    _http: "_HttpTransport | None" = None
+    _protocol_version: str = PROTOCOL_VERSION
     _next_id: int = 1
     _lock: threading.Lock = field(default_factory=threading.Lock)
     _initialized: bool = False
     _tools_cache: list[dict] | None = None
+    # What the server said it can do at initialize; empty for older ones.
+    _capabilities: dict = field(default_factory=dict)
     # stdout lines pushed by a background reader thread; consumed (with a
     # timeout) by _send_request so a stalled server can't block forever.
     _stdout_q: "queue.Queue[str | None]" = field(default_factory=queue.Queue)
@@ -79,8 +240,15 @@ class MCPServer:
     _stderr_tail: list[str] = field(default_factory=list)
     _stderr_lock: threading.Lock = field(default_factory=threading.Lock)
 
+    @property
+    def transport(self) -> str:
+        return "http" if self.url else "stdio"
+
     def start(self, timeout: float = 10.0) -> None:
-        """Launch the server subprocess and run the MCP initialize handshake."""
+        """Connect (launch or open a session) and run the initialize handshake."""
+        if self.url:
+            self._start_http(timeout)
+            return
         if self.proc and self.proc.poll() is None:
             return
         env = {**os.environ, **self.env}
@@ -121,22 +289,58 @@ class MCPServer:
             name=f"mcp-{self.name}-stderr",
         )
         self._stderr_thread.start()
-        # Handshake: initialize → initialized notification.
         try:
-            self._send_request(
-                "initialize",
-                {
-                    "protocolVersion": PROTOCOL_VERSION,
-                    "capabilities": {},
-                    "clientInfo": CLIENT_INFO,
-                },
-                timeout=timeout,
-            )
-            self._send_notification("notifications/initialized", {})
-            self._initialized = True
+            self._handshake(timeout)
         except Exception as e:
             self.stop()
             raise MCPError(f"server '{self.name}' init failed: {e}") from e
+
+    def _start_http(self, timeout: float) -> None:
+        if self._http is not None and self._http.is_running():
+            return
+        self._http = _HttpTransport(self.name, self.url, self.headers)
+        self._http.start()
+        try:
+            self._handshake(timeout)
+        except Exception as exc:
+            self.stop()
+            raise MCPError(f"server '{self.name}' init failed: {exc}") from exc
+
+    def _handshake(self, timeout: float) -> None:
+        """initialize → initialized, agreeing a protocol revision on the way.
+
+        A server that refuses the revision we asked for gets one more try at
+        the older one. That is cheaper than pinning ourselves to 2024-11-05
+        forever, which is what the client did before and what kept it from
+        speaking to anything newer.
+        """
+        for version in (PROTOCOL_VERSION, FALLBACK_PROTOCOL_VERSION):
+            try:
+                result = (
+                    self._send_request(
+                        "initialize",
+                        {
+                            "protocolVersion": version,
+                            "capabilities": {},
+                            "clientInfo": CLIENT_INFO,
+                        },
+                        timeout=timeout,
+                    )
+                    or {}
+                )
+            except MCPError:
+                if version == FALLBACK_PROTOCOL_VERSION:
+                    raise
+                continue
+            # The server's answer wins: it names the revision it will speak.
+            agreed = result.get("protocolVersion") or version
+            self._protocol_version = str(agreed)
+            if self._http is not None:
+                self._http.protocol_version = self._protocol_version
+            self._capabilities = result.get("capabilities") or {}
+            self._send_notification("notifications/initialized", {})
+            self._initialized = True
+            return
 
     def _read_stdout(self, proc: subprocess.Popen) -> None:
         """Feed every stdout line into the queue; sentinel None on EOF."""
@@ -166,6 +370,12 @@ class MCPServer:
             return ("".join(self._stderr_tail))[-limit:]
 
     def stop(self) -> None:
+        if self._http is not None:
+            self._http.stop()
+            self._http = None
+            self._initialized = False
+            self._tools_cache = None
+            return
         proc = self.proc
         if not proc:
             return
@@ -241,6 +451,8 @@ class MCPServer:
     # ---- JSON-RPC plumbing ------------------------------------------------
 
     def _send_request(self, method: str, params: dict, timeout: float = 30.0) -> Any:
+        if self.url:
+            return self._http_request(method, params, timeout)
         if not self.proc or self.proc.poll() is not None:
             raise MCPError(f"server '{self.name}' is not running")
         with self._lock:
@@ -287,7 +499,37 @@ class MCPServer:
                         raise MCPError(f"{method}: {err.get('message', err)}")
                     return msg.get("result")
 
+    def _http_request(self, method: str, params: dict, timeout: float) -> Any:
+        """Same JSON-RPC contract as the stdio path, over one POST."""
+        if self._http is None:
+            raise MCPError(f"server '{self.name}' is not connected")
+        with self._lock:
+            req_id = self._next_id
+            self._next_id += 1
+        payload = {"jsonrpc": "2.0", "id": req_id, "method": method, "params": params}
+        message = self._http.send(payload, timeout, expect_reply=True)
+        if not isinstance(message, dict):
+            raise MCPError(f"{method}: no response from '{self.name}'")
+        if "error" in message:
+            err = message["error"]
+            raise MCPError(f"{method}: {err.get('message', err) if isinstance(err, dict) else err}")
+        return message.get("result")
+
     def _send_notification(self, method: str, params: dict) -> None:
+        if self.url:
+            if self._http is None:
+                return
+            try:
+                self._http.send(
+                    {"jsonrpc": "2.0", "method": method, "params": params},
+                    timeout=10.0,
+                    expect_reply=False,
+                )
+            except MCPError:
+                logger.warning(
+                    "mcp '%s' notification '%s' failed", self.name, method, exc_info=True
+                )
+            return
         if not self.proc or self.proc.poll() is not None:
             return
         payload = json.dumps({"jsonrpc": "2.0", "method": method, "params": params})
@@ -332,6 +574,35 @@ class MCPServer:
     def read_resource(self, uri: str) -> dict:
         return self._send_request("resources/read", {"uri": uri}) or {}
 
+    def list_prompts(self) -> list[dict]:
+        """Server-authored prompt templates. Empty when the server has none.
+
+        Servers that do not implement prompts answer with a method-not-found
+        error rather than an empty list, which is not worth surfacing as a
+        failure — the honest answer to "what prompts does this have" is none.
+        """
+        if not self._supports("prompts"):
+            return []
+        try:
+            res = self._send_request("prompts/list", {}) or {}
+        except MCPError:
+            return []
+        return res.get("prompts") or []
+
+    def get_prompt(self, name: str, arguments: dict | None = None) -> dict:
+        return self._send_request("prompts/get", {"name": name, "arguments": arguments or {}}) or {}
+
+    def _supports(self, capability: str) -> bool:
+        """Whether the server advertised a capability at initialize.
+
+        Absent capabilities means an older server that did not report any, so
+        the honest default is to try rather than to refuse.
+        """
+        caps = getattr(self, "_capabilities", None)
+        if not isinstance(caps, dict) or not caps:
+            return True
+        return capability in caps
+
 
 class MCPManager:
     """Holds one MCPServer per configured server. Lazy-starts on first use."""
@@ -350,6 +621,27 @@ class MCPManager:
             if not isinstance(name, str) or not isinstance(spec, dict):
                 continue
             if not spec.get("enabled", True):
+                continue
+            url = spec.get("url")
+            if isinstance(url, str) and url.strip():
+                # A hosted server is addressed, not launched. Only http(s) —
+                # anything else here is a config mistake, and guessing at it
+                # would mean handing an arbitrary scheme to the HTTP stack.
+                if not url.strip().lower().startswith(("http://", "https://")):
+                    logger.warning(
+                        "mcp server '%s': url must be http:// or https://, got %r", name, url
+                    )
+                    continue
+                raw_headers = spec.get("headers")
+                self.servers[name] = MCPServer(
+                    name=name,
+                    url=url.strip(),
+                    headers={
+                        str(k): str(v)
+                        for k, v in (raw_headers or {}).items()
+                        if isinstance(raw_headers, dict)
+                    },
+                )
                 continue
             command = spec.get("command")
             if not command:
@@ -406,6 +698,12 @@ class MCPManager:
 
     def read_resource(self, server: str, uri: str) -> dict:
         return self.get(server).read_resource(uri)
+
+    def list_prompts(self, server: str) -> list[dict]:
+        return self.get(server).list_prompts()
+
+    def get_prompt(self, server: str, name: str, arguments: dict | None = None) -> dict:
+        return self.get(server).get_prompt(name, arguments)
 
     def shutdown(self) -> None:
         for srv in self.servers.values():

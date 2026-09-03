@@ -11,7 +11,11 @@ Cagentic **remembers things about you** across sessions, keeps a persistent remi
 - **Web search & fetch** — DuckDuckGo search, full-page fetch with optional HTML-strip for readability.
 - **Files & shell** — read/edit/create files, run shell commands (each one asks for approval unless you `/yolo`).
 - **Reads PDFs & Word docs** — `read_file` extracts text from `.pdf` and `.docx` files, so you can ask Cagentic to summarize a contract, pull dates out of an invoice, or review a résumé without converting anything first.
-- **MCP bridges** — point Cagentic at any MCP server (Notion, Google Drive, Slack, your own custom ones) via stdio JSON-RPC and it can call their tools and read their resources.
+- **MCP bridges** — point Cagentic at any MCP server (Notion, Google Drive, Slack,
+  your own) and it can call their tools, read their resources and use their prompt
+  templates. Two transports: `command` launches a local server over stdio, `url`
+  reaches a hosted one over Streamable HTTP (JSON or SSE, session id carried for
+  you). The protocol revision is negotiated, falling back for older servers.
 - **Controls your browser** — a companion Chrome extension lets Cagentic read pages, open tabs, click links, and fill forms in your actual browser.
 - **Web UI** — `/gateway` starts a local web app: the full assistant in a browser tab, with tool approvals shown right on the page.
 - **Native iPhone and iPad app** — `iOS/` contains a SwiftUI Ollama client with guided LAN setup, multiple servers, streaming chat, and photo/file attachments.

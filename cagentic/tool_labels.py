@@ -105,6 +105,8 @@ _LABELS: dict[str, tuple[str, str]] = {
     "mcp_call": ("Used a connected tool", "Used {n} connected tools"),
     "mcp_list_servers": ("Listed connections", "Listed connections {n} times"),
     "mcp_list_tools": ("Listed connected tools", "Listed connected tools {n} times"),
+    "mcp_list_prompts": ("Listed MCP prompts", "Listed MCP prompts {n} times"),
+    "mcp_get_prompt": ("Loaded an MCP prompt", "Loaded {n} MCP prompts"),
     "mcp_list_resources": ("Listed resources", "Listed resources {n} times"),
     "mcp_read_resource": ("Read a resource", "Read {n} resources"),
     "mcp_restart": ("Restarted a connection", "Restarted {n} connections"),

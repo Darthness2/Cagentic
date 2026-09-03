@@ -1667,6 +1667,57 @@ def t_mcp_call(args: dict, ctx: ToolContext) -> str:
     return _truncate(format_tool_result(result))
 
 
+def t_mcp_list_prompts(args: dict, ctx: ToolContext) -> str:
+    """Prompt templates the server authored — its own idea of how to ask it."""
+    mgr = _mcp_manager(ctx)
+    if mgr is None:
+        return "ERROR: MCP manager unavailable"
+    server = args.get("server")
+    if not server:
+        return "ERROR: mcp_list_prompts requires 'server'"
+    try:
+        items = mgr.list_prompts(server)
+    except Exception as e:
+        return f"ERROR: {e}"
+    if not items:
+        return f"(server '{server}' exposes no prompts)"
+    lines = []
+    for prompt in items[:60]:
+        name = prompt.get("name", "?")
+        desc = (prompt.get("description") or "").strip().splitlines()
+        arg_names = [a.get("name", "?") for a in (prompt.get("arguments") or [])]
+        suffix = f"  ({', '.join(arg_names)})" if arg_names else ""
+        lines.append(f"- {name}{suffix}" + (f" — {desc[0]}" if desc else ""))
+    return _truncate("\n".join(lines))
+
+
+def t_mcp_get_prompt(args: dict, ctx: ToolContext) -> str:
+    """Render one prompt template and hand back its messages as text."""
+    mgr = _mcp_manager(ctx)
+    if mgr is None:
+        return "ERROR: MCP manager unavailable"
+    server, name = args.get("server"), args.get("name")
+    if not server or not name:
+        return "ERROR: mcp_get_prompt requires 'server' and 'name'"
+    arguments = args.get("arguments")
+    try:
+        result = mgr.get_prompt(server, name, arguments if isinstance(arguments, dict) else {})
+    except Exception as e:
+        return f"ERROR: {e}"
+    parts = []
+    for message in result.get("messages") or []:
+        role = message.get("role", "?")
+        content = message.get("content")
+        if isinstance(content, dict):
+            text = content.get("text") or json.dumps(content)[:400]
+        elif isinstance(content, list):
+            text = " ".join(c.get("text", "") for c in content if isinstance(c, dict))
+        else:
+            text = str(content)
+        parts.append(f"{role}: {text}")
+    return _truncate("\n".join(parts) or "(prompt rendered to nothing)")
+
+
 def t_mcp_list_resources(args: dict, ctx: ToolContext) -> str:
     mgr = _mcp_manager(ctx)
     if mgr is None:
@@ -3299,6 +3350,8 @@ TOOLS: dict[str, ToolFn] = {
     "mcp_list_servers": t_mcp_list_servers,
     "mcp_list_tools": t_mcp_list_tools,
     "mcp_call": t_mcp_call,
+    "mcp_list_prompts": t_mcp_list_prompts,
+    "mcp_get_prompt": t_mcp_get_prompt,
     "mcp_list_resources": t_mcp_list_resources,
     "mcp_read_resource": t_mcp_read_resource,
     "mcp_restart": t_mcp_restart,
@@ -4104,6 +4157,38 @@ TOOL_SCHEMAS: list[dict[str, Any]] = [
     {
         "type": "function",
         "function": {
+            "name": "mcp_list_prompts",
+            "description": (
+                "Prompt templates an MCP server authored. Worth checking before "
+                "composing your own request to it — the server's own template "
+                "usually knows the arguments and phrasing it expects."
+            ),
+            "parameters": {
+                "type": "object",
+                "properties": {"server": {"type": "string"}},
+                "required": ["server"],
+            },
+        },
+    },
+    {
+        "type": "function",
+        "function": {
+            "name": "mcp_get_prompt",
+            "description": "Render one of a server's prompt templates with `arguments`.",
+            "parameters": {
+                "type": "object",
+                "properties": {
+                    "server": {"type": "string"},
+                    "name": {"type": "string"},
+                    "arguments": {"type": "object"},
+                },
+                "required": ["server", "name"],
+            },
+        },
+    },
+    {
+        "type": "function",
+        "function": {
             "name": "mcp_list_resources",
             "description": "List URI-addressable resources exposed by an MCP server.",
             "parameters": {
@@ -4680,6 +4765,8 @@ TOOL_GROUPS: dict[str, list[str]] = {
         "routine_delete",
     ],
     "mcp": [
+        "mcp_list_prompts",
+        "mcp_get_prompt",
         "mcp_list_servers",
         "mcp_list_tools",
         "mcp_call",
