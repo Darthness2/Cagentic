@@ -528,8 +528,13 @@ def _write_text_raw(p: Path, text: str) -> None:
     bytes verbatim, so files keep whatever line endings the in-memory text has.
     Pair it with _read_text_robust, which reads verbatim too — the two together
     are what keep a CRLF file CRLF across an edit.
+
+    Written through open() rather than Path.write_text because that method only
+    grew a `newline` argument in 3.10, and pyproject claims 3.9 — where the
+    keyword is a TypeError on every single edit.
     """
-    p.write_text(text, encoding="utf-8", newline="")
+    with open(p, "w", encoding="utf-8", newline="") as f:
+        f.write(text)
 
 
 # Sentinel for the one _plan_edit failure the caller must handle itself: the

@@ -492,11 +492,12 @@ def test_login_dry_run_needs_no_secret_or_input(monkeypatch, capsys):
         "save",
         lambda _cfg: pytest.fail("dry-run login must not save"),
     )
-    monkeypatch.setattr(
-        click,
-        "get_text_stream",
-        lambda _name: pytest.fail("dry-run login must not read stdin"),
-    )
+
+    class _NoStdin:
+        def read(self, *_args):
+            pytest.fail("dry-run login must not read stdin")
+
+    monkeypatch.setattr(cli.sys, "stdin", _NoStdin())
 
     assert cli.main(["--login", "openai", "--dry-run", "--json"]) == 0
     output = capsys.readouterr().out
@@ -1577,7 +1578,9 @@ def test_service_commands_report_missing_service_manager(tmp_path, monkeypatch, 
     assert service.install() == 1
     output = capsys.readouterr().out
     assert "partial state" in output
-    assert unit.name in output
+    # ui wraps to the terminal width and will hard-split a long tmp path, so
+    # compare with whitespace removed rather than asserting on the raw line.
+    assert unit.name in "".join(output.split())
     assert unit.exists()
 
 

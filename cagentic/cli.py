@@ -3677,7 +3677,10 @@ def login_command(
             ui.error("login cancelled; no settings were changed")
             return 1
     else:
-        secret = click.get_text_stream("stdin").read()
+        # sys.stdin, not click.get_text_stream: that helper is deprecated and
+        # goes away in Click 9, and current typeshed already resolves it to
+        # `object`, which fails mypy in CI.
+        secret = sys.stdin.read()
     return _credential_mode(
         config.load(),
         service,
@@ -4116,7 +4119,7 @@ def _run_classic_cli(
         if dry_run:
             secret = "dry-run-placeholder"
         elif token_stdin:
-            secret = click.get_text_stream("stdin").read()
+            secret = sys.stdin.read()
         else:
             import getpass
 
@@ -4211,6 +4214,13 @@ def _json_error(message: str, exit_code: int, context: click.Context | None = No
     _json(payload)
 
 
+# Click grew NoArgsIsHelpError in 8.2, which dropped Python 3.9 — so on 3.9 the
+# name is absent and naming it in an `except` clause raises AttributeError while
+# handling some *other* error, turning every usage error into a crash. An empty
+# tuple is a valid except target that matches nothing.
+_NO_ARGS_IS_HELP = getattr(click.exceptions, "NoArgsIsHelpError", ())
+
+
 def main(argv: list[str] | None = None) -> int:
     """Run the Click app and convert every failure into a stable exit code."""
     global _DEBUG_ACTIVE
@@ -4222,7 +4232,7 @@ def main(argv: list[str] | None = None) -> int:
     try:
         result = cli.main(args=argv, prog_name="cagentic", standalone_mode=False)
         return int(result or 0)
-    except click.exceptions.NoArgsIsHelpError as exc:
+    except _NO_ARGS_IS_HELP as exc:
         if exc.ctx is not None:
             click.echo(exc.ctx.get_help())
         return 2
