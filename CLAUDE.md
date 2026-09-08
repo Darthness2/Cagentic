@@ -4,17 +4,35 @@ This file provides guidance to Claude Code (claude.ai/code) when working with co
 
 ## What this is
 
-Cagentic is a local-first personal assistant: a terminal REPL, a web gateway,
-and a Chrome extension, all driving one
-tool-calling loop against Ollama, OpenAI, or Anthropic. It has since absorbed a
-full coding agent (Collama) and a "personal OS" layer — goals, calendar,
-deadlines, inbox, routines.
+Cagentic is a local-first personal assistant: a terminal REPL, a web gateway, a
+Chrome extension and a native iOS client, all driving one tool-calling loop
+against Ollama, OpenAI, or Anthropic. It has since absorbed a full coding agent
+(Collama) and a "personal OS" layer — goals, calendar, deadlines, inbox,
+routines.
 
 Runtime dependencies are deliberately four (`click`, `requests`, `prompt_toolkit`,
 `pypdf`) — no LLM SDKs, no web framework. The provider clients, the JSON-RPC MCP
-client, the HTTP gateway and the browser bridge are all hand-rolled on the
-stdlib. `tiktoken` is an optional extra (`.[performance]`) that only sharpens
-token counting.
+client, the HTTP gateway, the mDNS responder and the browser bridge are all
+hand-rolled on the stdlib. `tiktoken` is an optional extra (`.[performance]`)
+that only sharpens token counting.
+
+**Adding a runtime dependency is a design decision, not a convenience** — the
+four-package list is the reason so much here is hand-rolled. Don't reach for one
+without saying why the stdlib won't do.
+
+## Repository layout
+
+```
+cagentic/            the Python package — everything below is under here
+  services/          compact.py (context management), transcript.py
+  gateway_assets/    the web UI: index.html, app.css, app.js (package-data)
+extension/           unpacked Chrome extension talking to browser.py
+iOS/                 native SwiftUI client (XcodeGen: project.yml → .xcodeproj)
+design-system/       brand + gateway design tokens, shared with iOS/design-system
+tests/               pytest suite, ~55 files
+run.py               source-tree launcher: bootstraps .venv, then the REPL
+daemon.py            gateway-only launcher: same bootstrap, never enters the REPL
+```
 
 ## Commands
 
@@ -22,6 +40,7 @@ token counting.
 python run.py                 # run from source — bootstraps .venv, pip install -e ., starts the REPL
 python run.py --install       # force reinstall deps into .venv
 python run.py -p "hello"      # extra args forward to the CLI
+python daemon.py              # gateway on :8700, no REPL, no attached console
 ```
 
 `run.py` re-execs itself inside `.venv` if it isn't already there, so never
@@ -74,7 +93,7 @@ keeping its call sites is exactly the failure this repo has hit before.
 
 ## Architecture
 
-### One loop, three front ends
+### One loop, four front ends
 
 `engine.py` → `QueryEngine.submit_message()` is *the* agent loop and it is
 UI-free: it yields `Message(kind, data, task_id)` events (`delta`, `thinking`,
@@ -87,6 +106,9 @@ front end is a renderer of that stream:
   maps the same events to SSE. Its UI is no longer embedded strings: it lives in
   `cagentic/gateway_assets/` (`index.html`, `app.css`, `app.js`, shipped via
   `[tool.setuptools.package-data]`) and is read through `_asset_text()`.
+- `extension/` and `iOS/` are clients of the gateway's HTTP+SSE surface, not
+  separate loops. A change to the SSE payload shape can break them silently —
+  they aren't covered by pytest.
 
 Adding an event kind means touching `EventKind`, `agent.render_event`, and the
 gateway's SSE mapping together.
@@ -110,6 +132,17 @@ intended ordering survives.
 Because the terminal resolver identifies "the engine that owns the tty", a tool
 that needs stdin (`ask_user_question`) must check for it — the gateway's engine
 runs on an HTTP worker thread and would steal or block the REPL's input.
+
+`sandbox.py` is the second line: an approved `run_bash` is confined by the
+platform's own sandbox (macOS `sandbox-exec`, Linux `bwrap`) to writes inside
+the workspace and no network unless asked. Where no backend exists it degrades
+to unconfined — and that degradation must stay **visible to the user**, because
+a sandbox that silently isn't there is worse than none.
+
+`hooks.py` adds config-declared command handlers per lifecycle event
+(`config.json` → `"hooks"`). Exit code 2 on a gating event (`PreToolUse`,
+`UserPromptSubmit`) denies; everything else — including timeouts and crashes —
+allows. Hooks must never be able to break the agent loop.
 
 ### Tools
 
@@ -200,6 +233,23 @@ fmt.py               (leaf — imports nothing; safe from any layer)
 circular import. Shared display helpers (`fmt_duration`, `fmt_ago`,
 `status_mark`) live in `fmt.py` for exactly that reason.
 
+### Per-project config
+
+`project_scope.py` reads `.cagentic/` from the *workspace*, so agent
+configuration can be committed and shared:
+
+```
+.cagentic/
+    settings.json         shared, committed — permission rules
+    settings.local.json   personal, gitignored — overrides the above
+    commands/*.md         custom slash commands
+    skills/*.md           project skills, shadowing the user's own
+```
+
+Project files take precedence over the user's global ones: a repo saying "use
+tabs here" outranks a personal default, and a fresh clone should behave right
+with no setup.
+
 ### The personal-OS layer
 
 `personal_os.py` (goals, calendar events, deadlines) backs the agent's `life`
@@ -222,7 +272,7 @@ mailboxes; `coordinator.py` ticks them, forking a sub-agent per teammate with
 non-empty mail. Exposed as `agent_call` / `agent_call_async` and the `teams`
 group.
 
-### Workspaces and the browser bridge
+### Workspaces, the browser bridge, and discovery
 
 `workspaces.py` enforces canonical, allow-listed workspace roots (the gateway can
 switch directories, so this is a real boundary). `browser.py` runs an HTTP server
@@ -230,6 +280,32 @@ bound to `127.0.0.1` that the unpacked `extension/` long-polls; reads are
 unprompted, anything that acts goes through the permission gate. The gateway
 additionally requires a per-process token plus Host/Origin checks on `/api/*`,
 and LAN exposure is opt-in (`gateway.lan` + `gateway.token`).
+`discovery.py` is a hand-rolled mDNS *responder* only (IPv4, `_cagentic._tcp.local.`)
+so the iOS client can find the gateway; it never browses.
+
+## Change recipes
+
+Each of these is a set of places that must move together — the repo has broken
+before when only one of them did.
+
+- **New tool** — body `t_<name>(args, ctx) -> str` in `tools.py` or
+  `coding_tools.py`; schema registration; membership in a `TOOL_GROUPS` entry;
+  a `READ_ONLY` listing if it is safe to run concurrently and without approval;
+  a label in `tool_labels.py`. Paths through `_resolve_contained()`, errors as
+  `ERROR: …`.
+- **New event kind** — `EventKind`, `agent.render_event`, the gateway's SSE
+  mapping. All three, same commit.
+- **New terminal slash command** — an entry in `prompt.COMMAND_GROUPS` (the
+  single catalog feeding both `/help` and the completion popup) *and* a branch in
+  `cli.repl()`. `tests/test_polish.py` asserts the two match.
+- **New web slash command** — `gateway.GATEWAY_COMMANDS`, `Gateway._handle_cmd()`,
+  and the command-matrix tests. Don't add a web command when an existing chat
+  control is the clearer interaction.
+- **New provider capability** — every client in `providers.py` exposes the same
+  four methods; adding a fifth means adding it to all three.
+- **New persisted subsystem** — SQLite-only via `storage.py` with its own
+  namespace. Don't add new JSON-file storage; the file mirroring that exists is
+  a migration compatibility shim, not the pattern.
 
 ## Repo conventions
 
@@ -240,13 +316,25 @@ and LAN exposure is opt-in (`gateway.lan` + `gateway.token`).
   CRLF file survives an edit. Use `_read_text_robust` / `_write_text_raw` /
   `_restore_eol` rather than `Path.read_text` / `write_text`.
 - Comments explain *why*, usually citing the bug that motivated the code. Match
-  that; don't strip them.
+  that; don't strip them. The module docstrings in `sandbox.py`, `discovery.py`
+  and `autoreload.py` are the house style: what it does, and what trade it made.
 - Terminal output goes through `ui.py` — its palette, markers (`✦ ◦ · ↳ ✓ ✗ ❀`),
   `ui.sync_write` (shared paint lock with the status bar and spinners), and the
   UTF-8/ANSI setup at import. Never `print()` escape codes directly.
-- A new slash command needs an entry in `prompt.COMMAND_GROUPS` (the single
-  catalog feeding both `/help` and the completion popup) *and* a branch in
-  `cli.repl()`. `tests/test_polish.py` asserts the two match.
-- Web slash commands use `gateway.GATEWAY_COMMANDS`; keep that catalog,
-  `Gateway._handle_cmd()`, and the command-matrix tests in sync. Do not add a
-  web command when an existing chat control is the clearer interaction.
+
+## Testing conventions
+
+- Tests are named for the *change* they defend, not the module they cover —
+  `test_safety_regressions.py`, `test_stale_edits.py`, `test_context_overflow.py`.
+  When you fix a bug, add the case to the file that names that class of bug
+  rather than creating a new one per fix.
+- Tests must not touch the real `~/.config/cagentic/`. There is no `conftest.py`
+  doing this for you: each test that persists anything sets `XDG_CONFIG_HOME` to
+  a tmp dir itself (`monkeypatch.setenv`, or save/restore in `setUp`/`tearDown`),
+  which is the one knob `config.config_dir()` reads. Teardown also has to
+  tolerate an un-unlinkable SQLite file on Windows.
+- No network in tests: providers, the gateway and MCP are exercised against
+  fakes. A test that needs Ollama running is a broken test.
+- `tests/test_polish.py` and the gateway command-matrix tests exist to catch
+  half-finished features (a command in one catalog but not the other). If one of
+  them fails, the fix is almost never to edit the test.
