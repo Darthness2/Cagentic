@@ -411,6 +411,55 @@ to `~/.config/cagentic/logs/cagentic.log`. This applies only to the standalone
 `--serve` daemon; `/gateway` from the REPL shares that process and is never
 re-executed out from under your session.
 
+### Running it in Docker
+
+The same daemon, with the boundary drawn by a container instead of a login
+session — for a home server, a machine you'd rather not put a Python toolchain
+on, or anywhere you want the assistant's shell access bounded by something
+stronger than a user account.
+
+```bash
+docker compose up -d          # builds the image, starts the gateway
+open http://localhost:8700
+```
+
+```bash
+CAGENTIC_MODEL=openai:gpt-4o docker compose up -d
+```
+
+A fresh config volume has no model saved and `--serve` won't start without one,
+so the model is named in `docker-compose.yml` (`CAGENTIC_MODEL` overrides it).
+Ollama is expected on the **host**, not in the container: `OLLAMA_HOST` defaults
+to `http://host.docker.internal:11434`, and the compose file maps that name on
+Linux too.
+
+Two volumes matter. `cagentic-config` is `~/.config/cagentic` — config, API
+keys, sessions, notes, tasks, `state.sqlite3`. Drop it and you rotate the
+gateway token, which unpairs every phone. `cagentic-workspace` is what the
+agent can read and edit; point it at a real project when you want one:
+
+```yaml
+volumes:
+  - ./my-project:/workspace
+```
+
+The port is published to `127.0.0.1` only. Inside the container the gateway
+binds `0.0.0.0` — it has to, to be reachable through a published port — via
+`CAGENTIC_GATEWAY_BIND` (or `gateway.bind`) rather than `gateway.lan`, because
+`lan` *also* relaxes the anti-DNS-rebinding `Host` check and a container has no
+reason to give that up. Every `/api/*` request still needs the secret token. To
+reach it from other machines, publish `8700:8700` **and** pin `gateway.token`
+in the config volume, which is what actually gates the API.
+
+One thing is weaker inside the container: `run_bash` sandboxing. `sandbox-exec`
+is macOS-only and `bwrap` needs user namespaces most runtimes withhold, so
+bubblewrap is deliberately not installed — a present-but-broken sandbox would
+fail every approved command for a reason you can't see. `/doctor` reports the
+backend as `none`, honestly, and the container is the boundary instead.
+
+Auto-reload has nothing to watch here (the package is installed into the image,
+not mounted), so rebuild and `docker compose up -d --build` to update.
+
 The gateway is a chat surface, not a dashboard — there are no separate
 workspace pages to keep in sync. Ask for your inbox, calendar, deadlines,
 goals, or routines in the conversation and the assistant reads and writes the

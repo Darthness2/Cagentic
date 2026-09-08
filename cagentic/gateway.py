@@ -17,6 +17,7 @@ import errno
 import json
 import logging
 import math
+import os
 import re
 import secrets
 import threading
@@ -374,6 +375,18 @@ class Gateway:
         raw_lan = gw_cfg.get("lan", False)
         self.lan = raw_lan if isinstance(raw_lan, bool) else False
 
+        # Which interface to listen on, independent of `lan`. A container has
+        # to bind 0.0.0.0 to be reachable at all — the *publish* rule
+        # (`-p 127.0.0.1:8700:8700`) is what keeps it loopback-only — but it is
+        # not on the LAN, so it must keep the anti-rebinding Host check that
+        # `lan` turns off. Conflating the two would silently drop that check
+        # for every containerised gateway. Env first so an image can set it
+        # without pre-seeding the user's config volume.
+        env_bind = os.environ.get("CAGENTIC_GATEWAY_BIND", "").strip()
+        raw_bind = gw_cfg.get("bind")
+        cfg_bind = raw_bind.strip() if isinstance(raw_bind, str) else ""
+        self.bind = env_bind or cfg_bind or ("0.0.0.0" if self.lan else "127.0.0.1")
+
         # Restore the persisted effort dial (set live via /api/effort).
         effort = str(config.get("effort") or "").strip().lower()
         if effort in ("low", "medium", "high"):
@@ -459,8 +472,10 @@ class Gateway:
             return False
         # Loopback by default — the gateway exposes the full assistant
         # (shell, files, browser, MCP). LAN binding is an explicit opt-in
-        # (config gateway.lan=true) and keeps the token requirement.
-        bind = "0.0.0.0" if self.lan else "127.0.0.1"
+        # (config gateway.lan=true) and keeps the token requirement; a bare
+        # interface override (gateway.bind / CAGENTIC_GATEWAY_BIND, used by the
+        # container image) changes the socket only, not the checks.
+        bind = self.bind
         raw_gw_cfg = self.config.get("gateway")
         gw_cfg = raw_gw_cfg if isinstance(raw_gw_cfg, dict) else {}
         raw_auto_port = gw_cfg.get("auto_port", True)

@@ -254,3 +254,63 @@ def test_creating_a_notebook_is_never_blocked(tmp_path):
     assert t_notebook_edit(
         {"path": "new.ipynb", "op": "insert", "source": "z = 3"}, ctx
     ).startswith("OK:")
+
+
+# -- the container bind address is not LAN mode ------------------------------
+#
+# The container image has to listen on 0.0.0.0 to be reachable through a
+# published port at all. Doing that by setting gateway.lan would have taken the
+# anti-DNS-rebinding Host check off with it, for every containerised gateway,
+# invisibly. These pin the two apart.
+
+
+def _gw(tmp_path, monkeypatch, cfg):
+    from cagentic import gateway as gateway_module
+    from cagentic.agent import Agent
+    from cagentic.gateway import Gateway
+
+    class _NullClient:
+        def chat(self, _model, _messages, **_kwargs):
+            return {"content": ""}
+
+        def chat_stream(self, _model, _messages, **_kwargs):
+            yield ""
+
+        def list_models(self):
+            return []
+
+    monkeypatch.setattr(gateway_module, "_warm_model_cache", lambda _cfg: None)
+    monkeypatch.setenv("XDG_CONFIG_HOME", str(tmp_path / "config"))
+    agent = Agent(_NullClient(), "test-model", tmp_path, stream=True)
+    return Gateway(agent, cfg, port=18993)
+
+
+def test_the_default_gateway_is_loopback_only(tmp_path, monkeypatch):
+    monkeypatch.delenv("CAGENTIC_GATEWAY_BIND", raising=False)
+    assert _gw(tmp_path, monkeypatch, {}).bind == "127.0.0.1"
+
+
+def test_lan_mode_still_binds_every_interface(tmp_path, monkeypatch):
+    monkeypatch.delenv("CAGENTIC_GATEWAY_BIND", raising=False)
+    assert _gw(tmp_path, monkeypatch, {"gateway": {"lan": True}}).bind == "0.0.0.0"
+
+
+@pytest.mark.parametrize(
+    "cfg, env",
+    [
+        ({"gateway": {"bind": "0.0.0.0"}}, None),
+        ({}, "0.0.0.0"),
+    ],
+)
+def test_binding_every_interface_does_not_turn_on_lan_mode(tmp_path, monkeypatch, cfg, env):
+    if env is None:
+        monkeypatch.delenv("CAGENTIC_GATEWAY_BIND", raising=False)
+    else:
+        monkeypatch.setenv("CAGENTIC_GATEWAY_BIND", env)
+
+    gw = _gw(tmp_path, monkeypatch, cfg)
+
+    assert gw.bind == "0.0.0.0"
+    # lan is what relaxes the Host check and starts mDNS advertising; a bind
+    # override must touch neither.
+    assert gw.lan is False

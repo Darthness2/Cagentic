@@ -107,6 +107,10 @@ _DEFAULTS: dict[str, Any] = {
         # changes. Only affects the standalone daemon (the background service);
         # the REPL's own /gateway shares that process and is never re-execed.
         "auto_reload": True,
+        # Interface to listen on. None means "loopback, unless gateway.lan".
+        # Set to "0.0.0.0" only where something else bounds reachability — the
+        # container image does this and publishes the port to 127.0.0.1.
+        "bind": None,
     },  # /gateway web UI
     "proactive": {
         "enabled": True,

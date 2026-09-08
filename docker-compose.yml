@@ -1,0 +1,50 @@
+# The gateway as a long-running container: `docker compose up -d`.
+#
+# The launchd/systemd install (`cagentic --install-service`) still works and is
+# still the lightest option on a machine you own. This is for the cases it
+# doesn't cover: a home server, a box you don't want a Python toolchain on, or
+# anywhere you'd rather the assistant's shell access be bounded by a container.
+
+services:
+  gateway:
+    build: .
+    image: cagentic-gateway:latest
+    container_name: cagentic-gateway
+    # The gateway is the whole assistant — shell, files, browser, MCP — behind
+    # one secret token. Publishing to 127.0.0.1 keeps it off the network even
+    # though it binds 0.0.0.0 inside the container. Change this to
+    # "8700:8700" only together with a pinned gateway.token in the config
+    # volume, which is what actually gates /api/*.
+    ports:
+      - "127.0.0.1:8700:8700"
+    environment:
+      # Ollama runs on the host, not in here. Docker Desktop resolves
+      # host.docker.internal; the extra_hosts line below makes Linux match.
+      OLLAMA_HOST: ${OLLAMA_HOST:-http://host.docker.internal:11434}
+    extra_hosts:
+      - "host.docker.internal:host-gateway"
+    volumes:
+      # ~/.config/cagentic inside the container: config.json (gateway token,
+      # API keys), sessions, notes, tasks, state.sqlite3. Losing this rotates
+      # the token and unpairs every phone.
+      - cagentic-config:/home/cagentic/.config/cagentic
+      # What the agent can actually read and edit. Point it at a real project
+      # when you want one: ./my-project:/workspace
+      - cagentic-workspace:/workspace
+    # No model is configured on a fresh config volume and serve mode refuses to
+    # start without one, so name it here (or run `--setup` once against the
+    # volume). Cloud models take a provider prefix: openai:gpt-4o.
+    command:
+      - "--serve"
+      - "--port"
+      - "8700"
+      - "-C"
+      - "/workspace"
+      - "--model"
+      - "${CAGENTIC_MODEL:-qwen2.5:7b}"
+    restart: unless-stopped
+    stop_grace_period: 20s
+
+volumes:
+  cagentic-config:
+  cagentic-workspace:

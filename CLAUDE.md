@@ -32,6 +32,7 @@ design-system/       brand + gateway design tokens, shared with iOS/design-syste
 tests/               pytest suite, ~55 files
 run.py               source-tree launcher: bootstraps .venv, then the REPL
 daemon.py            gateway-only launcher: same bootstrap, never enters the REPL
+Dockerfile           the same gateway daemon as a container (docker-compose.yml)
 ```
 
 ## Commands
@@ -206,6 +207,15 @@ into code that fails `compile()` — that last one matters because a supervisor
 will happily restart a crash-looping process forever. Wired only into the
 `serve_mode` branch of `_run_runtime`; the REPL's `/gateway` shares its process
 and must never be re-execed.
+
+The same daemon also ships as a container (`Dockerfile`, `docker-compose.yml`)
+— an alternative to the login service, not a replacement; `--install-service`
+is untouched. Two constraints shaped it and shouldn't be undone:
+`CAGENTIC_GATEWAY_BIND=0.0.0.0` (not `gateway.lan`) because `lan` *also* drops
+the anti-DNS-rebinding Host check and a container published to `127.0.0.1`
+still wants it; and no bubblewrap in the image, because `bwrap` without user
+namespaces is a sandbox that is present but broken — worse than the honest
+`backend() == "none"` the container falls back to.
 
 ### Persistence, and the import graph
 
