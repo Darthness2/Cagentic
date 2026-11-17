@@ -48,7 +48,7 @@ Cagentic **remembers things about you** across sessions, keeps a persistent remi
 
 ## Requirements
 
-- Python 3.9+
+- Python 3.10+
 - [Ollama](https://ollama.com) running locally (`ollama serve`)
 - A model with native tool calling. This matters more than raw quality: Cagentic
   is a tool-calling loop, and a model that emits a malformed call is a model that

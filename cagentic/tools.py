@@ -530,8 +530,8 @@ def _write_text_raw(p: Path, text: str) -> None:
     are what keep a CRLF file CRLF across an edit.
 
     Written through open() rather than Path.write_text because that method only
-    grew a `newline` argument in 3.10, and pyproject claims 3.9 — where the
-    keyword is a TypeError on every single edit.
+    grew a `newline` argument in 3.10; while 3.9 was supported the keyword was
+    a TypeError on every single edit.
     """
     with open(p, "w", encoding="utf-8", newline="") as f:
         f.write(text)
