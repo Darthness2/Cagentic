@@ -343,9 +343,11 @@ def _sync_email_connection(connection_id: str, *, imap_factory=None) -> dict:
         uids = uids[-int(connection.get("max_messages") or 50) :]
         source = f"email:{connection['id']}"
         for uid in reversed(uids):
+            # SEARCH hands UIDs back as bytes; typeshed (since mypy 2.x) types
+            # the command args as str. UIDs are ASCII digits, so decode.
             status, fetched = client.uid(
                 "fetch",
-                uid,
+                uid.decode("ascii") if isinstance(uid, bytes) else str(uid),
                 "(BODY.PEEK[HEADER.FIELDS (SUBJECT FROM DATE MESSAGE-ID)] RFC822.SIZE)",
             )
             if status != "OK":
