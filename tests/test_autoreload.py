@@ -47,8 +47,12 @@ class _Tree(unittest.TestCase):
         if text is not None:
             p.write_text(text, encoding="utf-8")
         # Push the mtime forward: two writes inside one filesystem timestamp
-        # tick look identical to a stat-based watcher.
-        future = time.time() + 10
+        # tick look identical to a stat-based watcher. And strictly past the
+        # previous touch, not just past the clock: Windows' time.time() can
+        # return the same value for calls milliseconds apart, so two touches
+        # in a burst landed on one mtime and the burst test flaked there.
+        future = max(time.time() + 10, getattr(self, "_last_touch", 0.0) + 1)
+        self._last_touch = future
         os.utime(p, (future, future))
 
     def reloader(self, **kw) -> GatewayReloader:
