@@ -32,7 +32,8 @@ class TestProfile(unittest.TestCase):
         self.assertIn("(deny file-write*)", profile)
         self.assertIn("(deny network*)", profile)
         # The resolved path is what Seatbelt matches on.
-        self.assertIn(str(Path("/tmp/proj").resolve()), profile)
+        quoted = sandbox._quote_profile_path(str(Path("/tmp/proj").resolve()))
+        self.assertIn(f'(subpath "{quoted}")', profile)
 
     def test_network_can_be_granted(self) -> None:
         profile = sandbox.seatbelt_profile(Path("/tmp/proj"), network=True)

@@ -12,6 +12,7 @@ crash-looping process forever. So most of what's pinned here is the *refusals*.
 from __future__ import annotations
 
 import os
+import shutil
 import tempfile
 import time
 import unittest
@@ -258,30 +259,40 @@ class TestGatewayBusySignal(unittest.TestCase):
     live turn, restarts start eating replies."""
 
     def test_reports_a_held_turn_lock(self) -> None:
-        import tempfile as tf
-
         from cagentic import config
         from cagentic.agent import Agent
         from cagentic.gateway import Gateway
         from cagentic.ollama_client import OllamaClient
 
-        with tf.TemporaryDirectory() as cfgdir, tf.TemporaryDirectory() as root:
-            os.environ["XDG_CONFIG_HOME"] = cfgdir
-            cfg = config.load()
-            agent = Agent(
-                client=OllamaClient(host="http://localhost:11434"),
-                model="test",
-                root=Path(root),
-                config=cfg,
-            )
-            gw = Gateway(agent, cfg, port=0)
-            self.assertFalse(gw.is_busy())
-            gw._turn_lock.acquire()
-            try:
-                self.assertTrue(gw.is_busy())
-            finally:
-                gw._turn_lock.release()
-            self.assertFalse(gw.is_busy())
+        # mkdtemp + tolerant rmtree rather than TemporaryDirectory: on Windows
+        # the gateway's SQLite store keeps state.sqlite3 open, and cleanup
+        # raising there failed a test whose assertions had all passed.
+        cfgdir, root = tempfile.mkdtemp(), tempfile.mkdtemp()
+        for d in (cfgdir, root):
+            self.addCleanup(shutil.rmtree, d, ignore_errors=True)
+        # Restore the variable too — it used to leak into every later test.
+        previous = os.environ.get("XDG_CONFIG_HOME")
+        if previous is None:
+            self.addCleanup(os.environ.pop, "XDG_CONFIG_HOME", None)
+        else:
+            self.addCleanup(os.environ.__setitem__, "XDG_CONFIG_HOME", previous)
+        os.environ["XDG_CONFIG_HOME"] = cfgdir
+
+        cfg = config.load()
+        agent = Agent(
+            client=OllamaClient(host="http://localhost:11434"),
+            model="test",
+            root=Path(root),
+            config=cfg,
+        )
+        gw = Gateway(agent, cfg, port=0)
+        self.assertFalse(gw.is_busy())
+        gw._turn_lock.acquire()
+        try:
+            self.assertTrue(gw.is_busy())
+        finally:
+            gw._turn_lock.release()
+        self.assertFalse(gw.is_busy())
 
 
 if __name__ == "__main__":

@@ -82,7 +82,10 @@ def test_the_popup_offers_project_commands(tmp_path):
     cmds.mkdir(parents=True)
     (cmds / "ship.md").write_text("description: run the release checklist\n")
 
-    session, _ = _build_pt_session(persist_history=False, workspace_provider=lambda: tmp_path)
+    session, why = _build_pt_session(persist_history=False, workspace_provider=lambda: tmp_path)
+    if session is None:
+        # A headless Windows runner has no console for prompt_toolkit to bind.
+        pytest.skip(why)
     offered = {c.text for c in session.completer.get_completions(Document("/s"), None)}
     assert "/ship" in offered
 
@@ -99,7 +102,10 @@ def test_a_project_command_cannot_shadow_a_builtin(tmp_path):
     cmds.mkdir(parents=True)
     (cmds / "quit.md").write_text("description: hijack\n")
 
-    session, _ = _build_pt_session(persist_history=False, workspace_provider=lambda: tmp_path)
+    session, why = _build_pt_session(persist_history=False, workspace_provider=lambda: tmp_path)
+    if session is None:
+        # A headless Windows runner has no console for prompt_toolkit to bind.
+        pytest.skip(why)
     metas = [
         c.display_meta_text for c in session.completer.get_completions(Document("/quit"), None)
     ]

@@ -896,6 +896,12 @@ def t_grep(args: dict, ctx: ToolContext) -> str:
     from .gitignore import matcher_for
 
     ignores = matcher_for(ctx.root)
+    # Candidates come from the resolved `p`, so relativize against the
+    # resolved root too. Against the raw root, any workspace reached through a
+    # symlink (macOS /var -> /private/var) or a Windows 8.3 short name
+    # (RUNNER~1) failed is_relative_to and every hit came back as an absolute
+    # path, while rg, given the same input, printed relative ones.
+    root_real = ctx.root.resolve()
     matches: list[str] = []
     targets = [p] if p.is_file() else list(p.rglob("*")) if p.is_dir() else []
     scanned = 0
@@ -916,7 +922,7 @@ def t_grep(args: dict, ctx: ToolContext) -> str:
         if scanned > MAX_SCAN:
             matches.append(f"…[scanned {MAX_SCAN}+ files, stopping]")
             return _truncate("\n".join(matches))
-        rel = f.relative_to(ctx.root) if f.is_relative_to(ctx.root) else f
+        rel = f.relative_to(root_real) if f.is_relative_to(root_real) else f
         try:
             with f.open("r", errors="replace") as fp:
                 lines = fp.read().splitlines()

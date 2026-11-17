@@ -8,6 +8,7 @@ user happened to have `rg` installed — a latent bug, not just a missing featur
 
 from __future__ import annotations
 
+import re
 import shutil
 import tempfile
 import unittest
@@ -111,7 +112,7 @@ class TestSearchPathsAgree(_Tree):
             shutil.which = original
         del real_which
         return sorted(
-            {line.split(":")[0].rsplit("/", 1)[-1] for line in out.splitlines() if ":" in line}
+            {re.split(r"[\\/]", line.split(":")[0])[-1] for line in out.splitlines() if ":" in line}
         )
 
     def test_both_paths_skip_the_same_ignored_files(self) -> None:
@@ -129,6 +130,28 @@ class TestSearchPathsAgree(_Tree):
         self.assertEqual(python_path, ["app.py", "important.log"])
         if shutil.which("rg"):
             self.assertEqual(self._grep_files(use_rg=True), python_path)
+
+    def test_fallback_reports_relative_paths_under_a_non_canonical_root(self) -> None:
+        """The fallback relativized resolved files against the *unresolved*
+        root, so a workspace behind a symlink (macOS /var -> /private/var) or
+        a Windows short name (RUNNER~1) got absolute paths back."""
+        from cagentic.tools import ToolContext, t_grep
+
+        self.write("src/app.py", "NEEDLE here")
+        holder = tempfile.mkdtemp()
+        self.addCleanup(shutil.rmtree, holder, ignore_errors=True)
+        link = Path(holder) / "ws"
+        try:
+            link.symlink_to(self.root, target_is_directory=True)
+        except (OSError, NotImplementedError):
+            self.skipTest("symlinks unavailable")
+        original = shutil.which
+        shutil.which = lambda name: None if name == "rg" else original(name)
+        try:
+            out = t_grep({"pattern": "NEEDLE", "path": "."}, ToolContext(root=link))
+        finally:
+            shutil.which = original
+        self.assertEqual(out.split(":")[0], str(Path("src") / "app.py"))
 
 
 class TestGlobRespectsIgnores(_Tree):

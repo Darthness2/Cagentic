@@ -68,9 +68,9 @@ def test_gateway_assets_are_packaged_and_externalized():
     from importlib.resources import files
 
     assets = files("cagentic.gateway_assets")
-    assert "<!doctype html>" in assets.joinpath("index.html").read_text()
-    assert len(assets.joinpath("app.css").read_text()) > 10_000
-    assert len(assets.joinpath("app.js").read_text()) > 10_000
+    assert "<!doctype html>" in assets.joinpath("index.html").read_text(encoding="utf-8")
+    assert len(assets.joinpath("app.css").read_text(encoding="utf-8")) > 10_000
+    assert len(assets.joinpath("app.js").read_text(encoding="utf-8")) > 10_000
 
 
 def test_gateway_session_actors_isolate_project_state(tmp_path, monkeypatch):
