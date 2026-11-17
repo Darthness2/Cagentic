@@ -87,7 +87,7 @@ before relying on them:
 ```
 
 Ruff is line-length 100 with `E,F,W,I` and a deliberate ignore baseline
-(`E402,E501,E701,E702,E741,F401,F541`) for the older large modules. Mypy checks
+(`E402,E501,E701,E702,E741`) for the older large modules. Mypy checks
 the full `cagentic` package. **Run `ruff check` before pushing** — `F821`
 (undefined name) is *not* ignored, and a merge that drops a definition while
 keeping its call sites is exactly the failure this repo has hit before.

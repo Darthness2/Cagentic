@@ -640,8 +640,8 @@ def t_edit_file(args: dict, ctx: ToolContext) -> str:
             msg += f"\n\nClosest region:\n{hint}"
         if fail_count >= 2:
             msg += (
-                f"\n\nSwitch to replace_lines(path, start_line, end_line, new_content) "
-                f"— surgical line-range edit, no string matching."
+                "\n\nSwitch to replace_lines(path, start_line, end_line, new_content) "
+                "— surgical line-range edit, no string matching."
             )
         return msg
     if error:

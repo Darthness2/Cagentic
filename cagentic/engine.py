@@ -9,7 +9,7 @@ import json
 import logging
 import re
 import tempfile
-from concurrent.futures import ThreadPoolExecutor, as_completed
+from concurrent.futures import ThreadPoolExecutor
 from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Any, Callable, Iterator, Literal
@@ -31,7 +31,7 @@ from .services.compact import (
 from .services.transcript import record as record_transcript
 from .state import AppState
 from .tasks import TaskGraph, TaskKind, new_id
-from .tool_labels import describe_tool, label_pair
+from .tool_labels import label_pair
 from .tools import ToolContext, all_tool_schemas, dispatch
 
 _log = logging.getLogger(__name__)
