@@ -62,11 +62,10 @@ touch a file is welcome.
 
 Constraints worth knowing before you write the code:
 
-- **Python 3.9 is the floor** (`requires-python = ">=3.9"`, and CI runs it). No
-  `match`, no `X | Y` in runtime positions, no `dict[str, int]` without
-  `from __future__ import annotations` at the top — which most modules already
-  have. Mypy is pinned to `python_version = "3.10"` in `pyproject.toml`, so it
-  will *not* catch a 3.9 break for you; CI's 3.9 cell will.
+- **Python 3.10 is the floor** (`requires-python = ">=3.10"`, and CI runs it).
+  `match` and `X | Y` unions are fine; anything newer is not — no `tomllib`,
+  `ExceptionGroup`, `except*` or `typing.Self`. Mypy's `python_version =
+  "3.10"` matches the floor, so it flags most of these before CI does.
 - **Windows is a first-class target.** Guard with `sys.platform`/`os.name`, use
   `pathlib.Path`, don't assume `chmod`/`fchmod` works, and remember SQLite holds
   file handles Windows won't let you unlink.
@@ -105,7 +104,7 @@ fix. Name tests for the behaviour or invariant being protected.
   almost never to edit the test.
 
 CI runs lint and types once on 3.12, then the suite across
-`ubuntu/macos/windows` × `3.9/3.12/3.13` (minus the two oldest non-Linux cells).
+`ubuntu/macos/windows` × `3.12/3.13`, plus the 3.10 floor on Ubuntu.
 The extra platforms are there for real branches — the Windows shell hunt, the
 Seatbelt/bubblewrap sandbox backends, the POSIX-only shell pool, the
 launchd/systemd split — so a green Linux run is not a green build.

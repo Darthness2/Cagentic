@@ -6,6 +6,12 @@ publishes a release.
 
 ## Unreleased
 
+### Changed — Python 3.10 is now the minimum
+
+Python 3.9 reached end-of-life in October 2025, and GitHub's current Ubuntu
+runner no longer ships it, so CI could only test it on a pinned older image.
+`requires-python` is now `>=3.10`; the oldest-version CI job runs 3.10.
+
 ### Fixed — safety properties that were claimed but not true
 
 Found by re-auditing the session's own work rather than trusting its commit

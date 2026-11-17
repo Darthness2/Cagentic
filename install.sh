@@ -48,15 +48,15 @@ while [[ $# -gt 0 ]]; do
   esac
 done
 
-# ── Step 1: Check Python 3.9+ ─────────────────────────────────────────────────
+# ── Step 1: Check Python 3.10+ ────────────────────────────────────────────────
 info "Checking Python..."
 
 PYTHON=""
 for cmd in python3 python; do
   if command -v "$cmd" &>/dev/null; then
     # Ask Python, rather than comparing the halves of its version string:
-    # `major -ge 3 && minor -ge 9` rejects a future Python 4.0, whose minor is 0.
-    if "$cmd" -c "import sys; sys.exit(0 if sys.version_info >= (3, 9) else 1)" 2>/dev/null; then
+    # `major -ge 3 && minor -ge 10` rejects a future Python 4.0, whose minor is 0.
+    if "$cmd" -c "import sys; sys.exit(0 if sys.version_info >= (3, 10) else 1)" 2>/dev/null; then
       PYTHON="$cmd"
       break
     fi
@@ -64,7 +64,7 @@ for cmd in python3 python; do
 done
 
 if [[ -z "$PYTHON" ]]; then
-  die "Python 3.9+ is required but not found.\n  Install it from https://python.org or via your package manager:\n    macOS:   brew install python@3.12\n    Ubuntu:  sudo apt install python3.12\n    Fedora:  sudo dnf install python3.12"
+  die "Python 3.10+ is required but not found.\n  Install it from https://python.org or via your package manager:\n    macOS:   brew install python@3.12\n    Ubuntu:  sudo apt install python3.12\n    Fedora:  sudo dnf install python3.12"
 fi
 
 ok "Python $("$PYTHON" -c 'import sys; print("%d.%d.%d" % sys.version_info[:3])')"

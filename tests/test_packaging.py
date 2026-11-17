@@ -83,7 +83,8 @@ def test_ci_covers_the_platforms_the_code_branches_on():
     ci = (ROOT / ".github" / "workflows" / "ci.yml").read_text(encoding="utf-8")
     for target in ("ubuntu-latest", "macos-latest", "windows-latest"):
         assert target in ci, f"{target} is not in the matrix"
-    assert '"3.9"' in ci, "the oldest supported Python should be exercised"
+    floor = load_pyproject()["project"]["requires-python"].removeprefix(">=")
+    assert f'"{floor}"' in ci, f"the oldest supported Python ({floor}) should be exercised"
 
 
 def test_publishing_is_gated_on_a_tag_and_a_green_matrix():
