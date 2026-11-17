@@ -5,7 +5,7 @@ build-backend = "setuptools.build_meta"
 [project]
 name = "cagentic"
 dynamic = ["version"]
-description = "Your local personal AI assistant, powered by Ollama."
+description = "A local-first personal AI assistant and coding agent for Ollama, OpenAI and Anthropic."
 readme = "README.md"
 requires-python = ">=3.9"
 license = { text = "MIT" }
@@ -79,7 +79,7 @@ line-length = 100
 select = ["E", "F", "W", "I"]
 # Incremental baseline for compact legacy modules. Remove entries as files are
 # touched; CI still catches undefined names, syntax issues and all new tests.
-ignore = ["E402", "E501", "E701", "E702", "E741", "F401", "F541"]
+ignore = ["E402", "E501", "E701", "E702", "E741"]
 
 [tool.mypy]
 python_version = "3.10"

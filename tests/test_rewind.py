@@ -91,6 +91,9 @@ class TestTruncateToTurn(unittest.TestCase):
 
 
 class TestRevertEdits(unittest.TestCase):
+    # Fixtures are written as bytes: write_text translates "\n" to "\r\n" on
+    # Windows, while edits and reverts are verbatim, so the "before" text the
+    # assertions name would never have existed on disk there.
     def setUp(self) -> None:
         self._tmp = tempfile.TemporaryDirectory()
         self.root = Path(self._tmp.name)
@@ -104,7 +107,7 @@ class TestRevertEdits(unittest.TestCase):
             pass
 
     def test_reverts_an_edit_back_to_its_before_text(self) -> None:
-        (self.root / "a.py").write_text("one\ntwo\n", encoding="utf-8")
+        (self.root / "a.py").write_bytes("one\ntwo\n".encode())
         mark_file_seen(self.ctx, self.root / "a.py")
         t_edit_file({"path": "a.py", "old_string": "two", "new_string": "TWO"}, self.ctx)
         reverted, problems = _revert_edits(list(reversed(self.state.edit_history)))
@@ -119,7 +122,7 @@ class TestRevertEdits(unittest.TestCase):
     def test_two_edits_to_one_file_unwind_in_reverse(self) -> None:
         """Applying them oldest-first would restore the first edit's 'before'
         and then immediately overwrite it with the second's."""
-        (self.root / "a.py").write_text("v0\n", encoding="utf-8")
+        (self.root / "a.py").write_bytes("v0\n".encode())
         mark_file_seen(self.ctx, self.root / "a.py")
         t_edit_file({"path": "a.py", "old_string": "v0", "new_string": "v1"}, self.ctx)
         t_edit_file({"path": "a.py", "old_string": "v1", "new_string": "v2"}, self.ctx)
@@ -129,10 +132,10 @@ class TestRevertEdits(unittest.TestCase):
 
     def test_refuses_a_file_the_user_changed_afterwards(self) -> None:
         """Reverting would silently discard the user's own work."""
-        (self.root / "a.py").write_text("one\n", encoding="utf-8")
+        (self.root / "a.py").write_bytes("one\n".encode())
         mark_file_seen(self.ctx, self.root / "a.py")
         t_edit_file({"path": "a.py", "old_string": "one", "new_string": "ONE"}, self.ctx)
-        (self.root / "a.py").write_text("hand-edited by me\n", encoding="utf-8")
+        (self.root / "a.py").write_bytes("hand-edited by me\n".encode())
         mark_file_seen(self.ctx, self.root / "a.py")
         reverted, problems = _revert_edits(list(reversed(self.state.edit_history)))
         self.assertEqual(reverted, 0)
@@ -140,7 +143,7 @@ class TestRevertEdits(unittest.TestCase):
         self.assertEqual(_read_text_robust(self.root / "a.py"), "hand-edited by me\n")
 
     def test_reports_a_vanished_file_instead_of_recreating_it(self) -> None:
-        (self.root / "a.py").write_text("one\n", encoding="utf-8")
+        (self.root / "a.py").write_bytes("one\n".encode())
         mark_file_seen(self.ctx, self.root / "a.py")
         t_edit_file({"path": "a.py", "old_string": "one", "new_string": "ONE"}, self.ctx)
         (self.root / "a.py").unlink()

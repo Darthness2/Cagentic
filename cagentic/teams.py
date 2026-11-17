@@ -62,7 +62,7 @@ class Teammate:
         return asdict(self)
 
     def short(self) -> str:
-        bar = f"  [busy]" if self.busy else ""
+        bar = "  [busy]" if self.busy else ""
         skills = f"  {{{', '.join(self.skills)}}}" if self.skills else ""
         return f"{self.team}/{self.name}  ({self.id})  inbox={len(self.mailbox)}{bar}{skills}"
 

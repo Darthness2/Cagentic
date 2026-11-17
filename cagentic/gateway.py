@@ -34,7 +34,6 @@ from . import (
     personal_os,
     proactive,
     projects,
-    reminders,
     routines,
     sessions,
 )
@@ -58,7 +57,6 @@ from .workspaces import WorkspaceError, WorkspacePolicy
 
 if TYPE_CHECKING:
     from .discovery import ServiceAdvertiser
-    from .engine import QueryEngine
 
 _log = logging.getLogger(__name__)
 

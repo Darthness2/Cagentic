@@ -56,7 +56,7 @@ keeping its call sites is a failure this repo has actually shipped.
 Four-space indentation, type hints where practical, `snake_case` for modules,
 functions and variables, `PascalCase` for classes. Ruff: 100-character lines,
 rules `E`, `F`, `W`, `I`. The `ignore` list in `pyproject.toml`
-(`E402,E501,E701,E702,E741,F401,F541`) is an **incremental baseline** for the
+(`E402,E501,E701,E702,E741`) is an **incremental baseline** for the
 older large modules, not a target — don't add to it, and clearing entries as you
 touch a file is welcome.
 

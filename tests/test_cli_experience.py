@@ -553,6 +553,10 @@ def test_compact_save_failure_reports_possible_partial_state(monkeypatch, capsys
     assert "file and index may differ" in payload["error"]
 
 
+@pytest.mark.skipif(
+    sys.platform != "darwin" and not sys.platform.startswith("linux"),
+    reason="service management is macOS/Linux only; elsewhere the dry run refuses",
+)
 def test_service_dry_run_never_invokes_the_service_manager(monkeypatch, capsys):
     monkeypatch.setattr(
         service,
@@ -563,6 +567,15 @@ def test_service_dry_run_never_invokes_the_service_manager(monkeypatch, capsys):
     payload = json.loads(capsys.readouterr().out)
     assert payload["dry_run"] is True
     assert payload["action"] == "install"
+
+
+@pytest.mark.skipif(
+    sys.platform == "darwin" or sys.platform.startswith("linux"),
+    reason="covers the unsupported-platform branch",
+)
+def test_service_dry_run_refuses_on_unsupported_platforms(capsys):
+    assert cli.main(["--install-service", "--dry-run", "--json"]) == 1
+    assert json.loads(capsys.readouterr().out)["ok"] is False
 
 
 def test_service_definitions_use_the_public_serve_flag():
@@ -1554,7 +1567,9 @@ def test_gateway_mcp_command_lists_one_servers_tools(tmp_path, monkeypatch):
 
 
 def test_gateway_frontend_executes_retry_actions():
-    source = (Path(gateway_module.__file__).parent / "gateway_assets" / "app.js").read_text()
+    source = (Path(gateway_module.__file__).parent / "gateway_assets" / "app.js").read_text(
+        encoding="utf-8"
+    )
     assert "d.action.type==='retry'" in source
     assert "streamEdit(idx,String(d.action.message||''))" in source
 
@@ -1562,7 +1577,7 @@ def test_gateway_frontend_executes_retry_actions():
 def test_gateway_frontend_reindexes_users_after_history_truncation():
     source = (
         Path(__file__).resolve().parents[1] / "cagentic" / "gateway_assets" / "app.js"
-    ).read_text()
+    ).read_text(encoding="utf-8")
     assert "_userMsgIdx=thread.querySelectorAll('.msg-row.user').length" in source
 
 
